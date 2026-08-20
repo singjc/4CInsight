@@ -1,6 +1,6 @@
 use cfs_expression_merger::{
-    all_metrics, collaborator_default_metrics, inspect_kind, merge_wide, ColumnOrder, DataKind,
-    MergeConfig, Metric, MergeSummary,
+    all_metrics, collaborator_default_metrics, inspect_kind, merge_wide, sample_name, ColumnOrder,
+    DataKind, MergeConfig, Metric, MergeSummary,
 };
 use eframe::egui;
 use rfd::FileDialog;
@@ -95,6 +95,40 @@ impl eframe::App for MergeApp {
                 ui.label(format!("First: {}", first.file_name().unwrap_or_default().to_string_lossy()));
             }
 
+            if !self.files.is_empty() {
+                egui::CollapsingHeader::new(format!("Sample preview ({} samples)", self.files.len()))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        const PREVIEW_LIMIT: usize = 250;
+                        egui::ScrollArea::vertical()
+                            .max_height(220.0)
+                            .show(ui, |ui| {
+                                egui::Grid::new("sample_preview_grid")
+                                    .striped(true)
+                                    .num_columns(3)
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("#").strong());
+                                        ui.label(egui::RichText::new("Sample ID").strong());
+                                        ui.label(egui::RichText::new("Source workbook").strong());
+                                        ui.end_row();
+
+                                        for (idx, path) in self.files.iter().take(PREVIEW_LIMIT).enumerate() {
+                                            ui.label((idx + 1).to_string());
+                                            ui.monospace(sample_name(path));
+                                            ui.label(path.file_name().unwrap_or_default().to_string_lossy());
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                        if self.files.len() > PREVIEW_LIMIT {
+                            ui.label(format!(
+                                "Showing the first {PREVIEW_LIMIT} of {} samples.",
+                                self.files.len()
+                            ));
+                        }
+                    });
+            }
+
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label("Report type:");
@@ -144,19 +178,36 @@ impl eframe::App for MergeApp {
                 ));
             }
 
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Column order").strong());
             ui.horizontal(|ui| {
-                ui.label("Column order:");
-                ui.selectable_value(
+                ui.radio_value(
                     &mut self.order,
                     ColumnOrder::AdjacentBySample,
-                    "Sample A count, Sample A TPM, Sample B count, …",
+                    "By sample prefix",
                 );
-                ui.selectable_value(
+                ui.radio_value(
                     &mut self.order,
                     ColumnOrder::GroupedByMeasurement,
-                    "All counts, then all TPMs, …",
+                    "By value suffix",
                 );
             });
+            ui.label(match self.order {
+                ColumnOrder::AdjacentBySample => {
+                    "Sample-major: 4C_101 Raw Count, 4C_101 TPM, 4C_104 Raw Count, 4C_104 TPM, …"
+                }
+                ColumnOrder::GroupedByMeasurement => {
+                    "Value-major: 4C_101 Raw Count, 4C_104 Raw Count, …, 4C_101 TPM, 4C_104 TPM, …"
+                }
+            });
+
+            if !self.files.is_empty() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Output column preview").strong());
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.monospace(self.output_column_preview(18));
+                });
+            }
 
             ui.separator();
             ui.horizontal(|ui| {
@@ -230,8 +281,58 @@ impl MergeApp {
         match self.preset {
             Preset::Collaborator => collaborator_default_metrics(kind),
             Preset::All => all_metrics(kind),
-            Preset::Custom => self.metrics.clone(),
+            Preset::Custom => all_metrics(kind)
+                .into_iter()
+                .filter(|metric| self.metrics.contains(metric))
+                .collect(),
         }
+    }
+
+    fn output_column_preview(&self, max_columns: usize) -> String {
+        let kind = self.effective_kind();
+        let metrics = self.selected_metrics();
+        if self.files.is_empty() || metrics.is_empty() {
+            return "No output columns to preview.".to_string();
+        }
+
+        let mut columns: Vec<String> = match kind {
+            DataKind::Gene => vec!["Gene Symbol".to_string(), "NCBI Gene ID".to_string()],
+            DataKind::Transcript => {
+                vec!["Transcript Name".to_string(), "NCBI Gene ID".to_string()]
+            }
+            DataKind::Auto => vec!["Identifier".to_string(), "NCBI Gene ID".to_string()],
+        };
+
+        let sample_names: Vec<String> = self.files.iter().map(|p| sample_name(p)).collect();
+        match self.order {
+            ColumnOrder::AdjacentBySample => {
+                'outer_sample: for sample in &sample_names {
+                    for metric in &metrics {
+                        columns.push(format!("{sample} {}", metric.display_name()));
+                        if columns.len() >= max_columns {
+                            break 'outer_sample;
+                        }
+                    }
+                }
+            }
+            ColumnOrder::GroupedByMeasurement => {
+                'outer_metric: for metric in &metrics {
+                    for sample in &sample_names {
+                        columns.push(format!("{sample} {}", metric.display_name()));
+                        if columns.len() >= max_columns {
+                            break 'outer_metric;
+                        }
+                    }
+                }
+            }
+        }
+
+        let total_columns = 2usize.saturating_add(sample_names.len().saturating_mul(metrics.len()));
+        let mut preview = columns.join("  |  ");
+        if total_columns > columns.len() {
+            preview.push_str("  |  …");
+        }
+        preview
     }
 
     fn start_merge(&mut self) {

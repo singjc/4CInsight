@@ -625,7 +625,7 @@ fn write_wide_output(
     Ok(())
 }
 
-fn sample_name(path: &Path) -> String {
+pub fn sample_name(path: &Path) -> String {
     let stem = path
         .file_stem()
         .and_then(|x| x.to_str())
