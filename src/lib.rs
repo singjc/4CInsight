@@ -89,6 +89,12 @@ impl Metric {
             DataKind::Auto => true,
         }
     }
+
+    /// Whether this measurement can be represented as a continuous numeric value
+    /// in the built-in plotting/analysis views.
+    pub fn is_numeric(self) -> bool {
+        self != Self::IsExpressed
+    }
 }
 
 pub fn collaborator_default_metrics(kind: DataKind) -> Vec<Metric> {
@@ -139,6 +145,49 @@ pub struct MergeSummary {
     pub output: PathBuf,
     pub missing_rows: usize,
     pub unknown_rows: usize,
+}
+
+/// Searchable identifier metadata from the first workbook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityCatalogEntry {
+    /// Gene symbol for gene reports, transcript accession/name for transcript reports.
+    pub primary: String,
+    pub gene_id: String,
+    pub gene_symbol: String,
+}
+
+/// Per-sample summary used by the GUI QC distribution plots.
+#[derive(Debug, Clone)]
+pub struct SampleDistributionSummary {
+    pub sample: String,
+    pub n_total: usize,
+    pub n_values: usize,
+    pub n_missing: usize,
+    pub n_zero: usize,
+    pub mean: Option<f64>,
+    pub lower_whisker: Option<f64>,
+    pub q1: Option<f64>,
+    pub median: Option<f64>,
+    pub q3: Option<f64>,
+    pub upper_whisker: Option<f64>,
+}
+
+impl SampleDistributionSummary {
+    pub fn nonzero_fraction(&self) -> Option<f64> {
+        let observed = self.n_total.saturating_sub(self.n_missing);
+        if observed == 0 {
+            None
+        } else {
+            Some((observed.saturating_sub(self.n_zero)) as f64 / observed as f64)
+        }
+    }
+}
+
+/// A single value for one selected gene/transcript in one sample.
+#[derive(Debug, Clone)]
+pub struct EntityProfilePoint {
+    pub sample: String,
+    pub value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -623,6 +672,252 @@ fn write_wide_output(
 
     writer.flush()?;
     Ok(())
+}
+
+/// Read the first workbook into a compact searchable identifier catalogue.
+/// This does not retain measurement matrices in memory.
+pub fn load_entity_catalog(
+    path: &Path,
+    requested_kind: DataKind,
+) -> Result<Vec<EntityCatalogEntry>> {
+    let (headers, range) = read_sheet(path)?;
+    let schema = schema_from_headers(&headers, requested_kind)?;
+    let symbol_col = *schema
+        .columns
+        .get("Gene Symbol")
+        .ok_or_else(|| anyhow!("required column 'Gene Symbol' is missing"))?;
+    let gene_id_col = *schema
+        .columns
+        .get("NCBI Gene ID")
+        .ok_or_else(|| anyhow!("required column 'NCBI Gene ID' is missing"))?;
+    let transcript_col = schema.columns.get("Transcript Name").copied();
+
+    let mut out = Vec::with_capacity(range.height().saturating_sub(1));
+    for row in range.rows().skip(1) {
+        let gene_symbol = row.get(symbol_col).map(cell_text).unwrap_or_default();
+        let gene_id = row.get(gene_id_col).map(normalize_id).unwrap_or_default();
+        if gene_id.is_empty() {
+            continue;
+        }
+        let primary = match schema.kind {
+            DataKind::Gene => gene_symbol.clone(),
+            DataKind::Transcript => transcript_col
+                .and_then(|col| row.get(col))
+                .map(cell_text)
+                .unwrap_or_default(),
+            DataKind::Auto => unreachable!(),
+        };
+        if primary.is_empty() {
+            continue;
+        }
+        out.push(EntityCatalogEntry {
+            primary,
+            gene_id,
+            gene_symbol,
+        });
+    }
+    Ok(out)
+}
+
+/// Summarize the distribution of one numeric measurement independently for
+/// each sample. Workbooks are processed one at a time, so memory use is bounded
+/// by one workbook plus one numeric vector.
+pub fn summarize_sample_distributions<F>(
+    files: &[PathBuf],
+    requested_kind: DataKind,
+    metric: Metric,
+    ignore_zeros: bool,
+    mut progress: F,
+) -> Result<Vec<SampleDistributionSummary>>
+where
+    F: FnMut(usize, usize, &str),
+{
+    if files.is_empty() {
+        bail!("no input files were selected");
+    }
+    if !metric.is_numeric() {
+        bail!("'{}' is categorical and cannot be plotted as a numeric distribution", metric.display_name());
+    }
+
+    let mut summaries = Vec::with_capacity(files.len());
+    for (idx, path) in files.iter().enumerate() {
+        progress(
+            idx + 1,
+            files.len(),
+            &format!(
+                "Summarizing {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+        );
+
+        let (headers, range) = read_sheet(path)?;
+        let schema = schema_from_headers(&headers, requested_kind)?;
+        validate_required_columns(&schema, &[metric])?;
+        let col = *schema
+            .columns
+            .get(metric.input_header())
+            .ok_or_else(|| anyhow!("missing column {}", metric.input_header()))?;
+
+        let mut values = Vec::with_capacity(range.height().saturating_sub(1));
+        let mut n_total = 0usize;
+        let mut n_missing = 0usize;
+        let mut n_zero = 0usize;
+        let mut sum = 0.0f64;
+        let mut n_for_mean = 0usize;
+
+        for row in range.rows().skip(1) {
+            n_total += 1;
+            let cell = row.get(col).unwrap_or(&Data::Empty);
+            match numeric_measurement(cell, metric)? {
+                None => n_missing += 1,
+                Some(value) if !value.is_finite() => n_missing += 1,
+                Some(value) => {
+                    if value == 0.0 {
+                        n_zero += 1;
+                    }
+                    if !ignore_zeros || value != 0.0 {
+                        values.push(value);
+                        sum += value;
+                        n_for_mean += 1;
+                    }
+                }
+            }
+        }
+
+        values.sort_by(f64::total_cmp);
+        let stats = distribution_stats(&values);
+        summaries.push(SampleDistributionSummary {
+            sample: sample_name(path),
+            n_total,
+            n_values: values.len(),
+            n_missing,
+            n_zero,
+            mean: if n_for_mean == 0 {
+                None
+            } else {
+                Some(sum / n_for_mean as f64)
+            },
+            lower_whisker: stats.map(|x| x.0),
+            q1: stats.map(|x| x.1),
+            median: stats.map(|x| x.2),
+            q3: stats.map(|x| x.3),
+            upper_whisker: stats.map(|x| x.4),
+        });
+    }
+    Ok(summaries)
+}
+
+/// Extract one selected gene/transcript across all sample workbooks for a
+/// numeric measurement. Each workbook is opened and discarded independently.
+pub fn load_entity_profile<F>(
+    files: &[PathBuf],
+    requested_kind: DataKind,
+    metric: Metric,
+    primary: &str,
+    gene_id: &str,
+    mut progress: F,
+) -> Result<Vec<EntityProfilePoint>>
+where
+    F: FnMut(usize, usize, &str),
+{
+    if files.is_empty() {
+        bail!("no input files were selected");
+    }
+    if !metric.is_numeric() {
+        bail!("'{}' is categorical and cannot be plotted as a numeric profile", metric.display_name());
+    }
+
+    let wanted = EntityKey {
+        primary: primary.to_string(),
+        gene_id: gene_id.to_string(),
+    };
+    let mut out = Vec::with_capacity(files.len());
+
+    for (idx, path) in files.iter().enumerate() {
+        progress(
+            idx + 1,
+            files.len(),
+            &format!(
+                "Reading {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+        );
+
+        let (headers, range) = read_sheet(path)?;
+        let schema = schema_from_headers(&headers, requested_kind)?;
+        validate_required_columns(&schema, &[metric])?;
+        let metric_col = *schema
+            .columns
+            .get(metric.input_header())
+            .ok_or_else(|| anyhow!("missing column {}", metric.input_header()))?;
+
+        let mut found = None;
+        for row in range.rows().skip(1) {
+            let meta = entity_from_row(&schema, row)?;
+            if meta.key == wanted {
+                found = numeric_measurement(row.get(metric_col).unwrap_or(&Data::Empty), metric)?;
+                break;
+            }
+        }
+
+        out.push(EntityProfilePoint {
+            sample: sample_name(path),
+            value: found.filter(|v| v.is_finite()),
+        });
+    }
+
+    Ok(out)
+}
+
+fn numeric_measurement(cell: &Data, metric: Metric) -> Result<Option<f64>> {
+    let stored = parse_measurement(cell, metric)?;
+    match stored.tag {
+        0 => Ok(None),
+        1 => Ok(Some(stored.value)),
+        2 => Ok(Some(1.0)),
+        3 => Ok(Some(0.0)),
+        _ => Ok(None),
+    }
+}
+
+fn distribution_stats(values: &[f64]) -> Option<(f64, f64, f64, f64, f64)> {
+    if values.is_empty() {
+        return None;
+    }
+    let q1 = quantile_sorted(values, 0.25);
+    let median = quantile_sorted(values, 0.5);
+    let q3 = quantile_sorted(values, 0.75);
+    let iqr = q3 - q1;
+    let lower_fence = q1 - 1.5 * iqr;
+    let upper_fence = q3 + 1.5 * iqr;
+    let lower_whisker = values
+        .iter()
+        .copied()
+        .find(|v| *v >= lower_fence)
+        .unwrap_or(values[0]);
+    let upper_whisker = values
+        .iter()
+        .rev()
+        .copied()
+        .find(|v| *v <= upper_fence)
+        .unwrap_or(*values.last().unwrap());
+    Some((lower_whisker, q1, median, q3, upper_whisker))
+}
+
+fn quantile_sorted(values: &[f64], probability: f64) -> f64 {
+    debug_assert!(!values.is_empty());
+    if values.len() == 1 {
+        return values[0];
+    }
+    let position = (values.len() - 1) as f64 * probability.clamp(0.0, 1.0);
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    if lower == upper {
+        values[lower]
+    } else {
+        let weight = position - lower as f64;
+        values[lower] * (1.0 - weight) + values[upper] * weight
+    }
 }
 
 pub fn sample_name(path: &Path) -> String {
