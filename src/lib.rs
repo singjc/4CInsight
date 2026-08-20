@@ -1,9 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
 use calamine::{open_workbook, Data, Range, Reader, Xlsx};
-use csv::WriterBuilder;
+use csv::{ReaderBuilder, WriterBuilder};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -188,6 +188,27 @@ impl SampleDistributionSummary {
 pub struct EntityProfilePoint {
     pub sample: String,
     pub value: Option<f64>,
+}
+
+/// Header-level metadata for a previously merged TSV file.
+#[derive(Debug, Clone)]
+pub struct MergedDatasetInfo {
+    pub kind: DataKind,
+    pub samples: Vec<String>,
+    pub metrics: Vec<Metric>,
+}
+
+#[derive(Debug, Clone)]
+struct MergedValueColumn {
+    index: usize,
+    sample: String,
+    metric: Metric,
+}
+
+#[derive(Debug, Clone)]
+struct MergedSchema {
+    info: MergedDatasetInfo,
+    value_columns: Vec<MergedValueColumn>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -867,6 +888,310 @@ where
     }
 
     Ok(out)
+}
+
+
+/// Inspect a merged TSV produced by this tool without loading its data matrix.
+pub fn inspect_merged_tsv(path: &Path) -> Result<MergedDatasetInfo> {
+    Ok(read_merged_schema(path)?.info)
+}
+
+/// Load the searchable identifier catalogue from an existing merged TSV.
+/// This is much faster than reopening hundreds of Excel workbooks.
+pub fn load_entity_catalog_from_merged(path: &Path) -> Result<Vec<EntityCatalogEntry>> {
+    let schema = read_merged_schema(path)?;
+    let mut reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_path(path)
+        .with_context(|| format!("cannot open merged TSV {}", path.display()))?;
+
+    let mut out = Vec::new();
+    for record in reader.records() {
+        let record = record?;
+        let primary = record.get(0).unwrap_or("").trim().to_string();
+        let gene_id = record.get(1).unwrap_or("").trim().to_string();
+        if primary.is_empty() || gene_id.is_empty() {
+            continue;
+        }
+        let gene_symbol = if schema.info.kind == DataKind::Gene {
+            primary.clone()
+        } else {
+            String::new()
+        };
+        out.push(EntityCatalogEntry {
+            primary,
+            gene_id,
+            gene_symbol,
+        });
+    }
+    Ok(out)
+}
+
+/// Summarize one metric from a previously merged TSV. The TSV is processed in
+/// sample chunks sized to keep the numeric working set near TARGET_CHUNK_BYTES,
+/// so QC remains bounded-memory for large transcript matrices.
+pub fn summarize_merged_distributions<F>(
+    path: &Path,
+    metric: Metric,
+    ignore_zeros: bool,
+    mut progress: F,
+) -> Result<Vec<SampleDistributionSummary>>
+where
+    F: FnMut(usize, usize, &str),
+{
+    if !metric.is_numeric() {
+        bail!(
+            "'{}' is categorical and cannot be plotted as a numeric distribution",
+            metric.display_name()
+        );
+    }
+
+    let schema = read_merged_schema(path)?;
+    let columns: Vec<MergedValueColumn> = schema
+        .value_columns
+        .iter()
+        .filter(|column| column.metric == metric)
+        .cloned()
+        .collect();
+    if columns.is_empty() {
+        bail!(
+            "merged TSV does not contain '{}' columns",
+            metric.display_name()
+        );
+    }
+
+    let file = File::open(path)
+        .with_context(|| format!("cannot open merged TSV {}", path.display()))?;
+    let n_rows = BufReader::new(file)
+        .lines()
+        .skip(1)
+        .count()
+        .max(1);
+    let bytes_per_sample = n_rows.saturating_mul(std::mem::size_of::<f64>()).max(1);
+    let samples_per_chunk = (TARGET_CHUNK_BYTES / bytes_per_sample).clamp(1, 128);
+
+    let mut summaries = Vec::with_capacity(columns.len());
+    let total_samples = columns.len();
+    for chunk in columns.chunks(samples_per_chunk) {
+        let mut values: Vec<Vec<f64>> = chunk
+            .iter()
+            .map(|_| Vec::with_capacity(n_rows))
+            .collect();
+        let mut n_total = vec![0usize; chunk.len()];
+        let mut n_missing = vec![0usize; chunk.len()];
+        let mut n_zero = vec![0usize; chunk.len()];
+        let mut sums = vec![0.0f64; chunk.len()];
+        let mut n_for_mean = vec![0usize; chunk.len()];
+
+        let mut reader = ReaderBuilder::new()
+            .delimiter(b'\t')
+            .has_headers(true)
+            .from_path(path)
+            .with_context(|| format!("cannot open merged TSV {}", path.display()))?;
+
+        for record in reader.records() {
+            let record = record?;
+            for (local_idx, column) in chunk.iter().enumerate() {
+                n_total[local_idx] += 1;
+                let text = record.get(column.index).unwrap_or("").trim();
+                if text.is_empty() {
+                    n_missing[local_idx] += 1;
+                    continue;
+                }
+                let value = match text.parse::<f64>() {
+                    Ok(value) if value.is_finite() => value,
+                    Ok(_) => {
+                        n_missing[local_idx] += 1;
+                        continue;
+                    }
+                    Err(_) => {
+                        n_missing[local_idx] += 1;
+                        continue;
+                    }
+                };
+                if value == 0.0 {
+                    n_zero[local_idx] += 1;
+                }
+                if !ignore_zeros || value != 0.0 {
+                    values[local_idx].push(value);
+                    sums[local_idx] += value;
+                    n_for_mean[local_idx] += 1;
+                }
+            }
+        }
+
+        for (local_idx, column) in chunk.iter().enumerate() {
+            values[local_idx].sort_by(f64::total_cmp);
+            let stats = distribution_stats(&values[local_idx]);
+            summaries.push(SampleDistributionSummary {
+                sample: column.sample.clone(),
+                n_total: n_total[local_idx],
+                n_values: values[local_idx].len(),
+                n_missing: n_missing[local_idx],
+                n_zero: n_zero[local_idx],
+                mean: if n_for_mean[local_idx] == 0 {
+                    None
+                } else {
+                    Some(sums[local_idx] / n_for_mean[local_idx] as f64)
+                },
+                lower_whisker: stats.map(|x| x.0),
+                q1: stats.map(|x| x.1),
+                median: stats.map(|x| x.2),
+                q3: stats.map(|x| x.3),
+                upper_whisker: stats.map(|x| x.4),
+            });
+            progress(
+                summaries.len(),
+                total_samples,
+                &format!("Summarized {}", column.sample),
+            );
+        }
+    }
+
+    Ok(summaries)
+}
+
+/// Extract one gene/transcript profile directly from an existing merged TSV.
+/// Only a single TSV pass is required.
+pub fn load_entity_profile_from_merged(
+    path: &Path,
+    metric: Metric,
+    primary: &str,
+    gene_id: &str,
+) -> Result<Vec<EntityProfilePoint>> {
+    if !metric.is_numeric() {
+        bail!(
+            "'{}' is categorical and cannot be plotted as a numeric profile",
+            metric.display_name()
+        );
+    }
+
+    let schema = read_merged_schema(path)?;
+    let columns: Vec<MergedValueColumn> = schema
+        .value_columns
+        .iter()
+        .filter(|column| column.metric == metric)
+        .cloned()
+        .collect();
+    if columns.is_empty() {
+        bail!(
+            "merged TSV does not contain '{}' columns",
+            metric.display_name()
+        );
+    }
+
+    let mut reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_path(path)
+        .with_context(|| format!("cannot open merged TSV {}", path.display()))?;
+
+    for record in reader.records() {
+        let record = record?;
+        if record.get(0).unwrap_or("").trim() != primary
+            || record.get(1).unwrap_or("").trim() != gene_id
+        {
+            continue;
+        }
+
+        let mut out = Vec::with_capacity(columns.len());
+        for column in columns {
+            let value = record
+                .get(column.index)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .and_then(|text| text.parse::<f64>().ok())
+                .filter(|value| value.is_finite());
+            out.push(EntityProfilePoint {
+                sample: column.sample,
+                value,
+            });
+        }
+        return Ok(out);
+    }
+
+    bail!("identifier '{primary}' / Gene ID '{gene_id}' was not found in merged TSV")
+}
+
+fn read_merged_schema(path: &Path) -> Result<MergedSchema> {
+    let mut reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_path(path)
+        .with_context(|| format!("cannot open merged TSV {}", path.display()))?;
+    let headers = reader.headers()?.clone();
+    if headers.len() < 3 {
+        bail!("merged TSV must contain at least two identifier columns and one value column");
+    }
+
+    let first = headers.get(0).unwrap_or("").trim();
+    let second = headers.get(1).unwrap_or("").trim();
+    if second != "NCBI Gene ID" {
+        bail!("expected second merged TSV column to be 'NCBI Gene ID', found '{second}'");
+    }
+    let kind = match first {
+        "Gene Symbol" => DataKind::Gene,
+        "Transcript Name" => DataKind::Transcript,
+        other => bail!(
+            "could not detect merged TSV type from first column '{other}'; expected 'Gene Symbol' or 'Transcript Name'"
+        ),
+    };
+
+    let mut value_columns = Vec::new();
+    let mut samples = Vec::new();
+    let mut seen_samples = HashSet::new();
+    let mut seen_sample_metrics = HashSet::new();
+    let mut seen_metrics = HashSet::new();
+
+    for (index, header) in headers.iter().enumerate().skip(2) {
+        let header = header.trim();
+        let Some((sample, metric)) = parse_merged_value_header(kind, header) else {
+            continue;
+        };
+        if !seen_sample_metrics.insert((sample.clone(), metric)) {
+            bail!("duplicate merged TSV column for sample '{sample}' and '{}'", metric.display_name());
+        }
+        if seen_samples.insert(sample.clone()) {
+            samples.push(sample.clone());
+        }
+        seen_metrics.insert(metric);
+        value_columns.push(MergedValueColumn {
+            index,
+            sample,
+            metric,
+        });
+    }
+
+    if value_columns.is_empty() {
+        bail!("no recognized expression measurement columns were found in merged TSV");
+    }
+
+    let metrics = all_metrics(kind)
+        .into_iter()
+        .filter(|metric| seen_metrics.contains(metric))
+        .collect();
+    Ok(MergedSchema {
+        info: MergedDatasetInfo {
+            kind,
+            samples,
+            metrics,
+        },
+        value_columns,
+    })
+}
+
+fn parse_merged_value_header(kind: DataKind, header: &str) -> Option<(String, Metric)> {
+    for metric in all_metrics(kind) {
+        let suffix = format!(" {}", metric.display_name());
+        if let Some(sample) = header.strip_suffix(&suffix) {
+            let sample = sample.trim();
+            if !sample.is_empty() {
+                return Some((sample.to_string(), metric));
+            }
+        }
+    }
+    None
 }
 
 fn numeric_measurement(cell: &Data, metric: Metric) -> Result<Option<f64>> {

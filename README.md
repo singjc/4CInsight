@@ -4,32 +4,21 @@ A native Rust application for merging many per-sample RNA expression Excel repor
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
-## What v0.2 adds
+## What v0.3 adds
 
-The v0.2 desktop interface is reorganized into two workspaces:
+The v0.3 desktop interface keeps the **Merge & Export** and **Explore & QC** workspaces, but makes them much more practical for repeated use:
 
-- **Merge & Export** — input selection, sample preview, value/suffix checkboxes, column ordering, output preview, and bounded-memory export.
-- **Explore & QC** — per-sample distribution plots and searchable gene/transcript expression profiles.
+- **Remembered file-dialog directory** — the last directory is persisted across application launches and reused by the native file/folder dialogs.
+- **Drag and drop** — drop multiple `.xlsx` files, an entire folder, or a previously merged `.tsv` onto the application. A pasted path can also be added from the input card.
+- **Merged TSV as the preferred QC source** — after a successful merge, Explore & QC automatically points at the generated TSV instead of reopening every Excel workbook. A prior merged TSV can also be opened directly, without loading the original workbooks at all.
+- **Bounded-memory merged-file QC** — sample distribution summaries read the merged TSV in bounded sample chunks rather than building the full cohort matrix in memory.
+- **Scrollable identifier browser** — all genes/transcripts are visible in a virtualized table even before a search is entered. Search filters that table instead of hiding the catalogue entirely.
+- **Faster, clearer gene/transcript profiles** — a row-level **Plot** action and a prominent **Plot profile** button make selection explicit. With a merged TSV, a profile needs only one TSV scan instead of reopening every workbook.
+- **Two profile views** — preserve sample order or rank samples from low to high expression, with hover annotations and a collapsible sample/value table.
+- **Three sample-QC views** — distribution box plots, non-zero detection rate across samples, and median-abundance versus detection-rate scatter.
+- **Improved box-plot readability** — translucent boxes plus high-contrast median and mean markers make sample centers easier to compare.
 
-New GUI features include:
-
-- Explicit checkboxes for every available output value/suffix.
-- **Default**, **All**, and **Clear** selection shortcuts.
-- Hover help on interactive controls.
-- Column ordering by either:
-  - **sample prefix**: `4C_101 Raw Count`, `4C_101 TPM`, `4C_104 Raw Count`, `4C_104 TPM`, ...
-  - **value suffix**: `4C_101 Raw Count`, `4C_104 Raw Count`, ..., `4C_101 TPM`, `4C_104 TPM`, ...
-- Searchable sample preview.
-- Output-column preview before writing the matrix.
-- Per-sample box plots for a selected numeric measurement such as Raw Count, Total Reads, TPM, FPKM, CPM, or Percentile Rank.
-- Optional exclusion of zeros from box-plot statistics.
-- Optional `log10(value + 1)` display transformation.
-- QC summary table with median, mean, non-zero fraction, missing count, and number of plotted values.
-- Search by gene symbol, NCBI Gene ID, or transcript accession/name.
-- Interactive selected-gene/transcript profile across samples, with hover labels containing the identifier, sample prefix, measurement, and value.
-- Plotting and QC run on worker threads so the GUI remains responsive.
-
-`egui_plot` is used for the interactive plots.
+The output side still provides explicit value/suffix checkboxes, **Default / All / Clear** shortcuts, sample-prefix versus value-suffix column ordering, searchable sample preview, hover help, and an output-column preview.
 
 ## Supported report schemas
 
@@ -94,7 +83,7 @@ The first workbook establishes the canonical row index. Subsequent workbooks are
 
 This avoids the previous R pattern of retaining all workbooks/data frames, a large long-format object, and a wide pivoted object in memory simultaneously.
 
-The QC and selected-identifier plotting functions also process workbooks one at a time. Building a plot over hundreds of XLSX files can therefore take some time, but its memory use does not grow as a full cohort-wide expression matrix.
+Explore & QC now prefers a merged TSV whenever one is available. Selected-identifier profiles are extracted with a single TSV scan. Sample-distribution QC uses bounded sample chunks sized around the same working-memory target as the merger, so a large merged transcript table does not need to be loaded as one giant matrix. If no merged TSV exists, the application still falls back to processing the Excel workbooks one at a time.
 
 ## Row policy
 
@@ -150,14 +139,15 @@ cargo run --release --bin cfs-expression-merge-gui
 
 ### Explore & QC
 
-1. Choose a numeric measurement.
-2. Optionally ignore zeros for distribution statistics and/or use the log10 display transform.
-3. Click **Build sample QC** to compute one box plot per sample.
-4. Search for a gene/transcript and select an identifier.
-5. Click **Plot selected** to scan the selected measurement across all sample workbooks.
-6. Hover plotted points/boxes for annotations.
+1. Use the merged TSV created in the current session, click **Open merged TSV…** to load an older merged result, or explicitly fall back to the selected Excel workbooks. Direct TSV loading currently expects the collaborator-style headers generated by this tool (`Gene Symbol` or `Transcript Name`, `NCBI Gene ID`, then columns such as `4C_101 TPM`).
+2. Choose a numeric measurement available from that source.
+3. Optionally ignore zeros for distribution statistics and/or use the log10 display transform.
+4. Click **Build / refresh QC**, then switch among **Distributions**, **Detection rate**, and **Median vs detection**.
+5. Browse the full scrollable gene/transcript table or filter it with the search box.
+6. Click a row, then **Plot profile**, or use the row's **Plot** button directly.
+7. Switch the profile between **Sample order** and **Ranked** views and hover points for sample/value annotations.
 
-A selected gene/transcript has one value per sample, so the profile view uses individual sample points plus a connecting trend rather than pretending each sample has enough observations for its own gene-specific box plot. The per-sample box-plot panel instead summarizes the distribution of all genes/transcripts in that sample.
+A selected gene/transcript has one value per sample, so the profile view uses individual sample points rather than a misleading per-sample box plot. The sample-level distribution panel instead summarizes all genes/transcripts within each sample.
 
 ## CLI examples
 
@@ -217,10 +207,11 @@ A single executable cannot run unchanged on all three operating systems because 
 - Preflight schema validation for every workbook, not only the first report.
 - Duplicate sample-prefix detection and editable sample names.
 - `strict`, `union`, and `intersection` row policies.
-- Save/load user presets.
-- Metadata/group import so plots can compare biological groups rather than only individual sample prefixes.
-- Multi-gene selection with heatmaps or grouped box/violin plots.
-- Correlation matrix / sample-sample QC using a bounded or sampled representation.
+- Save/load named export and QC presets.
+- Metadata/group import so plots can compare biological groups, diagnoses, treatments, or batches.
+- Multi-gene selection with heatmaps and grouped box/violin plots.
+- Sample-sample correlation heatmap and PCA using the merged TSV with a bounded/sampled representation.
+- Highly-variable-gene ranking and top-variable-gene browser.
 - Optional XLSX export for modest-sized matrices.
 - Long-format export matching the legacy R workflow.
 - A detailed QA report listing schema mismatches, missing/extra rows, and duplicate identifiers per sample.
