@@ -1,8 +1,24 @@
-# CFS Expression Merger
+# CFS Cohort Explorer
 
-A native Rust application for merging many per-sample RNA expression Excel reports into collaborator-friendly wide tables without retaining the entire cohort in RAM.
+A native Rust application for memory-bounded RNA expression merging plus metadata-driven cohort exploration across gene expression, BCR, BCR isotypes, and additional immune data types.
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
+
+## What v0.4 adds
+
+v0.4 introduces a new **Cohort Analysis** workspace while preserving the existing Merge & Export and Explore & QC workflows.
+
+- **Recursive project scan** detects gene expression, transcript expression, BCR heavy-chain, BCR isotype, TCR alpha, TCR beta, immune-infiltrate, and merged expression files.
+- **Generic sample metadata loading** from XLSX/CSV/TSV/TXT. `4C_ID` is selected automatically when present and the ID column can be changed in the GUI.
+- **Cross-modality mapping audit** reports matched, unmatched, ambiguous and duplicate sample/file combinations without aborting the analysis.
+- **Built-in exploratory comparison presets** implement the current study questions: all HYP versus `True_HC`, and `HYP+ME/CFS` versus ME/CFS-only.
+- **Gene-expression biomarker screen** uses the merged TPM matrix, Mann–Whitney U tests on `log2(TPM+1)`, Benjamini–Hochberg FDR, Cliff's delta, detection fractions and a simple log2 mean fold-change effect. Results are shown as an interactive volcano-style plot and ranked table.
+- **BCR first-pass comparison** calculates total clone count, unique clones, Shannon/Simpson diversity, normalized clonality, effective clonotype count, top-clone fraction, weighted mean CDR3 amino-acid length, and heavy-chain isotype/V/D/J usage. Group tests use Mann–Whitney U, BH correction and Cliff's delta.
+- **Dedicated BCR-isotype comparison** tests the `Isotype Read Fraction` values from the composition workbooks.
+- **Fault-tolerant modality execution** means a missing/unsupported modality or a malformed individual BCR workbook is reported while other available analyses continue.
+- TCR and immune-infiltrate files are already detected and included in the sample coverage audit; their full comparison modules are planned for the next repertoire-analysis iteration.
+
+The v0.4 cohort tests are deliberately an **exploratory first pass**. They do not yet adjust for repeated sampling, family structure, age, sex, ethnicity or other covariates.
 
 ## What v0.3 adds
 
@@ -148,6 +164,18 @@ cargo run --release --bin cfs-expression-merge-gui
 7. Switch the profile between **Sample order** and **Ranked** views and hover points for sample/value annotations.
 
 A selected gene/transcript has one value per sample, so the profile view uses individual sample points rather than a misleading per-sample box plot. The sample-level distribution panel instead summarizes all genes/transcripts within each sample.
+
+### Cohort Analysis
+
+1. Choose the top-level cohort project folder. The app recursively detects supported modalities and existing merged expression tables.
+2. Load the sample metadata workbook/table; `4C_ID` is preferred automatically when available.
+3. Review the mapping/coverage audit. Unmatched, ambiguous, metadata-only, and duplicate entries remain visible and do not abort the project.
+4. Choose one of the current study presets: **HYP vs True_HC** or **HYP+ME/CFS vs ME/CFS-only**.
+5. Select Gene expression, BCR, and/or BCR isotype. Gene expression defaults to TPM but can use FPKM, CPM, or Raw Count if those suffixes exist in the merged table.
+6. Run the exploratory comparison. Each modality runs independently so a missing or malformed input does not prevent the others from completing.
+7. Inspect the interactive result panels and use **Save result tables…** to export the mapping audit and statistical tables as TSV files.
+
+The cohort analysis is intentionally exploratory. Longitudinal/repeated samples are currently treated as observations, matching the first-pass study request; covariate-aware and repeated-measures models belong in a later rigorous-analysis mode.
 
 ## CLI examples
 

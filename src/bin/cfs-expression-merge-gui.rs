@@ -1,3 +1,10 @@
+use cfs_expression_merger::cohort::{
+    build_comparison, build_mapping, load_metadata, run_bcr_comparison, run_bcr_isotype_comparison,
+    run_gene_comparison, scan_project, write_bcr_isotype_values, write_bcr_sample_summaries,
+    write_feature_tests, write_mapping_audit, BcrComparisonResult, BcrIsotypeComparisonResult,
+    CohortComparison, CohortMapping, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
+    MappingStatus, MetadataTable, ProjectScan, CohortModality,
+};
 use cfs_expression_merger::{
     all_metrics, collaborator_default_metrics, inspect_kind, inspect_merged_tsv, load_entity_catalog,
     load_entity_catalog_from_merged, load_entity_profile, load_entity_profile_from_merged,
@@ -22,7 +29,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "CFS Expression Merger",
+        "CFS Cohort Explorer",
         options,
         Box::new(|cc| Ok(Box::new(MergeApp::new(cc)))),
     )
@@ -32,6 +39,7 @@ fn main() -> eframe::Result {
 enum AppTab {
     Merge,
     Explore,
+    Cohort,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +67,24 @@ enum ProfileView {
     Ranked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CohortResultView {
+    Gene,
+    Bcr,
+    BcrIsotype,
+}
+
+#[derive(Debug, Clone)]
+struct CohortAnalysisBundle {
+    comparison: CohortComparison,
+    gene: Option<GeneComparisonResult>,
+    gene_error: Option<String>,
+    bcr: Option<BcrComparisonResult>,
+    bcr_error: Option<String>,
+    bcr_isotype: Option<BcrIsotypeComparisonResult>,
+    bcr_isotype_error: Option<String>,
+}
+
 enum MergeWorkerMessage {
     Progress(usize, usize, String),
     Done(Result<MergeSummary, String>),
@@ -69,6 +95,11 @@ enum AnalysisWorkerMessage {
     CatalogDone(Result<Vec<EntityCatalogEntry>, String>),
     DistributionDone(Result<Vec<SampleDistributionSummary>, String>),
     ProfileDone(Result<Vec<EntityProfilePoint>, String>),
+}
+ 
+enum CohortWorkerMessage {
+    Progress(f32, String),
+    Done(CohortAnalysisBundle),
 }
 
 struct MergeApp {
@@ -107,6 +138,23 @@ struct MergeApp {
     selected_entity: Option<usize>,
     distributions: Vec<SampleDistributionSummary>,
     profile: Vec<EntityProfilePoint>,
+
+    cohort_root: Option<PathBuf>,
+    cohort_scan: Option<ProjectScan>,
+    cohort_metadata_path: Option<PathBuf>,
+    cohort_metadata: Option<MetadataTable>,
+    cohort_mapping: Option<CohortMapping>,
+    cohort_preset: ComparisonPreset,
+    cohort_status: String,
+    cohort_progress: f32,
+    cohort_running: bool,
+    cohort_receiver: Option<Receiver<CohortWorkerMessage>>,
+    cohort_results: Option<CohortAnalysisBundle>,
+    cohort_result_view: CohortResultView,
+    cohort_run_gene: bool,
+    cohort_gene_metric: Metric,
+    cohort_run_bcr: bool,
+    cohort_run_bcr_isotype: bool,
 }
 
 impl MergeApp {
@@ -161,6 +209,23 @@ impl MergeApp {
             selected_entity: None,
             distributions: Vec::new(),
             profile: Vec::new(),
+
+            cohort_root: None,
+            cohort_scan: None,
+            cohort_metadata_path: None,
+            cohort_metadata: None,
+            cohort_mapping: None,
+            cohort_preset: ComparisonPreset::HypVsTrueHc,
+            cohort_status: "Choose the dataset root to scan all supported data types.".to_string(),
+            cohort_progress: 0.0,
+            cohort_running: false,
+            cohort_receiver: None,
+            cohort_results: None,
+            cohort_result_view: CohortResultView::Gene,
+            cohort_run_gene: true,
+            cohort_gene_metric: Metric::Tpm,
+            cohort_run_bcr: true,
+            cohort_run_bcr_isotype: true,
         }
     }
 }
@@ -169,6 +234,7 @@ impl eframe::App for MergeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_merge_worker();
         self.poll_analysis_worker();
+        self.poll_cohort_worker();
         let ctx = ui.ctx().clone();
         self.handle_dropped_paths(&ctx);
 
@@ -183,10 +249,11 @@ impl eframe::App for MergeApp {
                 .show(ui, |ui| match self.active_tab {
                     AppTab::Merge => self.render_merge_tab(ui),
                     AppTab::Explore => self.render_explore_tab(ui),
+                    AppTab::Cohort => self.render_cohort_tab(ui),
                 });
         });
 
-        if self.running || self.analysis_running {
+        if self.running || self.analysis_running || self.cohort_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
@@ -203,33 +270,40 @@ impl MergeApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
-                            egui::RichText::new("CFS Expression Merger")
+                            egui::RichText::new("CFS Cohort Explorer")
                                 .size(24.0)
                                 .strong()
                                 .color(accent),
                         );
                         ui.label(
                             egui::RichText::new(
-                                "Memory-bounded RNA expression merging, preview, QC, and exploration",
+                                "RNA merging plus metadata-driven multi-modal cohort analysis",
                             )
                             .weak(),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let kind = if self.active_tab == AppTab::Explore {
-                            self.analysis_kind()
-                        } else {
-                            self.effective_kind()
-                        };
-                        let kind_text = match kind {
-                            DataKind::Gene => "Gene data",
-                            DataKind::Transcript => "Transcript data",
-                            DataKind::Auto => "Report type unknown",
-                        };
-                        let sample_count = if self.active_tab == AppTab::Explore {
-                            self.analysis_sample_count()
-                        } else {
-                            self.files.len()
+                        let (kind_text, sample_count) = match self.active_tab {
+                            AppTab::Explore => {
+                                let text = match self.analysis_kind() {
+                                    DataKind::Gene => "Gene data",
+                                    DataKind::Transcript => "Transcript data",
+                                    DataKind::Auto => "Report type unknown",
+                                };
+                                (text, self.analysis_sample_count())
+                            }
+                            AppTab::Merge => {
+                                let text = match self.effective_kind() {
+                                    DataKind::Gene => "Gene data",
+                                    DataKind::Transcript => "Transcript data",
+                                    DataKind::Auto => "Report type unknown",
+                                };
+                                (text, self.files.len())
+                            }
+                            AppTab::Cohort => (
+                                "Cohort project",
+                                self.cohort_scan.as_ref().map(|scan| scan.unique_samples()).unwrap_or(0),
+                            ),
                         };
                         ui.label(egui::RichText::new(kind_text).strong());
                         ui.separator();
@@ -255,6 +329,12 @@ impl MergeApp {
                 if self.analysis_source_available() && self.entity_catalog.is_empty() && !self.analysis_running {
                     self.start_catalog_load();
                 }
+            }
+            let cohort = ui
+                .selectable_label(self.active_tab == AppTab::Cohort, "Cohort Analysis")
+                .on_hover_text("Scan a complete cohort dataset, join sample metadata, audit unmatched samples, and run exploratory gene/BCR/BCR-isotype comparisons.");
+            if cohort.clicked() {
+                self.active_tab = AppTab::Cohort;
             }
         });
     }
@@ -1418,6 +1498,1037 @@ impl MergeApp {
                         });
                 });
         });
+    }
+
+
+    fn render_cohort_tab(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "1. Cohort project & metadata", |this, ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Scan the dataset root once. The app detects gene/transcript expression, BCR, BCR isotype, TCR alpha/beta, immune-infiltrate files, merged expression tables, and metadata candidates.",
+                )
+                .weak(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                let choose = ui
+                    .add_enabled(!this.cohort_running, egui::Button::new("Choose project folder…"))
+                    .on_hover_text("Choose the top-level cohort directory. Subdirectories are scanned recursively; unsupported files are ignored.");
+                if choose.clicked() {
+                    let mut dialog = FileDialog::new();
+                    if let Some(dir) = &this.last_directory {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(root) = dialog.pick_folder() {
+                        this.remember_directory_for(&root);
+                        this.load_cohort_project(root);
+                    }
+                }
+                if let Some(root) = this.cohort_root.clone() {
+                    ui.monospace(root.display().to_string());
+                    let root_clone = root.clone();
+                    let rescan = ui
+                        .add_enabled(!this.cohort_running, egui::Button::new("Rescan"))
+                        .on_hover_text("Rescan the same project root after new files or merged outputs have been added.");
+                    if rescan.clicked() {
+                        this.load_cohort_project(root_clone);
+                    }
+                }
+            });
+
+            if let Some(scan) = this.cohort_scan.clone() {
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    for modality in [
+                        CohortModality::GeneExpression,
+                        CohortModality::TranscriptExpression,
+                        CohortModality::Bcr,
+                        CohortModality::BcrIsotype,
+                        CohortModality::TcrAlpha,
+                        CohortModality::TcrBeta,
+                        CohortModality::ImmuneInfiltrate,
+                    ] {
+                        ui.label(format!(
+                            "{}: {}",
+                            modality.display_name(),
+                            scan.count_modality(modality)
+                        ));
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!(
+                        "Merged gene TSV: {}",
+                        scan.merged_gene_tsv
+                            .as_ref()
+                            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                            .unwrap_or_else(|| "not found".to_string())
+                    ));
+                    ui.separator();
+                    ui.label(format!(
+                        "Merged transcript TSV: {}",
+                        scan.merged_transcript_tsv
+                            .as_ref()
+                            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                            .unwrap_or_else(|| "not found".to_string())
+                    ));
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    let choose_meta = ui
+                        .add_enabled(!this.cohort_running, egui::Button::new("Choose metadata…"))
+                        .on_hover_text("Load cohort metadata from .xlsx, .csv, .tsv, or .txt. 4C_ID is used automatically when present, and can be changed below.");
+                    if choose_meta.clicked() {
+                        let mut dialog = FileDialog::new()
+                            .add_filter("Metadata", &["xlsx", "csv", "tsv", "txt"]);
+                        if let Some(dir) = &this.last_directory {
+                            dialog = dialog.set_directory(dir);
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            this.remember_directory_for(&path);
+                            this.load_cohort_metadata_path(path);
+                        }
+                    }
+                    if let Some(path) = &this.cohort_metadata_path {
+                        ui.monospace(
+                            path.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                        );
+                    } else if !scan.metadata_candidates.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} metadata candidate(s) detected",
+                                scan.metadata_candidates.len()
+                            ))
+                            .weak(),
+                        );
+                    }
+                });
+
+                if this.cohort_metadata.is_some() {
+                    let mut selected_id = this
+                        .cohort_metadata
+                        .as_ref()
+                        .map(|m| m.id_column.clone())
+                        .unwrap_or_default();
+                    let columns = this
+                        .cohort_metadata
+                        .as_ref()
+                        .map(|m| m.columns.clone())
+                        .unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.label("Sample ID column:")
+                            .on_hover_text("This metadata column is matched to sample IDs parsed from filenames. Matching is case-insensitive and ignores punctuation such as '-' and '_'.");
+                        egui::ComboBox::from_id_salt("cohort_metadata_id_column")
+                            .selected_text(&selected_id)
+                            .show_ui(ui, |ui| {
+                                for col in &columns {
+                                    ui.selectable_value(&mut selected_id, col.clone(), col);
+                                }
+                            });
+                    });
+                    let current_id = this
+                        .cohort_metadata
+                        .as_ref()
+                        .map(|m| m.id_column.clone())
+                        .unwrap_or_default();
+                    if selected_id != current_id {
+                        if let Some(meta) = &mut this.cohort_metadata {
+                            meta.id_column = selected_id;
+                        }
+                        this.rebuild_cohort_mapping();
+                    }
+                }
+            } else {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("No cohort project loaded.").weak());
+            }
+        });
+
+        ui.add_space(10.0);
+        self.render_cohort_mapping_card(ui);
+        ui.add_space(10.0);
+        self.render_cohort_comparison_card(ui);
+        if self.cohort_results.is_some() {
+            ui.add_space(10.0);
+            self.render_cohort_results_card(ui);
+        }
+    }
+
+    fn render_cohort_mapping_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "2. Sample mapping & coverage audit", |this, ui| {
+            let Some(mapping) = &this.cohort_mapping else {
+                ui.label(
+                    egui::RichText::new(
+                        "Load both a project and metadata to audit cross-modality sample mapping.",
+                    )
+                    .weak(),
+                );
+                return;
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Matched files: {}", mapping.matched_files));
+                ui.separator();
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 190, 90),
+                    format!("Unmatched files: {}", mapping.unmatched_files),
+                );
+                ui.separator();
+                ui.colored_label(
+                    egui::Color32::from_rgb(225, 120, 110),
+                    format!("Ambiguous files: {}", mapping.ambiguous_files),
+                );
+                ui.separator();
+                ui.label(format!("Metadata-only samples: {}", mapping.metadata_only_samples));
+                ui.separator();
+                ui.label(format!("Audit rows: {}", mapping.rows.len()));
+            });
+            ui.label(
+                egui::RichText::new(
+                    "Unmatched/ambiguous samples are reported and skipped only for metadata-defined comparisons; they do not abort the project scan or other usable analyses.",
+                )
+                .small()
+                .weak(),
+            );
+
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .show_rows(ui, 24.0, mapping.rows.len(), |ui, range| {
+                    egui::Grid::new("cohort_mapping_grid")
+                        .striped(true)
+                        .num_columns(12)
+                        .show(ui, |ui| {
+                            if range.start == 0 {
+                                for heading in [
+                                    "Sample",
+                                    "Map",
+                                    "Phenotype",
+                                    "HYP",
+                                    "Gene",
+                                    "Tx",
+                                    "BCR",
+                                    "Iso",
+                                    "TCRα",
+                                    "TCRβ",
+                                    "Immune",
+                                    "Notes",
+                                ] {
+                                    ui.label(egui::RichText::new(heading).strong());
+                                }
+                                ui.end_row();
+                            }
+                            for row_idx in range {
+                                let row = &mapping.rows[row_idx];
+                                ui.monospace(&row.sample_id);
+                                match row.mapping_status {
+                                    MappingStatus::Matched => {
+                                        ui.colored_label(egui::Color32::from_rgb(105, 190, 130), "matched");
+                                    }
+                                    MappingStatus::Unmatched => {
+                                        ui.colored_label(egui::Color32::from_rgb(230, 190, 90), "unmatched");
+                                    }
+                                    MappingStatus::Ambiguous => {
+                                        ui.colored_label(egui::Color32::from_rgb(225, 120, 110), "ambiguous");
+                                    }
+                                    MappingStatus::MetadataOnly => {
+                                        ui.colored_label(egui::Color32::from_rgb(130, 165, 220), "metadata only");
+                                    }
+                                }
+                                ui.label(&row.phenotype);
+                                ui.label(&row.hyp);
+                                for modality in [
+                                    CohortModality::GeneExpression,
+                                    CohortModality::TranscriptExpression,
+                                    CohortModality::Bcr,
+                                    CohortModality::BcrIsotype,
+                                    CohortModality::TcrAlpha,
+                                    CohortModality::TcrBeta,
+                                    CohortModality::ImmuneInfiltrate,
+                                ] {
+                                    let n = row.counts.get(&modality).copied().unwrap_or(0);
+                                    if n > 0 {
+                                        ui.label(n.to_string());
+                                    } else {
+                                        ui.label("·");
+                                    }
+                                }
+                                let duplicates: Vec<_> = row
+                                    .counts
+                                    .iter()
+                                    .filter(|(_, n)| **n > 1)
+                                    .map(|(m, n)| format!("{}×{}", m.display_name(), n))
+                                    .collect();
+                                ui.label(if duplicates.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("duplicate: {}", duplicates.join(", "))
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    }
+
+    fn render_cohort_comparison_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "3. Exploratory biomarker comparison", |this, ui| {
+            ui.label(
+                egui::RichText::new(
+                    "This first-pass analysis intentionally uses all available mapped samples, including longitudinal samples, without covariate or repeated-measures adjustment.",
+                )
+                .weak(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Comparison:");
+                let old = this.cohort_preset;
+                ui.selectable_value(
+                    &mut this.cohort_preset,
+                    ComparisonPreset::HypVsTrueHc,
+                    "HYP vs True_HC",
+                )
+                .on_hover_text("All HYP=yes metadata rows (hEDS/HSD with or without ME/CFS) versus Phenotype=True_HC.");
+                ui.selectable_value(
+                    &mut this.cohort_preset,
+                    ComparisonPreset::HypMecfsVsMecfsOnly,
+                    "HYP+ME/CFS vs ME/CFS-only",
+                )
+                .on_hover_text("Phenotype=HYP+ME/CFS versus Phenotype=ME/CFS and HYP not marked yes.");
+                if old != this.cohort_preset {
+                    this.cohort_results = None;
+                }
+            });
+            ui.label(
+                egui::RichText::new(this.cohort_preset.description())
+                    .small()
+                    .weak(),
+            );
+
+            if let Some(meta) = &this.cohort_metadata {
+                match build_comparison(meta, this.cohort_preset) {
+                    Ok(comp) => {
+                        ui.label(format!(
+                            "Metadata definition: {} case rows / {} control rows",
+                            comp.case_metadata_rows, comp.control_metadata_rows
+                        ));
+                    }
+                    Err(e) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(225, 120, 110),
+                            format!("Comparison cannot be built: {e:#}"),
+                        );
+                    }
+                }
+            }
+
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Analyses:");
+                ui.checkbox(&mut this.cohort_run_gene, "Gene expression")
+                    .on_hover_text("Tests every gene using merged TPM columns. Mann-Whitney U on log2(TPM+1), BH FDR, Cliff's delta, and log2 mean fold change are reported.");
+                ui.checkbox(&mut this.cohort_run_bcr, "BCR")
+                    .on_hover_text("Summarizes clone count, diversity/clonality, top-clone fraction, weighted CDR3 length, and BCR isotype/V/D/J usage from heavy-chain reports.");
+                ui.checkbox(&mut this.cohort_run_bcr_isotype, "BCR isotype")
+                    .on_hover_text("Compares the dedicated IGH isotype-composition fractions across groups.");
+            });
+            if this.cohort_run_gene {
+                ui.horizontal(|ui| {
+                    ui.label("Gene value:");
+                    egui::ComboBox::from_id_salt("cohort_gene_metric")
+                        .selected_text(this.cohort_gene_metric.display_name())
+                        .show_ui(ui, |ui| {
+                            for metric in [Metric::Tpm, Metric::Fpkm, Metric::Cpm, Metric::RawCount] {
+                                ui.selectable_value(
+                                    &mut this.cohort_gene_metric,
+                                    metric,
+                                    metric.display_name(),
+                                );
+                            }
+                        });
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "TPM is the default for this simple exploratory screen. Raw-count modeling with DESeq2/edgeR-style dispersion estimation is not being claimed here.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
+            ui.label(
+                egui::RichText::new(
+                    "TCR alpha/beta and immune-infiltrate files are already detected and audited in this version; their comparison modules are the next extension.",
+                )
+                .small()
+                .weak(),
+            );
+
+            let ready = this.cohort_scan.is_some()
+                && this.cohort_metadata.is_some()
+                && !this.cohort_running
+                && (this.cohort_run_gene || this.cohort_run_bcr || this.cohort_run_bcr_isotype);
+            let run = ui
+                .add_enabled(ready, egui::Button::new("Run exploratory comparison"))
+                .on_hover_text("Run each selected modality independently. If one input type is absent or cannot be analyzed, the remaining modalities continue and the failure is reported.");
+            if run.clicked() {
+                this.start_cohort_analysis();
+            }
+
+            if this.cohort_running {
+                ui.add(
+                    egui::ProgressBar::new(this.cohort_progress)
+                        .show_percentage()
+                        .animate(true),
+                );
+            }
+            ui.label(&this.cohort_status);
+        });
+    }
+
+    fn render_cohort_results_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "4. Comparison results", |this, ui| {
+            let Some(bundle) = this.cohort_results.clone() else { return; };
+            ui.label(
+                egui::RichText::new(format!(
+                    "{}: {} vs {}",
+                    bundle.comparison.name,
+                    bundle.comparison.case_label,
+                    bundle.comparison.control_label
+                ))
+                .strong(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                let save = ui
+                    .button("Save result tables…")
+                    .on_hover_text("Export the mapping audit and all available comparison tables as TSV files. Plots remain interactive in the app.");
+                if save.clicked() {
+                    let mut dialog = FileDialog::new();
+                    if let Some(root) = &this.cohort_root {
+                        dialog = dialog.set_directory(root);
+                    }
+                    if let Some(folder) = dialog.pick_folder() {
+                        match this.save_cohort_result_tables(&folder) {
+                            Ok(path) => {
+                                this.cohort_status = format!("Saved comparison tables to {}", path.display());
+                            }
+                            Err(e) => {
+                                this.cohort_status = format!("Could not save comparison tables: {e:#}");
+                            }
+                        }
+                    }
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(
+                    &mut this.cohort_result_view,
+                    CohortResultView::Gene,
+                    "Gene expression",
+                );
+                ui.selectable_value(&mut this.cohort_result_view, CohortResultView::Bcr, "BCR");
+                ui.selectable_value(
+                    &mut this.cohort_result_view,
+                    CohortResultView::BcrIsotype,
+                    "BCR isotype",
+                );
+            });
+            ui.separator();
+
+            match this.cohort_result_view {
+                CohortResultView::Gene => {
+                    if let Some(result) = &bundle.gene {
+                        this.render_gene_comparison_result(ui, result);
+                    } else {
+                        ui.label(
+                            bundle
+                                .gene_error
+                                .as_deref()
+                                .unwrap_or("Gene analysis was not requested."),
+                        );
+                    }
+                }
+                CohortResultView::Bcr => {
+                    if let Some(result) = &bundle.bcr {
+                        this.render_bcr_comparison_result(ui, result);
+                    } else {
+                        ui.label(
+                            bundle
+                                .bcr_error
+                                .as_deref()
+                                .unwrap_or("BCR analysis was not requested."),
+                        );
+                    }
+                }
+                CohortResultView::BcrIsotype => {
+                    if let Some(result) = &bundle.bcr_isotype {
+                        this.render_bcr_isotype_result(ui, result);
+                    } else {
+                        ui.label(
+                            bundle
+                                .bcr_isotype_error
+                                .as_deref()
+                                .unwrap_or("BCR-isotype analysis was not requested."),
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    fn render_gene_comparison_result(&self, ui: &mut egui::Ui, result: &GeneComparisonResult) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Case columns: {}", result.n_case_columns));
+            ui.separator();
+            ui.label(format!("Control columns: {}", result.n_control_columns));
+            ui.separator();
+            ui.label(format!("Other/unmatched columns: {}", result.unmatched_columns));
+            ui.separator();
+            ui.label(format!("Genes tested: {}", result.tests.len()));
+        });
+        ui.label(
+            egui::RichText::new(format!(
+                "Exploratory test: Mann-Whitney U on log2({}+1); effect is log2((mean case + 0.5)/(mean control + 0.5)); q is BH-adjusted across tested genes.",
+                result.metric
+            ))
+            .small()
+            .weak(),
+        );
+
+        let all_points: Vec<[f64; 2]> = result
+            .tests
+            .iter()
+            .filter(|r| r.effect.is_finite() && r.q_value.is_finite() && r.q_value > 0.0)
+            .map(|r| [r.effect, -r.q_value.max(1e-300).log10()])
+            .collect();
+        let accent = ui.visuals().selection.bg_fill;
+        Plot::new("cohort_gene_volcano_v04")
+            .height(360.0)
+            .x_axis_label("log2 mean fold change (case / control)")
+            .y_axis_label("-log10(BH q)")
+            .label_formatter(|hover| match hover {
+                HoverPosition::NearDataPoint { plot_name, .. } if !plot_name.is_empty() => {
+                    Some(plot_name.to_string())
+                }
+                _ => None,
+            })
+            .show(ui, |plot_ui| {
+                if !all_points.is_empty() {
+                    plot_ui.points(
+                        Points::new("All tested genes", all_points)
+                            .color(egui::Color32::from_gray(100))
+                            .radius(2.0),
+                    );
+                }
+                for r in result.tests.iter().take(120) {
+                    if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 {
+                        continue;
+                    }
+                    let label = format!(
+                        "{}{}\nlog2FC: {:.3}\nCliff's δ: {:.3}\np: {:.3e}\nq: {:.3e}\nmedian case/control: {:.3} / {:.3}",
+                        r.feature,
+                        if r.secondary_id.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", r.secondary_id)
+                        },
+                        r.effect,
+                        r.cliffs_delta,
+                        r.p_value,
+                        r.q_value,
+                        r.median_case,
+                        r.median_control
+                    );
+                    let color = if r.q_value <= 0.05 {
+                        egui::Color32::from_rgb(230, 170, 70)
+                    } else {
+                        accent
+                    };
+                    plot_ui.points(
+                        Points::new(label, vec![[r.effect, -r.q_value.max(1e-300).log10()]])
+                            .color(color)
+                            .radius(if r.q_value <= 0.05 { 4.0 } else { 3.0 }),
+                    );
+                }
+            });
+        ui.label(
+            egui::RichText::new(
+                "Hover the highlighted top-ranked genes for effect size and significance. These are discovery candidates, not covariate-adjusted differential-expression results.",
+            )
+            .small()
+            .weak(),
+        );
+        self.render_feature_test_table(ui, "Top differential genes", &result.tests, 350.0);
+        ui.label(
+            egui::RichText::new(
+                "Pathway enrichment is not yet run in v0.4. The next gene-analysis step will accept a GMT gene-set library and support both hit-list ORA and ranked enrichment so pathway results remain explicit and reproducible.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    fn render_bcr_comparison_result(&self, ui: &mut egui::Ui, result: &BcrComparisonResult) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("BCR files used: {}", result.files_used));
+            ui.separator();
+            ui.label(format!(
+                "Files outside comparison/unmatched: {}",
+                result.files_skipped_not_in_groups + result.files_skipped_unmatched
+            ));
+            ui.separator();
+            ui.label(format!("Samples summarized: {}", result.sample_summaries.len()));
+        });
+        if !result.file_errors.is_empty() {
+            ui.collapsing(format!("File warnings ({})", result.file_errors.len()), |ui| {
+                for warning in &result.file_errors {
+                    ui.label(warning);
+                }
+            });
+        }
+        self.render_feature_effect_plot(ui, "cohort_bcr_metric_effects_v04", "BCR sample metrics", &result.metric_tests);
+        self.render_feature_test_table(ui, "Sample-level BCR metrics", &result.metric_tests, 260.0);
+        ui.collapsing("BCR heavy-chain isotype usage", |ui| {
+            self.render_feature_test_table(ui, "Isotype fractions from BCR heavy-chain reports", &result.isotype_tests, 240.0);
+        });
+        ui.collapsing("V-gene usage", |ui| {
+            self.render_feature_test_table(ui, "V-gene fraction tests", &result.v_gene_tests, 280.0);
+        });
+        ui.collapsing("D-gene usage", |ui| {
+            self.render_feature_test_table(ui, "D-gene fraction tests", &result.d_gene_tests, 280.0);
+        });
+        ui.collapsing("J-gene usage", |ui| {
+            self.render_feature_test_table(ui, "J-gene fraction tests", &result.j_gene_tests, 280.0);
+        });
+        ui.label(
+            egui::RichText::new(
+                "This first Rust BCR pass mirrors the simple comparison layer: Mann-Whitney U, BH adjustment within each feature family, and Cliff's delta. Public/private clonotypes, convergence, matched-depth richness, PCoA and dendrograms are intentionally left for the next repertoire-analysis iteration.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    fn render_bcr_isotype_result(&self, ui: &mut egui::Ui, result: &BcrIsotypeComparisonResult) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Isotype files used: {}", result.files_used));
+            ui.separator();
+            ui.label(format!(
+                "Files outside comparison/unmatched: {}",
+                result.files_skipped_not_in_groups + result.files_skipped_unmatched
+            ));
+        });
+        if !result.file_errors.is_empty() {
+            ui.collapsing(format!("File warnings ({})", result.file_errors.len()), |ui| {
+                for warning in &result.file_errors {
+                    ui.label(warning);
+                }
+            });
+        }
+        self.render_feature_effect_plot(
+            ui,
+            "cohort_bcr_isotype_effects_v04",
+            "BCR isotype median-fraction shifts",
+            &result.tests,
+        );
+        self.render_feature_test_table(ui, "BCR isotype fraction tests", &result.tests, 300.0);
+
+        let mut case_means: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+        let mut ctrl_means: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+        let case_label = self
+            .cohort_results
+            .as_ref()
+            .map(|b| b.comparison.case_label.as_str())
+            .unwrap_or("case");
+        for value in &result.values {
+            if value.group == case_label {
+                case_means.entry(value.isotype.clone()).or_default().push(value.fraction);
+            } else {
+                ctrl_means.entry(value.isotype.clone()).or_default().push(value.fraction);
+            }
+        }
+        ui.collapsing("Group mean isotype composition", |ui| {
+            egui::Grid::new("cohort_isotype_means_grid")
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Isotype").strong());
+                    ui.label(egui::RichText::new("Case mean").strong());
+                    ui.label(egui::RichText::new("Control mean").strong());
+                    ui.end_row();
+                    let features: std::collections::BTreeSet<_> = case_means
+                        .keys()
+                        .chain(ctrl_means.keys())
+                        .cloned()
+                        .collect();
+                    for feature in features {
+                        let cm = case_means
+                            .get(&feature)
+                            .map(|v| v.iter().sum::<f64>() / v.len().max(1) as f64)
+                            .unwrap_or(0.0);
+                        let hm = ctrl_means
+                            .get(&feature)
+                            .map(|v| v.iter().sum::<f64>() / v.len().max(1) as f64)
+                            .unwrap_or(0.0);
+                        ui.label(feature);
+                        ui.label(format!("{cm:.4}"));
+                        ui.label(format!("{hm:.4}"));
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    fn render_feature_effect_plot(
+        &self,
+        ui: &mut egui::Ui,
+        plot_id: &str,
+        title: &str,
+        tests: &[FeatureTestResult],
+    ) {
+        let shown: Vec<_> = tests
+            .iter()
+            .filter(|r| r.effect.is_finite())
+            .take(25)
+            .collect();
+        if shown.is_empty() {
+            ui.label("No usable feature effects to plot.");
+            return;
+        }
+        let labels: Vec<String> = shown.iter().map(|r| r.feature.clone()).collect();
+        let axis_labels = labels.clone();
+        let accent = ui.visuals().selection.bg_fill;
+        Plot::new(plot_id)
+            .height((140.0 + 22.0 * shown.len() as f32).min(420.0))
+            .x_axis_label("Effect (case - control)")
+            .y_axis_formatter(move |mark, _range| {
+                let idx = mark.value.round() as isize;
+                if idx >= 0 && (idx as usize) < axis_labels.len() {
+                    axis_labels[idx as usize].clone()
+                } else {
+                    String::new()
+                }
+            })
+            .label_formatter(|hover| match hover {
+                HoverPosition::NearDataPoint { plot_name, .. } if !plot_name.is_empty() => {
+                    Some(plot_name.to_string())
+                }
+                _ => None,
+            })
+            .show(ui, |plot_ui| {
+                for (idx, result) in shown.iter().enumerate() {
+                    let label = format!(
+                        "{}\nEffect: {:.4}\nCliff's δ: {:.3}\np: {:.3e}\nq: {:.3e}",
+                        result.feature,
+                        result.effect,
+                        result.cliffs_delta,
+                        result.p_value,
+                        result.q_value
+                    );
+                    let color = if result.q_value.is_finite() && result.q_value <= 0.05 {
+                        egui::Color32::from_rgb(230, 170, 70)
+                    } else {
+                        accent
+                    };
+                    plot_ui.points(
+                        Points::new(label, vec![[result.effect, idx as f64]])
+                            .color(color)
+                            .radius(5.0),
+                    );
+                }
+            });
+        ui.label(egui::RichText::new(title).small().weak());
+    }
+
+    fn render_feature_test_table(
+        &self,
+        ui: &mut egui::Ui,
+        title: &str,
+        tests: &[FeatureTestResult],
+        max_height: f32,
+    ) {
+        ui.label(egui::RichText::new(title).strong());
+        egui::ScrollArea::vertical()
+            .max_height(max_height)
+            .show_rows(ui, 24.0, tests.len(), |ui, range| {
+                egui::Grid::new(format!("feature_test_grid_{title}"))
+                    .striped(true)
+                    .num_columns(9)
+                    .show(ui, |ui| {
+                        if range.start == 0 {
+                            for heading in [
+                                "Feature",
+                                "Effect",
+                                "Cliff δ",
+                                "p",
+                                "BH q",
+                                "Median case",
+                                "Median ctrl",
+                                "n case",
+                                "n ctrl",
+                            ] {
+                                ui.label(egui::RichText::new(heading).strong());
+                            }
+                            ui.end_row();
+                        }
+                        for idx in range {
+                            let r = &tests[idx];
+                            ui.monospace(&r.feature);
+                            ui.label(format!("{:.4}", r.effect));
+                            ui.label(format!("{:.3}", r.cliffs_delta));
+                            ui.label(format!("{:.3e}", r.p_value));
+                            ui.label(if r.q_value.is_finite() {
+                                format!("{:.3e}", r.q_value)
+                            } else {
+                                "NA".to_string()
+                            });
+                            ui.label(format!("{:.4}", r.median_case));
+                            ui.label(format!("{:.4}", r.median_control));
+                            ui.label(r.n_case.to_string());
+                            ui.label(r.n_control.to_string());
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+
+
+    fn save_cohort_result_tables(&self, parent: &Path) -> anyhow::Result<PathBuf> {
+        let bundle = self
+            .cohort_results
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No cohort results are available"))?;
+        let safe_name: String = bundle
+            .comparison
+            .name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let outdir = parent.join(format!("cfs_analysis_{safe_name}"));
+        fs::create_dir_all(&outdir)?;
+        if let Some(mapping) = &self.cohort_mapping {
+            write_mapping_audit(&outdir.join("sample_mapping_audit.tsv"), mapping)?;
+        }
+        if let Some(gene) = &bundle.gene {
+            write_feature_tests(&outdir.join("gene_expression_tests.tsv"), &gene.tests)?;
+        }
+        if let Some(bcr) = &bundle.bcr {
+            write_bcr_sample_summaries(
+                &outdir.join("bcr_sample_summaries.tsv"),
+                &bcr.sample_summaries,
+            )?;
+            write_feature_tests(&outdir.join("bcr_sample_metric_tests.tsv"), &bcr.metric_tests)?;
+            write_feature_tests(
+                &outdir.join("bcr_heavy_isotype_fraction_tests.tsv"),
+                &bcr.isotype_tests,
+            )?;
+            write_feature_tests(&outdir.join("bcr_v_gene_fraction_tests.tsv"), &bcr.v_gene_tests)?;
+            write_feature_tests(&outdir.join("bcr_d_gene_fraction_tests.tsv"), &bcr.d_gene_tests)?;
+            write_feature_tests(&outdir.join("bcr_j_gene_fraction_tests.tsv"), &bcr.j_gene_tests)?;
+            if !bcr.file_errors.is_empty() {
+                fs::write(
+                    outdir.join("bcr_file_warnings.txt"),
+                    bcr.file_errors.join("\n"),
+                )?;
+            }
+        }
+        if let Some(iso) = &bundle.bcr_isotype {
+            write_bcr_isotype_values(
+                &outdir.join("bcr_isotype_sample_values.tsv"),
+                &iso.values,
+            )?;
+            write_feature_tests(&outdir.join("bcr_isotype_fraction_tests.tsv"), &iso.tests)?;
+            if !iso.file_errors.is_empty() {
+                fs::write(
+                    outdir.join("bcr_isotype_file_warnings.txt"),
+                    iso.file_errors.join("\n"),
+                )?;
+            }
+        }
+        let notes = format!(
+            "Exploratory comparison: {}\\nCase: {}\\nControl: {}\\n\\nThis first-pass analysis intentionally uses all available mapped samples, including longitudinal samples, without repeated-measures or covariate adjustment.\\n",
+            bundle.comparison.name,
+            bundle.comparison.case_label,
+            bundle.comparison.control_label,
+        );
+        fs::write(outdir.join("README.txt"), notes)?;
+        Ok(outdir)
+    }
+
+    fn load_cohort_project(&mut self, root: PathBuf) {
+        match scan_project(&root) {
+            Ok(scan) => {
+                self.cohort_root = Some(root);
+                self.cohort_status = format!(
+                    "Project scanned: {} supported files across {} parsed sample IDs.",
+                    scan.files.len(),
+                    scan.unique_samples()
+                );
+                let auto_meta = scan.metadata_candidates.first().cloned();
+                self.cohort_scan = Some(scan);
+                self.cohort_results = None;
+                if let Some(path) = auto_meta {
+                    self.load_cohort_metadata_path(path);
+                } else {
+                    self.cohort_metadata = None;
+                    self.cohort_metadata_path = None;
+                    self.cohort_mapping = None;
+                }
+            }
+            Err(e) => {
+                self.cohort_status = format!("Project scan failed: {e:#}");
+            }
+        }
+    }
+
+    fn load_cohort_metadata_path(&mut self, path: PathBuf) {
+        match load_metadata(&path) {
+            Ok(meta) => {
+                let rows = meta.rows.len();
+                let id_column = meta.id_column.clone();
+                self.cohort_metadata_path = Some(path);
+                self.cohort_metadata = Some(meta);
+                self.cohort_results = None;
+                self.rebuild_cohort_mapping();
+                self.cohort_status = format!(
+                    "Metadata loaded: {rows} rows; matching on '{id_column}'."
+                );
+            }
+            Err(e) => {
+                self.cohort_status = format!("Metadata load failed: {e:#}");
+            }
+        }
+    }
+
+    fn rebuild_cohort_mapping(&mut self) {
+        self.cohort_mapping = match (&self.cohort_scan, &self.cohort_metadata) {
+            (Some(scan), Some(meta)) => Some(build_mapping(scan, meta)),
+            _ => None,
+        };
+    }
+
+    fn start_cohort_analysis(&mut self) {
+        let (Some(scan), Some(metadata)) = (self.cohort_scan.clone(), self.cohort_metadata.clone()) else {
+            self.cohort_status = "Load a project and metadata first.".to_string();
+            return;
+        };
+        let comparison = match build_comparison(&metadata, self.cohort_preset) {
+            Ok(comp) => comp,
+            Err(e) => {
+                self.cohort_status = format!("Could not build comparison: {e:#}");
+                return;
+            }
+        };
+        let run_gene = self.cohort_run_gene;
+        let gene_metric = self.cohort_gene_metric.display_name().to_string();
+        let run_bcr = self.cohort_run_bcr;
+        let run_iso = self.cohort_run_bcr_isotype;
+        let (tx, rx) = mpsc::channel();
+        self.cohort_receiver = Some(rx);
+        self.cohort_running = true;
+        self.cohort_progress = 0.0;
+        self.cohort_status = format!("Running {}…", comparison.name);
+        self.cohort_results = None;
+
+        std::thread::spawn(move || {
+            let mut gene = None;
+            let mut gene_error = None;
+            let mut bcr = None;
+            let mut bcr_error = None;
+            let mut bcr_isotype = None;
+            let mut bcr_isotype_error = None;
+
+            if run_gene {
+                if let Some(path) = scan.merged_gene_tsv.clone() {
+                    match run_gene_comparison(&path, &comparison, &gene_metric, |done, total, msg| {
+                        let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+                        let _ = tx.send(CohortWorkerMessage::Progress(0.33 * frac, msg.to_string()));
+                    }) {
+                        Ok(result) => gene = Some(result),
+                        Err(e) => gene_error = Some(format!("{e:#}")),
+                    }
+                } else {
+                    gene_error = Some(
+                        "No merged gene-expression TSV was detected in the project. Merge gene expression first or place the merged TSV under the project root.".to_string(),
+                    );
+                }
+            }
+
+            if run_bcr {
+                match run_bcr_comparison(&scan.files, &comparison, |done, total, msg| {
+                    let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+                    let _ = tx.send(CohortWorkerMessage::Progress(
+                        0.33 + 0.42 * frac,
+                        msg.to_string(),
+                    ));
+                }) {
+                    Ok(result) => bcr = Some(result),
+                    Err(e) => bcr_error = Some(format!("{e:#}")),
+                }
+            }
+
+            if run_iso {
+                match run_bcr_isotype_comparison(&scan.files, &comparison, |done, total, msg| {
+                    let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+                    let _ = tx.send(CohortWorkerMessage::Progress(
+                        0.75 + 0.25 * frac,
+                        msg.to_string(),
+                    ));
+                }) {
+                    Ok(result) => bcr_isotype = Some(result),
+                    Err(e) => bcr_isotype_error = Some(format!("{e:#}")),
+                }
+            }
+
+            let _ = tx.send(CohortWorkerMessage::Done(CohortAnalysisBundle {
+                comparison,
+                gene,
+                gene_error,
+                bcr,
+                bcr_error,
+                bcr_isotype,
+                bcr_isotype_error,
+            }));
+        });
+    }
+
+    fn poll_cohort_worker(&mut self) {
+        let mut done = None;
+        if let Some(rx) = &self.cohort_receiver {
+            while let Ok(message) = rx.try_recv() {
+                match message {
+                    CohortWorkerMessage::Progress(frac, text) => {
+                        self.cohort_progress = frac.clamp(0.0, 1.0);
+                        self.cohort_status = text;
+                    }
+                    CohortWorkerMessage::Done(bundle) => {
+                        done = Some(bundle);
+                    }
+                }
+            }
+        }
+        if let Some(bundle) = done {
+            let mut messages = Vec::new();
+            if let Some(err) = &bundle.gene_error {
+                messages.push(format!("Gene: {err}"));
+            }
+            if let Some(err) = &bundle.bcr_error {
+                messages.push(format!("BCR: {err}"));
+            }
+            if let Some(err) = &bundle.bcr_isotype_error {
+                messages.push(format!("BCR isotype: {err}"));
+            }
+            self.cohort_results = Some(bundle);
+            self.cohort_running = false;
+            self.cohort_progress = 1.0;
+            self.cohort_receiver = None;
+            self.cohort_status = if messages.is_empty() {
+                "Exploratory comparison complete.".to_string()
+            } else {
+                format!(
+                    "Comparison completed with {} modality warning(s): {}",
+                    messages.len(),
+                    messages.join(" | ")
+                )
+            };
+        }
     }
 
     fn card(

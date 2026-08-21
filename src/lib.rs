@@ -1,3 +1,5 @@
+pub mod cohort;
+
 use anyhow::{anyhow, bail, Context, Result};
 use calamine::{open_workbook, Data, Range, Reader, Xlsx};
 use csv::{ReaderBuilder, WriterBuilder};
