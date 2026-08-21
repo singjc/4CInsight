@@ -4,7 +4,7 @@ use crate::cohort::{
     MappingStatus, TcrComparisonResult, TcrSampleSummary,
 };
 use crate::corrected::{
-    AdjustedFeatureResult, CorrectedCompositionResult, CorrectedExpressionResult, CorrectedImmuneResult,
+    AdjustedFeatureResult, CorrectedExpressionResult, CorrectedImmuneResult,
     CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult, DtuGeneResult, OrdinationResult,
 };
 use anyhow::{Context, Result};
