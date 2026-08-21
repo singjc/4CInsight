@@ -1,8 +1,20 @@
 # 4C Cohort Explorer
 
-A native Rust application for memory-bounded RNA expression merging plus metadata-driven cohort exploration across gene expression, BCR, BCR isotypes, and additional immune data types.
+A native Rust application for memory-bounded RNA expression merging plus metadata-driven multi-modal cohort exploration across gene/transcript expression, BCR, BCR isotypes, TCR alpha/beta, and immune-infiltrate data.
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
+
+## What v0.6 adds
+
+- Adds **optional transcript-expression analysis** to Cohort Analysis. The merged transcript table can be screened with TPM or Total Reads using the same exploratory Mann–Whitney/BH/Cliff's-delta framework as gene expression.
+- Adds first-pass **TCR alpha and TCR beta comparison modules**. Each chain is analyzed independently for clone depth, richness, Shannon/Simpson diversity, clonality, effective clonotypes, top-clone fraction, weighted CDR3 amino-acid length, V-gene usage, J-gene usage, and V–J-pair usage.
+- Adds an optional **immune-infiltrate module** for the per-sample ssGSEA workbooks, including per-cell-type group tests, effect plots, group-mean visualization, and exported sample values.
+- Makes all newly enabled modalities **fault tolerant**: absent files, samples outside the comparison, duplicates, and malformed individual workbooks are reported without aborting the other selected analyses.
+- Extends **Save result tables…** and the standalone HTML report to transcript, TCR alpha, TCR beta, and immune-infiltrate outputs.
+- Reworks all report scatter plots to use explicit Plotly hover text. Hovering a point now reports the biological feature name (gene/transcript/V gene/J gene/V–J pair/BCR isotype/immune-cell type), secondary annotation where available, effect, Cliff's delta, p value, BH q value, group medians/means, sample counts, and detection fractions when applicable.
+- Adds a dedicated BCR-isotype effect/significance scatter to the HTML report.
+
+The TCR module in v0.6 is intentionally the first comparison layer. The existing Python workflow's matched-depth rarefaction, Morisita–Horn similarity/PCoA, public/private clonotypes, amino-acid convergence, and related repertoire-wide analyses remain candidates for the next advanced TCR iteration.
 
 ## What v0.5 adds
 
@@ -31,7 +43,7 @@ v0.4 introduces a new **Cohort Analysis** workspace while preserving the existin
 - **BCR first-pass comparison** calculates total clone count, unique clones, Shannon/Simpson diversity, normalized clonality, effective clonotype count, top-clone fraction, weighted mean CDR3 amino-acid length, and heavy-chain isotype/V/D/J usage. Group tests use Mann–Whitney U, BH correction and Cliff's delta.
 - **Dedicated BCR-isotype comparison** tests the `Isotype Read Fraction` values from the composition workbooks.
 - **Fault-tolerant modality execution** means a missing/unsupported modality or a malformed individual BCR workbook is reported while other available analyses continue.
-- TCR and immune-infiltrate files are already detected and included in the sample coverage audit; their full comparison modules are planned for the next repertoire-analysis iteration.
+- TCR and immune-infiltrate files are detected and included in the sample coverage audit; v0.6 adds their first-pass group-comparison modules.
 
 The v0.4 cohort tests are deliberately an **exploratory first pass**. They do not yet adjust for repeated sampling, family structure, age, sex, ethnicity or other covariates.
 
@@ -186,9 +198,9 @@ A selected gene/transcript has one value per sample, so the profile view uses in
 2. Load the sample metadata workbook/table; `4C_ID` is preferred automatically when available.
 3. Review the mapping/coverage audit. Unmatched, ambiguous, metadata-only, and duplicate entries remain visible and do not abort the project.
 4. Choose one of the current study presets: **HYP vs True_HC** or **HYP+ME/CFS vs ME/CFS-only**.
-5. Select Gene expression, BCR, and/or BCR isotype. Gene expression defaults to TPM but can use FPKM, CPM, or Raw Count if those suffixes exist in the merged table.
+5. Select any combination of Gene expression, Transcript expression, BCR, BCR isotype, TCR alpha, TCR beta, and Immune infiltrate. Gene expression defaults to TPM; transcript expression can use TPM or Total Reads.
 6. Run the exploratory comparison. Each modality runs independently so a missing or malformed input does not prevent the others from completing.
-7. Inspect the interactive result panels. v0.5 adds a gene detection-shift plot, selectable case/control BCR metric distributions, and a group-mean BCR-isotype composition plot.
+7. Inspect the interactive result panels. Transcript, TCR alpha/beta, and immune-infiltrate results receive their own tabs; failed/unavailable modalities remain visible as warnings instead of aborting the comparison.
 8. Use **Save result tables…** to export the mapping audit and statistical tables as TSV files, or **Generate HTML report…** to create a single shareable HTML summary with interactive Plotly figures and ranked tables.
 
 The cohort analysis is intentionally exploratory. Longitudinal/repeated samples are currently treated as observations, matching the first-pass study request; covariate-aware and repeated-measures models belong in a later rigorous-analysis mode.
@@ -200,12 +212,15 @@ The cohort results card can generate a single HTML report using the [`report-bui
 
 - comparison definition and first-pass modelling caveats;
 - sample mapping/coverage audit;
-- gene-expression volcano and detection-shift plots plus the top differential-gene table;
+- gene- and transcript-expression volcano/detection-shift plots plus ranked feature tables;
 - BCR group box plots for key repertoire metrics and ranked sample-metric/isotype/V/D/J tests;
-- dedicated BCR-isotype composition plots and tests;
+- dedicated BCR-isotype composition and effect/significance plots;
+- TCR alpha/beta repertoire-summary plots and V/J/V–J composition tests when requested;
+- immune-cell ssGSEA group plots and per-cell-type tests when requested;
+- rich feature-aware hover text on scatter plots rather than anonymous x/y coordinates;
 - file warnings and unavailable-modality messages rather than silently dropping failed analyses.
 
-`report-builder` 0.1.1 normally references Plotly and optional table helpers from public CDNs. v0.5 compiles Plotly with its `plotly_embed_js` feature, injects that bundled JavaScript into the report, and removes the unused DataTables/FileSaver CDN helpers during finalization. The resulting `.html` is therefore one self-contained file whose interactive plots can be opened offline. This post-processing is pinned to the current report-builder 0.1.1 template and is covered by a report-generation unit test.
+`report-builder` 0.1.1 normally references Plotly and optional table helpers from public CDNs. v0.5+ compiles Plotly with its `plotly_embed_js` feature, injects that bundled JavaScript into the report, and removes the unused DataTables/FileSaver CDN helpers during finalization. The resulting `.html` is therefore one self-contained file whose interactive plots can be opened offline. This post-processing is pinned to the current report-builder 0.1.1 template and is covered by a report-generation unit test.
 
 ## CLI examples
 
@@ -265,8 +280,8 @@ A single executable cannot run unchanged on all three operating systems because 
 For cohort analysis in particular, useful next modules are:
 
 - BCR abundance-weighted overlap/Morisita-Horn similarity, PCoA, hierarchical clustering, public/private clonotypes, AA convergence, and matched-depth repertoire diversity.
-- TCR alpha/beta repertoire analysis with matched-depth rarefaction, Morisita-Horn similarity/PCoA, public/private clonotypes, AA convergence, and V-J pairing.
-- Immune-infiltrate group comparisons, cell-type heatmaps, and cross-modal correlation with expression/repertoire features.
+- Advanced TCR alpha/beta repertoire analysis with matched-depth rarefaction, Morisita-Horn similarity/PCoA, public/private clonotypes, and AA convergence (V/J/V–J first-pass comparisons are now included).
+- Immune-infiltrate cell-type heatmaps and cross-modal correlation with expression/repertoire features (basic group comparisons are now included).
 - Pathway analysis from gene results using a user-supplied/versioned GMT collection (over-representation and ranked enrichment).
 - Gene-expression PCA/correlation heatmaps and selected top-gene heatmaps.
 - Cross-modal candidate-biomarker summaries that combine gene, immune-infiltrate, BCR, BCR-isotype, and later TCR evidence.

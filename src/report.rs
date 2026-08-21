@@ -1,11 +1,15 @@
 use crate::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, BcrSampleSummary, CohortComparison,
-    CohortMapping, CohortModality, FeatureTestResult, GeneComparisonResult, MappingStatus,
+    CohortMapping, CohortModality, FeatureTestResult, GeneComparisonResult, ImmuneComparisonResult,
+    MappingStatus, TcrComparisonResult, TcrSampleSummary,
 };
 use anyhow::{Context, Result};
 use maud::{html, Markup};
-use report_builder::plots::{plot_boxplot, plot_scatter};
+use report_builder::plots::plot_boxplot;
 use report_builder::{Report, ReportSection};
+use plotly::common::{Mode, Title};
+use plotly::layout::Axis;
+use plotly::{Layout, Plot, Scatter};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -15,10 +19,18 @@ pub struct CohortReportInputs<'a> {
     pub mapping: Option<&'a CohortMapping>,
     pub gene: Option<&'a GeneComparisonResult>,
     pub gene_error: Option<&'a str>,
+    pub transcript: Option<&'a GeneComparisonResult>,
+    pub transcript_error: Option<&'a str>,
     pub bcr: Option<&'a BcrComparisonResult>,
     pub bcr_error: Option<&'a str>,
     pub bcr_isotype: Option<&'a BcrIsotypeComparisonResult>,
     pub bcr_isotype_error: Option<&'a str>,
+    pub tcr_alpha: Option<&'a TcrComparisonResult>,
+    pub tcr_alpha_error: Option<&'a str>,
+    pub tcr_beta: Option<&'a TcrComparisonResult>,
+    pub tcr_beta_error: Option<&'a str>,
+    pub immune: Option<&'a ImmuneComparisonResult>,
+    pub immune_error: Option<&'a str>,
 }
 
 pub fn generate_cohort_html_report(path: &Path, inputs: CohortReportInputs<'_>) -> Result<()> {
@@ -29,9 +41,17 @@ pub fn generate_cohort_html_report(path: &Path, inputs: CohortReportInputs<'_>) 
     if let Some(mapping) = inputs.mapping {
         report.add_section(build_mapping_section(mapping));
     }
-    report.add_section(build_gene_section(&inputs));
-    report.add_section(build_bcr_section(&inputs));
-    report.add_section(build_bcr_isotype_section(&inputs));
+    if inputs.gene.is_some() || inputs.gene_error.is_some() { report.add_section(build_gene_section(&inputs)); }
+    if inputs.transcript.is_some() || inputs.transcript_error.is_some() { report.add_section(build_transcript_section(&inputs)); }
+    if inputs.bcr.is_some() || inputs.bcr_error.is_some() { report.add_section(build_bcr_section(&inputs)); }
+    if inputs.bcr_isotype.is_some() || inputs.bcr_isotype_error.is_some() { report.add_section(build_bcr_isotype_section(&inputs)); }
+    if inputs.tcr_alpha.is_some() || inputs.tcr_alpha_error.is_some() {
+        report.add_section(build_tcr_section("TCR alpha", inputs.tcr_alpha, inputs.tcr_alpha_error, inputs.comparison));
+    }
+    if inputs.tcr_beta.is_some() || inputs.tcr_beta_error.is_some() {
+        report.add_section(build_tcr_section("TCR beta", inputs.tcr_beta, inputs.tcr_beta_error, inputs.comparison));
+    }
+    if inputs.immune.is_some() || inputs.immune_error.is_some() { report.add_section(build_immune_section(&inputs)); }
 
     let output = path.to_string_lossy().to_string();
     report
@@ -172,8 +192,12 @@ fn build_overview_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
         h4 { "Analysis availability" }
         ul {
             li { "Gene expression: " (availability(inputs.gene.is_some(), inputs.gene_error)) }
+            li { "Transcript expression: " (availability(inputs.transcript.is_some(), inputs.transcript_error)) }
             li { "BCR: " (availability(inputs.bcr.is_some(), inputs.bcr_error)) }
             li { "BCR isotype: " (availability(inputs.bcr_isotype.is_some(), inputs.bcr_isotype_error)) }
+            li { "TCR alpha: " (availability(inputs.tcr_alpha.is_some(), inputs.tcr_alpha_error)) }
+            li { "TCR beta: " (availability(inputs.tcr_beta.is_some(), inputs.tcr_beta_error)) }
+            li { "Immune infiltrate: " (availability(inputs.immune.is_some(), inputs.immune_error)) }
         }
         p {
             em {
@@ -231,9 +255,35 @@ fn build_mapping_section(mapping: &CohortMapping) -> ReportSection {
 }
 
 fn build_gene_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
-    let mut section = ReportSection::new("Gene expression");
-    let Some(result) = inputs.gene else {
-        section.add_content(html! { p { (inputs.gene_error.unwrap_or("Gene expression analysis was not available.")) } });
+    build_expression_section(
+        "Gene expression",
+        "Gene",
+        "genes",
+        inputs.gene,
+        inputs.gene_error,
+    )
+}
+
+fn build_transcript_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
+    build_expression_section(
+        "Transcript expression",
+        "Transcript",
+        "transcripts",
+        inputs.transcript,
+        inputs.transcript_error,
+    )
+}
+
+fn build_expression_section(
+    section_name: &str,
+    feature_name: &str,
+    feature_name_plural: &str,
+    result: Option<&GeneComparisonResult>,
+    error: Option<&str>,
+) -> ReportSection {
+    let mut section = ReportSection::new(section_name);
+    let Some(result) = result else {
+        section.add_content(html! { p { (error.unwrap_or("Expression analysis was not available.")) } });
         return section;
     };
 
@@ -241,18 +291,18 @@ fn build_gene_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
     section.add_content(html! {
         p {
             "Metric: " strong { (result.metric) } ". "
-            "Case columns: " (result.n_case_columns) ", control columns: " (result.n_control_columns) ", tested genes: " (result.tests.len()) ", BH q≤0.05: " (n_sig) "."
+            "Case columns: " (result.n_case_columns) ", control columns: " (result.n_control_columns) ", tested " (feature_name_plural) ": " (result.tests.len()) ", BH q≤0.05: " (n_sig) "."
         }
-        p { "Mann–Whitney U is applied to log2(value + 1). Effect is log2((mean case + 0.5)/(mean control + 0.5)); BH adjustment is across tested genes." }
+        p { "Mann–Whitney U is applied to log2(value + 1). Effect is log2((mean case + 0.5)/(mean control + 0.5)); BH adjustment is across tested features." }
     });
 
-    if let Some(plot) = gene_volcano_plot(result) {
+    if let Some(plot) = expression_volcano_plot(result, &format!("{section_name} discovery screen"), feature_name) {
         section.add_plot(plot);
     }
-    if let Some(plot) = gene_detection_plot(result) {
+    if let Some(plot) = expression_detection_plot(result, &format!("{section_name} detection shift"), feature_name) {
         section.add_plot(plot);
     }
-    section.add_content(feature_table("Top differential genes", &result.tests, 100));
+    section.add_content(feature_table(&format!("Top differential {feature_name_plural}"), &result.tests, 100));
     section
 }
 
@@ -300,15 +350,15 @@ fn build_bcr_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
 
     section.add_content(feature_table("Sample-level BCR metrics", &result.metric_tests, 50));
     section.add_content(feature_table("Heavy-chain isotype usage", &result.isotype_tests, 50));
-    if let Some(plot) = feature_effect_significance_plot("BCR V-gene usage", &result.v_gene_tests) {
+    if let Some(plot) = feature_effect_significance_plot("BCR V-gene usage", &result.v_gene_tests, "V gene") {
         section.add_plot(plot);
     }
     section.add_content(feature_table("V-gene usage", &result.v_gene_tests, 75));
-    if let Some(plot) = feature_effect_significance_plot("BCR D-gene usage", &result.d_gene_tests) {
+    if let Some(plot) = feature_effect_significance_plot("BCR D-gene usage", &result.d_gene_tests, "D gene") {
         section.add_plot(plot);
     }
     section.add_content(feature_table("D-gene usage", &result.d_gene_tests, 75));
-    if let Some(plot) = feature_effect_significance_plot("BCR J-gene usage", &result.j_gene_tests) {
+    if let Some(plot) = feature_effect_significance_plot("BCR J-gene usage", &result.j_gene_tests, "J gene") {
         section.add_plot(plot);
     }
     section.add_content(feature_table("J-gene usage", &result.j_gene_tests, 75));
@@ -356,83 +406,265 @@ fn build_bcr_isotype_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
             section.add_plot(plot);
         }
     }
+    if let Some(plot) = feature_effect_significance_plot("BCR isotype fraction shifts", &result.tests, "BCR isotype") {
+        section.add_plot(plot);
+    }
     section.add_content(feature_table("BCR isotype fraction tests", &result.tests, 50));
     section.add_content(group_mean_isotype_table(result, inputs.comparison));
     section
 }
 
-fn gene_volcano_plot(result: &GeneComparisonResult) -> Option<plotly::Plot> {
-    let mut x_other = Vec::new();
-    let mut y_other = Vec::new();
-    let mut x_sig = Vec::new();
-    let mut y_sig = Vec::new();
-    for r in &result.tests {
-        if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 {
-            continue;
+fn build_tcr_section(
+    title: &str,
+    result: Option<&TcrComparisonResult>,
+    error: Option<&str>,
+    comparison: &CohortComparison,
+) -> ReportSection {
+    let mut section = ReportSection::new(title);
+    let Some(result) = result else {
+        section.add_content(html! { p { (error.unwrap_or("TCR analysis was not available.")) } });
+        return section;
+    };
+    section.add_content(html! {
+        p { (result.chain) " files used: " (result.files_used) "; samples summarized: " (result.sample_summaries.len()) "." }
+        p { "This initial TCR comparison reports depth-dependent repertoire summaries plus V-gene, J-gene and V–J-pair composition. Matched-depth rarefaction, Morisita–Horn/PCoA, public/private clonotypes and convergence are planned repertoire extensions." }
+        @if !result.file_errors.is_empty() {
+            details {
+                summary { "File warnings (" (result.file_errors.len()) ")" }
+                ul { @for warning in &result.file_errors { li { (warning) } } }
+            }
         }
-        let y = -r.q_value.max(1e-300).log10();
-        if r.q_value <= 0.05 {
-            x_sig.push(r.effect);
-            y_sig.push(y);
-        } else {
-            x_other.push(r.effect);
-            y_other.push(y);
+    });
+
+    for (metric_name, getter) in report_tcr_metric_specs() {
+        let case = result.sample_summaries.iter()
+            .filter(|r| r.group == comparison.case_label)
+            .map(getter)
+            .filter(|v| v.is_finite())
+            .collect::<Vec<_>>();
+        let ctrl = result.sample_summaries.iter()
+            .filter(|r| r.group == comparison.control_label)
+            .map(getter)
+            .filter(|v| v.is_finite())
+            .collect::<Vec<_>>();
+        if case.len() >= 2 && ctrl.len() >= 2 {
+            let scores = vec![ctrl, case];
+            let labels = vec![comparison.control_label.clone(), comparison.case_label.clone()];
+            if let Ok(plot) = plot_boxplot(&scores, labels, &format!("{}: {metric_name}", result.chain), "Group", metric_name) {
+                section.add_plot(plot);
+            }
         }
     }
-    if x_other.is_empty() && x_sig.is_empty() {
-        return None;
-    }
-    let mut xs = Vec::new();
-    let mut ys = Vec::new();
-    let mut labels = Vec::new();
-    if !x_other.is_empty() {
-        xs.push(x_other); ys.push(y_other); labels.push("Other genes".to_string());
-    }
-    if !x_sig.is_empty() {
-        xs.push(x_sig); ys.push(y_sig); labels.push("BH q ≤ 0.05".to_string());
-    }
-    plot_scatter(&xs, &ys, labels, "Gene-expression discovery screen", "log2 mean fold change (case / control)", "-log10(BH q)").ok()
+    section.add_content(feature_table(&format!("{} sample-level repertoire metrics", result.chain), &result.metric_tests, 50));
+    if let Some(plot) = feature_effect_significance_plot(&format!("{} V-gene usage", result.chain), &result.v_gene_tests, "V gene") { section.add_plot(plot); }
+    section.add_content(feature_table("V-gene usage", &result.v_gene_tests, 75));
+    if let Some(plot) = feature_effect_significance_plot(&format!("{} J-gene usage", result.chain), &result.j_gene_tests, "J gene") { section.add_plot(plot); }
+    section.add_content(feature_table("J-gene usage", &result.j_gene_tests, 75));
+    if let Some(plot) = feature_effect_significance_plot(&format!("{} V–J pair usage", result.chain), &result.vj_pair_tests, "V-J pair") { section.add_plot(plot); }
+    section.add_content(feature_table("V–J pair usage", &result.vj_pair_tests, 75));
+    section
 }
 
-fn gene_detection_plot(result: &GeneComparisonResult) -> Option<plotly::Plot> {
+fn build_immune_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
+    let mut section = ReportSection::new("Immune infiltrate");
+    let Some(result) = inputs.immune else {
+        section.add_content(html! { p { (inputs.immune_error.unwrap_or("Immune-infiltrate analysis was not available.")) } });
+        return section;
+    };
+    section.add_content(html! {
+        p { "Immune-infiltrate files used: " (result.files_used) ". ssGSEA scores are compared independently for each immune-cell type using Mann–Whitney U, BH correction and Cliff's delta." }
+        @if !result.file_errors.is_empty() {
+            details {
+                summary { "File warnings (" (result.file_errors.len()) ")" }
+                ul { @for warning in &result.file_errors { li { (warning) } } }
+            }
+        }
+    });
+    if let Some(plot) = feature_effect_significance_plot("Immune-cell ssGSEA shifts", &result.tests, "Immune cell") {
+        section.add_plot(plot);
+    }
+
+    let mut features = BTreeSet::new();
+    for row in &result.values { features.insert(row.cell_type.clone()); }
+    for feature in features {
+        let ctrl = result.values.iter()
+            .filter(|r| r.cell_type == feature && r.group == inputs.comparison.control_label)
+            .map(|r| r.score).filter(|v| v.is_finite()).collect::<Vec<_>>();
+        let case = result.values.iter()
+            .filter(|r| r.cell_type == feature && r.group == inputs.comparison.case_label)
+            .map(|r| r.score).filter(|v| v.is_finite()).collect::<Vec<_>>();
+        if ctrl.len() >= 2 && case.len() >= 2 {
+            if let Ok(plot) = plot_boxplot(
+                &vec![ctrl, case],
+                vec![inputs.comparison.control_label.clone(), inputs.comparison.case_label.clone()],
+                &format!("Immune infiltrate: {feature}"),
+                "Group",
+                "ssGSEA score",
+            ) { section.add_plot(plot); }
+        }
+    }
+    section.add_content(feature_table("Immune-cell ssGSEA tests", &result.tests, 50));
+    section
+}
+
+fn labeled_scatter_plot(
+    traces: Vec<(String, Vec<f64>, Vec<f64>, Vec<String>)>,
+    title: &str,
+    x_label: &str,
+    y_label: &str,
+) -> Option<Plot> {
+    if traces.iter().all(|(_, x, _, _)| x.is_empty()) {
+        return None;
+    }
+    let mut plot = Plot::new();
+    for (name, x, y, hover) in traces {
+        if x.is_empty() { continue; }
+        let trace = Scatter::new(x, y)
+            .mode(Mode::Markers)
+            .name(name)
+            .hover_text_array(hover)
+            .hover_template("%{hovertext}<extra>%{fullData.name}</extra>");
+        plot.add_trace(trace);
+    }
+    plot.set_layout(
+        Layout::new()
+            .title(Title::with_text(title))
+            .x_axis(Axis::new().title(Title::with_text(x_label)))
+            .y_axis(Axis::new().title(Title::with_text(y_label))),
+    );
+    Some(plot)
+}
+
+fn escape_hover_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn feature_hover(r: &FeatureTestResult, feature_label: &str) -> String {
+    let feature = escape_hover_text(&r.feature);
+    let secondary_value = escape_hover_text(&r.secondary_id);
+    let secondary_label = match feature_label {
+        "Gene" | "Transcript" => "NCBI Gene ID",
+        "Immune cell" => "Lineage",
+        _ => "Secondary ID",
+    };
+    let secondary = if r.secondary_id.trim().is_empty() {
+        String::new()
+    } else {
+        format!("<br>{secondary_label}: {secondary_value}")
+    };
+    let detection = match (r.detection_case, r.detection_control) {
+        (Some(case), Some(ctrl)) => format!(
+            "<br>Detection case/control: {:.1}% / {:.1}%",
+            case * 100.0,
+            ctrl * 100.0
+        ),
+        _ => String::new(),
+    };
+    format!(
+        "<b>{}: {}</b>{secondary}<br>Effect: {:.4}<br>Cliff's δ: {:.4}<br>p: {:.3e}<br>BH q: {:.3e}<br>Median case/control: {:.4} / {:.4}<br>Mean case/control: {:.4} / {:.4}<br>n case/control: {} / {}{detection}",
+        feature_label,
+        feature,
+        r.effect,
+        r.cliffs_delta,
+        r.p_value,
+        r.q_value,
+        r.median_case,
+        r.median_control,
+        r.mean_case,
+        r.mean_control,
+        r.n_case,
+        r.n_control,
+    )
+}
+
+fn expression_volcano_plot(result: &GeneComparisonResult, title: &str, feature_label: &str) -> Option<Plot> {
+    let mut x_other = Vec::new();
+    let mut y_other = Vec::new();
+    let mut h_other = Vec::new();
+    let mut x_sig = Vec::new();
+    let mut y_sig = Vec::new();
+    let mut h_sig = Vec::new();
+    for r in &result.tests {
+        if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 { continue; }
+        let y = -r.q_value.max(1e-300).log10();
+        let hover = feature_hover(r, feature_label);
+        if r.q_value <= 0.05 {
+            x_sig.push(r.effect); y_sig.push(y); h_sig.push(hover);
+        } else {
+            x_other.push(r.effect); y_other.push(y); h_other.push(hover);
+        }
+    }
+    labeled_scatter_plot(
+        vec![
+            (format!("Other {}", if feature_label == "Gene" { "genes" } else { "transcripts" }), x_other, y_other, h_other),
+            ("BH q ≤ 0.05".to_string(), x_sig, y_sig, h_sig),
+        ],
+        title,
+        "log2 mean fold change (case / control)",
+        "-log10(BH q)",
+    )
+}
+
+fn expression_detection_plot(result: &GeneComparisonResult, title: &str, feature_label: &str) -> Option<Plot> {
     let mut x = Vec::new();
     let mut y = Vec::new();
+    let mut hover = Vec::new();
     for r in &result.tests {
         let (Some(case), Some(ctrl)) = (r.detection_case, r.detection_control) else { continue; };
         if case.is_finite() && ctrl.is_finite() {
             x.push(ctrl * 100.0);
             y.push(case * 100.0);
+            let secondary_label = if feature_label == "Gene" || feature_label == "Transcript" { "NCBI Gene ID" } else { "Secondary ID" };
+            let secondary = if r.secondary_id.trim().is_empty() { String::new() } else { format!("<br>{}: {}", secondary_label, escape_hover_text(&r.secondary_id)) };
+            hover.push(format!(
+                "<b>{}: {}</b>{secondary}<br>Control detection: {:.1}%<br>Case detection: {:.1}%<br>Δ detection: {:+.1} percentage points<br>Effect: {:.4}<br>BH q: {:.3e}",
+                feature_label,
+                escape_hover_text(&r.feature),
+                ctrl * 100.0,
+                case * 100.0,
+                (case - ctrl) * 100.0,
+                r.effect,
+                r.q_value,
+            ));
         }
     }
-    if x.is_empty() { return None; }
-    plot_scatter(
-        &vec![x],
-        &vec![y],
-        vec!["Genes".to_string()],
-        "Gene detection shift",
+    labeled_scatter_plot(
+        vec![(format!("{feature_label}s"), x, y, hover)],
+        title,
         "Control detection (%)",
         "Case detection (%)",
-    ).ok()
+    )
 }
 
-fn feature_effect_significance_plot(title: &str, tests: &[FeatureTestResult]) -> Option<plotly::Plot> {
+fn feature_effect_significance_plot(title: &str, tests: &[FeatureTestResult], feature_label: &str) -> Option<Plot> {
     let mut x_other = Vec::new();
     let mut y_other = Vec::new();
+    let mut h_other = Vec::new();
     let mut x_sig = Vec::new();
     let mut y_sig = Vec::new();
+    let mut h_sig = Vec::new();
     for r in tests {
         if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 { continue; }
         let y = -r.q_value.max(1e-300).log10();
-        if r.q_value <= 0.05 { x_sig.push(r.effect); y_sig.push(y); }
-        else { x_other.push(r.effect); y_other.push(y); }
+        let hover = feature_hover(r, feature_label);
+        if r.q_value <= 0.05 {
+            x_sig.push(r.effect); y_sig.push(y); h_sig.push(hover);
+        } else {
+            x_other.push(r.effect); y_other.push(y); h_other.push(hover);
+        }
     }
-    if x_other.is_empty() && x_sig.is_empty() { return None; }
-    let mut xs = Vec::new();
-    let mut ys = Vec::new();
-    let mut labels = Vec::new();
-    if !x_other.is_empty() { xs.push(x_other); ys.push(y_other); labels.push("Other".to_string()); }
-    if !x_sig.is_empty() { xs.push(x_sig); ys.push(y_sig); labels.push("BH q ≤ 0.05".to_string()); }
-    plot_scatter(&xs, &ys, labels, title, "Effect (case - control)", "-log10(BH q)").ok()
+    labeled_scatter_plot(
+        vec![
+            ("Other".to_string(), x_other, y_other, h_other),
+            ("BH q ≤ 0.05".to_string(), x_sig, y_sig, h_sig),
+        ],
+        title,
+        "Effect (case - control)",
+        "-log10(BH q)",
+    )
 }
 
 fn feature_table(title: &str, tests: &[FeatureTestResult], limit: usize) -> Markup {
@@ -491,6 +723,15 @@ fn group_mean_isotype_table(result: &BcrIsotypeComparisonResult, comp: &CohortCo
 }
 
 fn report_bcr_metric_specs() -> [(&'static str, fn(&BcrSampleSummary) -> f64); 4] {
+    [
+        ("Shannon diversity", |r| r.shannon),
+        ("Clonality", |r| r.clonality),
+        ("Unique clones", |r| r.unique_clones),
+        ("Top clone fraction", |r| r.top_clone_fraction),
+    ]
+}
+
+fn report_tcr_metric_specs() -> [(&'static str, fn(&TcrSampleSummary) -> f64); 4] {
     [
         ("Shannon diversity", |r| r.shannon),
         ("Clonality", |r| r.clonality),
@@ -579,10 +820,18 @@ mod tests {
                 mapping: None,
                 gene: Some(&gene),
                 gene_error: None,
+                transcript: None,
+                transcript_error: None,
                 bcr: None,
                 bcr_error: None,
                 bcr_isotype: None,
                 bcr_isotype_error: None,
+                tcr_alpha: None,
+                tcr_alpha_error: None,
+                tcr_beta: None,
+                tcr_beta_error: None,
+                immune: None,
+                immune_error: None,
             },
         )
         .unwrap();
@@ -590,6 +839,8 @@ mod tests {
         assert!(html.contains("4C Cohort Explorer"));
         assert!(html.contains("Gene expression"));
         assert!(html.contains("TEST1"));
+        assert!(html.contains("Gene: TEST1"));
+        assert!(html.contains("NCBI Gene ID: 1"));
         assert!(!html.contains(r#"<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>"#));
         assert!(!html.contains("https://cdn.datatables.net/"));
         assert!(!html.contains("https://cdnjs.cloudflare.com/ajax/libs/jquery/"));

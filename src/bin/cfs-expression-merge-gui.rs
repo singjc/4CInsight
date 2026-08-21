@@ -1,9 +1,11 @@
 use cfs_expression_merger::cohort::{
     build_comparison, build_mapping, load_metadata, run_bcr_comparison, run_bcr_isotype_comparison,
-    run_gene_comparison, scan_project, write_bcr_isotype_values, write_bcr_sample_summaries,
-    write_feature_tests, write_mapping_audit, write_mapping_audit_csv, BcrComparisonResult, BcrIsotypeComparisonResult,
-    CohortComparison, CohortMapping, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
-    MappingStatus, MetadataTable, ProjectScan, CohortModality,
+    run_gene_comparison, run_transcript_comparison, run_tcr_comparison, run_immune_infiltrate_comparison,
+    scan_project, write_bcr_isotype_values, write_bcr_sample_summaries, write_feature_tests,
+    write_immune_values, write_mapping_audit, write_mapping_audit_csv, write_tcr_sample_summaries,
+    BcrComparisonResult, BcrIsotypeComparisonResult, CohortComparison, CohortMapping, ComparisonPreset,
+    FeatureTestResult, GeneComparisonResult, ImmuneComparisonResult, MappingStatus, MetadataTable,
+    ProjectScan, CohortModality, TcrComparisonResult,
 };
 use cfs_expression_merger::report::{generate_cohort_html_report, CohortReportInputs};
 use cfs_expression_merger::{
@@ -71,8 +73,12 @@ enum ProfileView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CohortResultView {
     Gene,
+    Transcript,
     Bcr,
     BcrIsotype,
+    TcrAlpha,
+    TcrBeta,
+    Immune,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,10 +129,18 @@ struct CohortAnalysisBundle {
     comparison: CohortComparison,
     gene: Option<GeneComparisonResult>,
     gene_error: Option<String>,
+    transcript: Option<GeneComparisonResult>,
+    transcript_error: Option<String>,
     bcr: Option<BcrComparisonResult>,
     bcr_error: Option<String>,
     bcr_isotype: Option<BcrIsotypeComparisonResult>,
     bcr_isotype_error: Option<String>,
+    tcr_alpha: Option<TcrComparisonResult>,
+    tcr_alpha_error: Option<String>,
+    tcr_beta: Option<TcrComparisonResult>,
+    tcr_beta_error: Option<String>,
+    immune: Option<ImmuneComparisonResult>,
+    immune_error: Option<String>,
 }
 
 enum MergeWorkerMessage {
@@ -197,8 +211,13 @@ struct MergeApp {
     cohort_result_view: CohortResultView,
     cohort_run_gene: bool,
     cohort_gene_metric: Metric,
+    cohort_run_transcript: bool,
+    cohort_transcript_metric: Metric,
     cohort_run_bcr: bool,
     cohort_run_bcr_isotype: bool,
+    cohort_run_tcr_alpha: bool,
+    cohort_run_tcr_beta: bool,
+    cohort_run_immune: bool,
     cohort_bcr_metric_view: BcrMetricView,
 }
 
@@ -269,8 +288,13 @@ impl MergeApp {
             cohort_result_view: CohortResultView::Gene,
             cohort_run_gene: true,
             cohort_gene_metric: Metric::Tpm,
+            cohort_run_transcript: false,
+            cohort_transcript_metric: Metric::Tpm,
             cohort_run_bcr: true,
             cohort_run_bcr_isotype: true,
+            cohort_run_tcr_alpha: false,
+            cohort_run_tcr_beta: false,
+            cohort_run_immune: false,
             cohort_bcr_metric_view: BcrMetricView::Shannon,
         }
     }
@@ -1898,14 +1922,22 @@ impl MergeApp {
             }
 
             ui.add_space(6.0);
+            ui.label(egui::RichText::new("Optional analyses").strong());
             ui.horizontal_wrapped(|ui| {
-                ui.label("Analyses:");
                 ui.checkbox(&mut this.cohort_run_gene, "Gene expression")
-                    .on_hover_text("Tests every gene using merged TPM columns. Mann-Whitney U on log2(TPM+1), BH FDR, Cliff's delta, and log2 mean fold change are reported.");
+                    .on_hover_text("Tests every gene from the merged gene-expression table using the selected value type. Reports Mann-Whitney U, BH FDR, Cliff's delta, fold change and detection shifts.");
+                ui.checkbox(&mut this.cohort_run_transcript, "Transcript expression")
+                    .on_hover_text("Tests transcript-level abundance from the merged transcript-expression table. TPM is recommended for the exploratory screen; Total Reads is also available.");
                 ui.checkbox(&mut this.cohort_run_bcr, "BCR")
                     .on_hover_text("Summarizes clone count, diversity/clonality, top-clone fraction, weighted CDR3 length, and BCR isotype/V/D/J usage from heavy-chain reports.");
                 ui.checkbox(&mut this.cohort_run_bcr_isotype, "BCR isotype")
                     .on_hover_text("Compares the dedicated IGH isotype-composition fractions across groups.");
+                ui.checkbox(&mut this.cohort_run_tcr_alpha, "TCR alpha")
+                    .on_hover_text("Summarizes alpha-chain clone depth/diversity/clonality, CDR3 length, V-gene, J-gene and V-J pair usage.");
+                ui.checkbox(&mut this.cohort_run_tcr_beta, "TCR beta")
+                    .on_hover_text("Summarizes beta-chain clone depth/diversity/clonality, CDR3 length, V-gene, J-gene and V-J pair usage.");
+                ui.checkbox(&mut this.cohort_run_immune, "Immune infiltrate")
+                    .on_hover_text("Compares ssGSEA immune-cell infiltration scores for each reported immune-cell type.");
             });
             if this.cohort_run_gene {
                 ui.horizontal(|ui| {
@@ -1930,18 +1962,39 @@ impl MergeApp {
                     .weak(),
                 );
             }
-            ui.label(
-                egui::RichText::new(
-                    "TCR alpha/beta and immune-infiltrate files are already detected and audited in this version; their comparison modules are the next extension.",
-                )
-                .small()
-                .weak(),
-            );
-
+            if this.cohort_run_transcript {
+                ui.horizontal(|ui| {
+                    ui.label("Transcript value:");
+                    egui::ComboBox::from_id_salt("cohort_transcript_metric")
+                        .selected_text(this.cohort_transcript_metric.display_name())
+                        .show_ui(ui, |ui| {
+                            for metric in [Metric::Tpm, Metric::TotalReads] {
+                                ui.selectable_value(
+                                    &mut this.cohort_transcript_metric,
+                                    metric,
+                                    metric.display_name(),
+                                );
+                            }
+                        });
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Transcript analysis uses the same exploratory non-parametric screen as gene expression; transcript length fields are not treated as biological abundance measurements.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
             let ready = this.cohort_scan.is_some()
                 && this.cohort_metadata.is_some()
                 && !this.cohort_running
-                && (this.cohort_run_gene || this.cohort_run_bcr || this.cohort_run_bcr_isotype);
+                && (this.cohort_run_gene
+                    || this.cohort_run_transcript
+                    || this.cohort_run_bcr
+                    || this.cohort_run_bcr_isotype
+                    || this.cohort_run_tcr_alpha
+                    || this.cohort_run_tcr_beta
+                    || this.cohort_run_immune);
             let run = ui
                 .add_enabled(ready, egui::Button::new("Run exploratory comparison"))
                 .on_hover_text("Run each selected modality independently. If one input type is absent or cannot be analyzed, the remaining modalities continue and the failure is reported.");
@@ -2016,10 +2069,18 @@ impl MergeApp {
                             mapping: this.cohort_mapping.as_ref(),
                             gene: bundle.gene.as_ref(),
                             gene_error: bundle.gene_error.as_deref(),
+                            transcript: bundle.transcript.as_ref(),
+                            transcript_error: bundle.transcript_error.as_deref(),
                             bcr: bundle.bcr.as_ref(),
                             bcr_error: bundle.bcr_error.as_deref(),
                             bcr_isotype: bundle.bcr_isotype.as_ref(),
                             bcr_isotype_error: bundle.bcr_isotype_error.as_deref(),
+                            tcr_alpha: bundle.tcr_alpha.as_ref(),
+                            tcr_alpha_error: bundle.tcr_alpha_error.as_deref(),
+                            tcr_beta: bundle.tcr_beta.as_ref(),
+                            tcr_beta_error: bundle.tcr_beta_error.as_deref(),
+                            immune: bundle.immune.as_ref(),
+                            immune_error: bundle.immune_error.as_deref(),
                         };
                         match generate_cohort_html_report(&path, inputs) {
                             Ok(()) => {
@@ -2033,62 +2094,78 @@ impl MergeApp {
                 }
             });
             ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(
-                    &mut this.cohort_result_view,
-                    CohortResultView::Gene,
-                    "Gene expression",
-                );
-                ui.selectable_value(&mut this.cohort_result_view, CohortResultView::Bcr, "BCR");
-                ui.selectable_value(
-                    &mut this.cohort_result_view,
-                    CohortResultView::BcrIsotype,
-                    "BCR isotype",
-                );
+                if bundle.gene.is_some() || bundle.gene_error.is_some() {
+                    ui.selectable_value(&mut this.cohort_result_view, CohortResultView::Gene, "Gene expression");
+                }
+                if bundle.transcript.is_some() || bundle.transcript_error.is_some() {
+                    ui.selectable_value(&mut this.cohort_result_view, CohortResultView::Transcript, "Transcript expression");
+                }
+                if bundle.bcr.is_some() || bundle.bcr_error.is_some() {
+                    ui.selectable_value(&mut this.cohort_result_view, CohortResultView::Bcr, "BCR");
+                }
+                if bundle.bcr_isotype.is_some() || bundle.bcr_isotype_error.is_some() {
+                    ui.selectable_value(&mut this.cohort_result_view, CohortResultView::BcrIsotype, "BCR isotype");
+                }
+                if bundle.tcr_alpha.is_some() || bundle.tcr_alpha_error.is_some() {
+                    ui.selectable_value(&mut this.cohort_result_view, CohortResultView::TcrAlpha, "TCR alpha");
+                }
+                if bundle.tcr_beta.is_some() || bundle.tcr_beta_error.is_some() {
+                    ui.selectable_value(&mut this.cohort_result_view, CohortResultView::TcrBeta, "TCR beta");
+                }
+                if bundle.immune.is_some() || bundle.immune_error.is_some() {
+                    ui.selectable_value(&mut this.cohort_result_view, CohortResultView::Immune, "Immune infiltrate");
+                }
             });
             ui.separator();
 
             match this.cohort_result_view {
                 CohortResultView::Gene => {
                     if let Some(result) = &bundle.gene {
-                        this.render_gene_comparison_result(ui, result);
+                        this.render_expression_comparison_result(ui, result, "Gene", "genes", "cohort_gene_volcano_v06", "cohort_gene_detection_v06");
                     } else {
-                        ui.label(
-                            bundle
-                                .gene_error
-                                .as_deref()
-                                .unwrap_or("Gene analysis was not requested."),
-                        );
+                        ui.label(bundle.gene_error.as_deref().unwrap_or("Gene analysis was not requested."));
+                    }
+                }
+                CohortResultView::Transcript => {
+                    if let Some(result) = &bundle.transcript {
+                        this.render_expression_comparison_result(ui, result, "Transcript", "transcripts", "cohort_transcript_volcano_v06", "cohort_transcript_detection_v06");
+                    } else {
+                        ui.label(bundle.transcript_error.as_deref().unwrap_or("Transcript analysis was not requested."));
                     }
                 }
                 CohortResultView::Bcr => {
-                    if let Some(result) = &bundle.bcr {
-                        this.render_bcr_comparison_result(ui, result);
-                    } else {
-                        ui.label(
-                            bundle
-                                .bcr_error
-                                .as_deref()
-                                .unwrap_or("BCR analysis was not requested."),
-                        );
-                    }
+                    if let Some(result) = &bundle.bcr { this.render_bcr_comparison_result(ui, result); }
+                    else { ui.label(bundle.bcr_error.as_deref().unwrap_or("BCR analysis was not requested.")); }
                 }
                 CohortResultView::BcrIsotype => {
-                    if let Some(result) = &bundle.bcr_isotype {
-                        this.render_bcr_isotype_result(ui, result);
-                    } else {
-                        ui.label(
-                            bundle
-                                .bcr_isotype_error
-                                .as_deref()
-                                .unwrap_or("BCR-isotype analysis was not requested."),
-                        );
-                    }
+                    if let Some(result) = &bundle.bcr_isotype { this.render_bcr_isotype_result(ui, result); }
+                    else { ui.label(bundle.bcr_isotype_error.as_deref().unwrap_or("BCR-isotype analysis was not requested.")); }
+                }
+                CohortResultView::TcrAlpha => {
+                    if let Some(result) = &bundle.tcr_alpha { this.render_tcr_comparison_result(ui, result); }
+                    else { ui.label(bundle.tcr_alpha_error.as_deref().unwrap_or("TCR-alpha analysis was not requested.")); }
+                }
+                CohortResultView::TcrBeta => {
+                    if let Some(result) = &bundle.tcr_beta { this.render_tcr_comparison_result(ui, result); }
+                    else { ui.label(bundle.tcr_beta_error.as_deref().unwrap_or("TCR-beta analysis was not requested.")); }
+                }
+                CohortResultView::Immune => {
+                    if let Some(result) = &bundle.immune { this.render_immune_comparison_result(ui, result); }
+                    else { ui.label(bundle.immune_error.as_deref().unwrap_or("Immune-infiltrate analysis was not requested.")); }
                 }
             }
         });
     }
 
-    fn render_gene_comparison_result(&self, ui: &mut egui::Ui, result: &GeneComparisonResult) {
+    fn render_expression_comparison_result(
+        &self,
+        ui: &mut egui::Ui,
+        result: &GeneComparisonResult,
+        feature_name: &str,
+        feature_plural: &str,
+        volcano_id: &'static str,
+        detection_id: &'static str,
+    ) {
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("Case columns: {}", result.n_case_columns));
             ui.separator();
@@ -2096,11 +2173,11 @@ impl MergeApp {
             ui.separator();
             ui.label(format!("Other/unmatched columns: {}", result.unmatched_columns));
             ui.separator();
-            ui.label(format!("Genes tested: {}", result.tests.len()));
+            ui.label(format!("{} tested: {}", feature_plural, result.tests.len()));
         });
         ui.label(
             egui::RichText::new(format!(
-                "Exploratory test: Mann-Whitney U on log2({}+1); effect is log2((mean case + 0.5)/(mean control + 0.5)); q is BH-adjusted across tested genes.",
+                "Exploratory test: Mann-Whitney U on log2({}+1); effect is log2((mean case + 0.5)/(mean control + 0.5)); q is BH-adjusted across tested {feature_plural}.",
                 result.metric
             ))
             .small()
@@ -2114,7 +2191,7 @@ impl MergeApp {
             .map(|r| [r.effect, -r.q_value.max(1e-300).log10()])
             .collect();
         let accent = ui.visuals().selection.bg_fill;
-        Plot::new("cohort_gene_volcano_v04")
+        Plot::new(volcano_id)
             .height(360.0)
             .x_axis_label("log2 mean fold change (case / control)")
             .y_axis_label("-log10(BH q)")
@@ -2127,7 +2204,7 @@ impl MergeApp {
             .show(ui, |plot_ui| {
                 if !all_points.is_empty() {
                     plot_ui.points(
-                        Points::new("All tested genes", all_points)
+                        Points::new(format!("All tested {feature_plural}"), all_points)
                             .color(egui::Color32::from_gray(100))
                             .radius(2.0),
                     );
@@ -2165,22 +2242,24 @@ impl MergeApp {
             });
         ui.label(
             egui::RichText::new(
-                "Hover the highlighted top-ranked genes for effect size and significance. These are discovery candidates, not covariate-adjusted differential-expression results.",
+                format!("Hover the highlighted top-ranked {feature_plural} for effect size and significance. These are discovery candidates, not covariate-adjusted differential-expression results."),
             )
             .small()
             .weak(),
         );
         ui.collapsing("Detection shift (case vs control)", |ui| {
-            self.render_gene_detection_shift(ui, result);
+            self.render_expression_detection_shift(ui, result, feature_name, feature_plural, detection_id);
         });
-        self.render_feature_test_table(ui, "Top differential genes", &result.tests, 520.0);
-        ui.label(
-            egui::RichText::new(
-                "Pathway enrichment is not yet run in v0.4. The next gene-analysis step will accept a GMT gene-set library and support both hit-list ORA and ranked enrichment so pathway results remain explicit and reproducible.",
-            )
-            .small()
-            .weak(),
-        );
+        self.render_feature_test_table(ui, &format!("Top differential {feature_plural}"), &result.tests, 520.0);
+        if feature_name == "Gene" {
+            ui.label(
+                egui::RichText::new(
+                    "Pathway enrichment is not yet run in this pass. A future gene-analysis extension can accept a versioned GMT library for hit-list ORA and ranked enrichment.",
+                )
+                .small()
+                .weak(),
+            );
+        }
     }
 
     fn render_bcr_comparison_result(&mut self, ui: &mut egui::Ui, result: &BcrComparisonResult) {
@@ -2297,7 +2376,184 @@ impl MergeApp {
         });
     }
 
-    fn render_gene_detection_shift(&self, ui: &mut egui::Ui, result: &GeneComparisonResult) {
+    fn render_tcr_comparison_result(&self, ui: &mut egui::Ui, result: &TcrComparisonResult) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("{} files used: {}", result.chain, result.files_used));
+            ui.separator();
+            ui.label(format!(
+                "Files outside comparison/unmatched: {}",
+                result.files_skipped_not_in_groups
+            ));
+            ui.separator();
+            ui.label(format!("Samples summarized: {}", result.sample_summaries.len()));
+        });
+        if !result.file_errors.is_empty() {
+            ui.collapsing(format!("File warnings ({})", result.file_errors.len()), |ui| {
+                for warning in &result.file_errors {
+                    ui.label(warning);
+                }
+            });
+        }
+
+        let id_prefix = if result.chain.to_ascii_lowercase().contains("alpha") {
+            "cohort_tcr_alpha"
+        } else {
+            "cohort_tcr_beta"
+        };
+        self.render_feature_effect_plot(
+            ui,
+            &format!("{id_prefix}_metric_effects_v06"),
+            &format!("{} sample-level repertoire metrics", result.chain),
+            &result.metric_tests,
+        );
+        self.render_feature_test_table(
+            ui,
+            &format!("{} sample-level repertoire metrics", result.chain),
+            &result.metric_tests,
+            360.0,
+        );
+        ui.collapsing("V-gene usage", |ui| {
+            self.render_feature_effect_plot(
+                ui,
+                &format!("{id_prefix}_v_gene_effects_v06"),
+                "V-gene fraction shifts",
+                &result.v_gene_tests,
+            );
+            self.render_feature_test_table(ui, "V-gene fraction tests", &result.v_gene_tests, 540.0);
+        });
+        ui.collapsing("J-gene usage", |ui| {
+            self.render_feature_effect_plot(
+                ui,
+                &format!("{id_prefix}_j_gene_effects_v06"),
+                "J-gene fraction shifts",
+                &result.j_gene_tests,
+            );
+            self.render_feature_test_table(ui, "J-gene fraction tests", &result.j_gene_tests, 540.0);
+        });
+        ui.collapsing("V-J pair usage", |ui| {
+            self.render_feature_effect_plot(
+                ui,
+                &format!("{id_prefix}_vj_pair_effects_v06"),
+                "V-J pair fraction shifts",
+                &result.vj_pair_tests,
+            );
+            self.render_feature_test_table(ui, "V-J pair fraction tests", &result.vj_pair_tests, 540.0);
+        });
+        ui.label(
+            egui::RichText::new(
+                "This initial TCR pass is an exploratory, depth-dependent comparison of repertoire summaries and V/J composition. Matched-depth rarefaction, Morisita-Horn similarity/PCoA, public/private clonotypes and amino-acid convergence remain separate advanced repertoire analyses for a later iteration.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    fn render_immune_comparison_result(&self, ui: &mut egui::Ui, result: &ImmuneComparisonResult) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Immune-infiltrate files used: {}", result.files_used));
+            ui.separator();
+            ui.label(format!(
+                "Files outside comparison/unmatched: {}",
+                result.files_skipped_not_in_groups
+            ));
+            ui.separator();
+            ui.label(format!("Cell types tested: {}", result.tests.len()));
+        });
+        if !result.file_errors.is_empty() {
+            ui.collapsing(format!("File warnings ({})", result.file_errors.len()), |ui| {
+                for warning in &result.file_errors {
+                    ui.label(warning);
+                }
+            });
+        }
+        self.render_immune_group_means_plot(ui, result);
+        self.render_feature_effect_plot(
+            ui,
+            "cohort_immune_effects_v06",
+            "Immune-cell ssGSEA shifts",
+            &result.tests,
+        );
+        self.render_feature_test_table(ui, "Immune-cell ssGSEA tests", &result.tests, 520.0);
+    }
+
+    fn render_immune_group_means_plot(&self, ui: &mut egui::Ui, result: &ImmuneComparisonResult) {
+        let Some(bundle) = &self.cohort_results else { return; };
+        let case_label = bundle.comparison.case_label.clone();
+        let control_label = bundle.comparison.control_label.clone();
+        let mut case_values: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+        let mut ctrl_values: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+        for value in &result.values {
+            if value.group == case_label {
+                case_values.entry(value.cell_type.clone()).or_default().push(value.score);
+            } else if value.group == control_label {
+                ctrl_values.entry(value.cell_type.clone()).or_default().push(value.score);
+            }
+        }
+        let features: Vec<String> = case_values
+            .keys()
+            .chain(ctrl_values.keys())
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if features.is_empty() { return; }
+        let mut case_bars = Vec::new();
+        let mut ctrl_bars = Vec::new();
+        for (idx, feature) in features.iter().enumerate() {
+            let case_mean = case_values
+                .get(feature)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.iter().sum::<f64>() / v.len() as f64)
+                .unwrap_or(f64::NAN);
+            let ctrl_mean = ctrl_values
+                .get(feature)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.iter().sum::<f64>() / v.len() as f64)
+                .unwrap_or(f64::NAN);
+            if ctrl_mean.is_finite() {
+                ctrl_bars.push(
+                    Bar::new(idx as f64 - 0.18, ctrl_mean)
+                        .name(format!("{} — {}: {}", feature, control_label, format_value(ctrl_mean)))
+                        .width(0.32),
+                );
+            }
+            if case_mean.is_finite() {
+                case_bars.push(
+                    Bar::new(idx as f64 + 0.18, case_mean)
+                        .name(format!("{} — {}: {}", feature, case_label, format_value(case_mean)))
+                        .width(0.32),
+                );
+            }
+        }
+        let axis_features = features.clone();
+        let accent = ui.visuals().selection.bg_fill;
+        Plot::new("cohort_immune_group_means_v06")
+            .height(340.0)
+            .x_axis_label("Immune cell type")
+            .y_axis_label("Mean ssGSEA score")
+            .x_axis_formatter(move |mark, _range| sample_tick_label(mark.value, &axis_features))
+            .show(ui, |plot_ui| {
+                plot_ui.bar_chart(
+                    BarChart::new(control_label.clone(), ctrl_bars)
+                        .color(egui::Color32::from_gray(145)),
+                );
+                plot_ui.bar_chart(BarChart::new(case_label.clone(), case_bars).color(accent));
+            });
+        ui.label(
+            egui::RichText::new("Group means for each immune-cell ssGSEA score; use the ranked test table below for effect size and significance.")
+                .small()
+                .weak(),
+        );
+    }
+
+    fn render_expression_detection_shift(
+        &self,
+        ui: &mut egui::Ui,
+        result: &GeneComparisonResult,
+        feature_name: &str,
+        feature_plural: &str,
+        plot_id: &'static str,
+    ) {
         let points: Vec<_> = result
             .tests
             .iter()
@@ -2305,7 +2561,7 @@ impl MergeApp {
             .filter(|(_, case, ctrl)| case.is_finite() && ctrl.is_finite())
             .collect();
         if points.is_empty() {
-            ui.label("Detection fractions are not available for this gene-expression result.");
+            ui.label(format!("Detection fractions are not available for this {} result.", feature_name.to_ascii_lowercase()));
             return;
         }
         let all_points: Vec<[f64; 2]> = points
@@ -2313,7 +2569,7 @@ impl MergeApp {
             .map(|(_, case, ctrl)| [100.0 * *ctrl, 100.0 * *case])
             .collect();
         let accent = ui.visuals().selection.bg_fill;
-        Plot::new("cohort_gene_detection_shift_v05")
+        Plot::new(plot_id)
             .height(330.0)
             .x_axis_label("Control detection (%)")
             .y_axis_label("Case detection (%)")
@@ -2329,7 +2585,7 @@ impl MergeApp {
                         .color(egui::Color32::from_gray(120)),
                 );
                 plot_ui.points(
-                    Points::new("All genes", all_points)
+                    Points::new(format!("All {feature_plural}"), all_points)
                         .color(egui::Color32::from_gray(95))
                         .radius(2.0),
                 );
@@ -2356,7 +2612,7 @@ impl MergeApp {
             });
         ui.label(
             egui::RichText::new(
-                "Genes above the diagonal are detected in a larger fraction of case samples; genes below it are detected more often in controls.",
+                format!("{feature_name}s above the diagonal are detected in a larger fraction of case samples; {feature_plural} below it are detected more often in controls."),
             )
             .small()
             .weak(),
@@ -2664,9 +2920,13 @@ impl MergeApp {
         fs::create_dir_all(&outdir)?;
         if let Some(mapping) = &self.cohort_mapping {
             write_mapping_audit(&outdir.join("sample_mapping_audit.tsv"), mapping)?;
+            write_mapping_audit_csv(&outdir.join("sample_mapping_audit.csv"), mapping)?;
         }
         if let Some(gene) = &bundle.gene {
             write_feature_tests(&outdir.join("gene_expression_tests.tsv"), &gene.tests)?;
+        }
+        if let Some(transcript) = &bundle.transcript {
+            write_feature_tests(&outdir.join("transcript_expression_tests.tsv"), &transcript.tests)?;
         }
         if let Some(bcr) = &bundle.bcr {
             write_bcr_sample_summaries(
@@ -2682,17 +2942,11 @@ impl MergeApp {
             write_feature_tests(&outdir.join("bcr_d_gene_fraction_tests.tsv"), &bcr.d_gene_tests)?;
             write_feature_tests(&outdir.join("bcr_j_gene_fraction_tests.tsv"), &bcr.j_gene_tests)?;
             if !bcr.file_errors.is_empty() {
-                fs::write(
-                    outdir.join("bcr_file_warnings.txt"),
-                    bcr.file_errors.join("\n"),
-                )?;
+                fs::write(outdir.join("bcr_file_warnings.txt"), bcr.file_errors.join("\n"))?;
             }
         }
         if let Some(iso) = &bundle.bcr_isotype {
-            write_bcr_isotype_values(
-                &outdir.join("bcr_isotype_sample_values.tsv"),
-                &iso.values,
-            )?;
+            write_bcr_isotype_values(&outdir.join("bcr_isotype_sample_values.tsv"), &iso.values)?;
             write_feature_tests(&outdir.join("bcr_isotype_fraction_tests.tsv"), &iso.tests)?;
             if !iso.file_errors.is_empty() {
                 fs::write(
@@ -2701,8 +2955,38 @@ impl MergeApp {
                 )?;
             }
         }
+        if let Some(tcr) = &bundle.tcr_alpha {
+            write_tcr_sample_summaries(&outdir.join("tcr_alpha_sample_summaries.tsv"), &tcr.sample_summaries)?;
+            write_feature_tests(&outdir.join("tcr_alpha_sample_metric_tests.tsv"), &tcr.metric_tests)?;
+            write_feature_tests(&outdir.join("tcr_alpha_v_gene_fraction_tests.tsv"), &tcr.v_gene_tests)?;
+            write_feature_tests(&outdir.join("tcr_alpha_j_gene_fraction_tests.tsv"), &tcr.j_gene_tests)?;
+            write_feature_tests(&outdir.join("tcr_alpha_vj_pair_fraction_tests.tsv"), &tcr.vj_pair_tests)?;
+            if !tcr.file_errors.is_empty() {
+                fs::write(outdir.join("tcr_alpha_file_warnings.txt"), tcr.file_errors.join("\n"))?;
+            }
+        }
+        if let Some(tcr) = &bundle.tcr_beta {
+            write_tcr_sample_summaries(&outdir.join("tcr_beta_sample_summaries.tsv"), &tcr.sample_summaries)?;
+            write_feature_tests(&outdir.join("tcr_beta_sample_metric_tests.tsv"), &tcr.metric_tests)?;
+            write_feature_tests(&outdir.join("tcr_beta_v_gene_fraction_tests.tsv"), &tcr.v_gene_tests)?;
+            write_feature_tests(&outdir.join("tcr_beta_j_gene_fraction_tests.tsv"), &tcr.j_gene_tests)?;
+            write_feature_tests(&outdir.join("tcr_beta_vj_pair_fraction_tests.tsv"), &tcr.vj_pair_tests)?;
+            if !tcr.file_errors.is_empty() {
+                fs::write(outdir.join("tcr_beta_file_warnings.txt"), tcr.file_errors.join("\n"))?;
+            }
+        }
+        if let Some(immune) = &bundle.immune {
+            write_immune_values(&outdir.join("immune_infiltrate_sample_values.tsv"), &immune.values)?;
+            write_feature_tests(&outdir.join("immune_infiltrate_tests.tsv"), &immune.tests)?;
+            if !immune.file_errors.is_empty() {
+                fs::write(
+                    outdir.join("immune_infiltrate_file_warnings.txt"),
+                    immune.file_errors.join("\n"),
+                )?;
+            }
+        }
         let notes = format!(
-            "Exploratory comparison: {}\\nCase: {}\\nControl: {}\\n\\nThis first-pass analysis intentionally uses all available mapped samples, including longitudinal samples, without repeated-measures or covariate adjustment.\\n",
+            "Exploratory comparison: {}\nCase: {}\nControl: {}\n\nThis first-pass analysis intentionally uses all available mapped samples, including longitudinal samples, without repeated-measures or covariate adjustment.\n",
             bundle.comparison.name,
             bundle.comparison.case_label,
             bundle.comparison.control_label,
@@ -2777,8 +3061,27 @@ impl MergeApp {
         };
         let run_gene = self.cohort_run_gene;
         let gene_metric = self.cohort_gene_metric.display_name().to_string();
+        let run_transcript = self.cohort_run_transcript;
+        let transcript_metric = self.cohort_transcript_metric.display_name().to_string();
         let run_bcr = self.cohort_run_bcr;
         let run_iso = self.cohort_run_bcr_isotype;
+        let run_tcr_alpha = self.cohort_run_tcr_alpha;
+        let run_tcr_beta = self.cohort_run_tcr_beta;
+        let run_immune = self.cohort_run_immune;
+        let stage_count = [
+            run_gene,
+            run_transcript,
+            run_bcr,
+            run_iso,
+            run_tcr_alpha,
+            run_tcr_beta,
+            run_immune,
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+        .max(1) as f32;
+
         let (tx, rx) = mpsc::channel();
         self.cohort_receiver = Some(rx);
         self.cohort_running = true;
@@ -2787,18 +3090,29 @@ impl MergeApp {
         self.cohort_results = None;
 
         std::thread::spawn(move || {
+            let mut stage_index = 0usize;
+            let stage_weight = 1.0 / stage_count;
             let mut gene = None;
             let mut gene_error = None;
+            let mut transcript = None;
+            let mut transcript_error = None;
             let mut bcr = None;
             let mut bcr_error = None;
             let mut bcr_isotype = None;
             let mut bcr_isotype_error = None;
+            let mut tcr_alpha = None;
+            let mut tcr_alpha_error = None;
+            let mut tcr_beta = None;
+            let mut tcr_beta_error = None;
+            let mut immune = None;
+            let mut immune_error = None;
 
             if run_gene {
+                let base = stage_index as f32 * stage_weight;
                 if let Some(path) = scan.merged_gene_tsv.clone() {
                     match run_gene_comparison(&path, &comparison, &gene_metric, |done, total, msg| {
                         let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-                        let _ = tx.send(CohortWorkerMessage::Progress(0.33 * frac, msg.to_string()));
+                        let _ = tx.send(CohortWorkerMessage::Progress(base + stage_weight * frac, format!("Gene expression — {msg}")));
                     }) {
                         Ok(result) => gene = Some(result),
                         Err(e) => gene_error = Some(format!("{e:#}")),
@@ -2808,31 +3122,83 @@ impl MergeApp {
                         "No merged gene-expression TSV was detected in the project. Merge gene expression first or place the merged TSV under the project root.".to_string(),
                     );
                 }
+                stage_index += 1;
+            }
+
+            if run_transcript {
+                let base = stage_index as f32 * stage_weight;
+                if let Some(path) = scan.merged_transcript_tsv.clone() {
+                    match run_transcript_comparison(&path, &comparison, &transcript_metric, |done, total, msg| {
+                        let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+                        let _ = tx.send(CohortWorkerMessage::Progress(base + stage_weight * frac, format!("Transcript expression — {msg}")));
+                    }) {
+                        Ok(result) => transcript = Some(result),
+                        Err(e) => transcript_error = Some(format!("{e:#}")),
+                    }
+                } else {
+                    transcript_error = Some(
+                        "No merged transcript-expression TSV was detected in the project. Merge transcript expression first or place the merged TSV under the project root.".to_string(),
+                    );
+                }
+                stage_index += 1;
             }
 
             if run_bcr {
+                let base = stage_index as f32 * stage_weight;
                 match run_bcr_comparison(&scan.files, &comparison, |done, total, msg| {
                     let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-                    let _ = tx.send(CohortWorkerMessage::Progress(
-                        0.33 + 0.42 * frac,
-                        msg.to_string(),
-                    ));
+                    let _ = tx.send(CohortWorkerMessage::Progress(base + stage_weight * frac, msg.to_string()));
                 }) {
                     Ok(result) => bcr = Some(result),
                     Err(e) => bcr_error = Some(format!("{e:#}")),
                 }
+                stage_index += 1;
             }
 
             if run_iso {
+                let base = stage_index as f32 * stage_weight;
                 match run_bcr_isotype_comparison(&scan.files, &comparison, |done, total, msg| {
                     let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-                    let _ = tx.send(CohortWorkerMessage::Progress(
-                        0.75 + 0.25 * frac,
-                        msg.to_string(),
-                    ));
+                    let _ = tx.send(CohortWorkerMessage::Progress(base + stage_weight * frac, msg.to_string()));
                 }) {
                     Ok(result) => bcr_isotype = Some(result),
                     Err(e) => bcr_isotype_error = Some(format!("{e:#}")),
+                }
+                stage_index += 1;
+            }
+
+            if run_tcr_alpha {
+                let base = stage_index as f32 * stage_weight;
+                match run_tcr_comparison(&scan.files, &comparison, CohortModality::TcrAlpha, |done, total, msg| {
+                    let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+                    let _ = tx.send(CohortWorkerMessage::Progress(base + stage_weight * frac, msg.to_string()));
+                }) {
+                    Ok(result) => tcr_alpha = Some(result),
+                    Err(e) => tcr_alpha_error = Some(format!("{e:#}")),
+                }
+                stage_index += 1;
+            }
+
+            if run_tcr_beta {
+                let base = stage_index as f32 * stage_weight;
+                match run_tcr_comparison(&scan.files, &comparison, CohortModality::TcrBeta, |done, total, msg| {
+                    let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+                    let _ = tx.send(CohortWorkerMessage::Progress(base + stage_weight * frac, msg.to_string()));
+                }) {
+                    Ok(result) => tcr_beta = Some(result),
+                    Err(e) => tcr_beta_error = Some(format!("{e:#}")),
+                }
+                stage_index += 1;
+            }
+
+            if run_immune {
+                let base = stage_index as f32 * stage_weight;
+                match run_immune_infiltrate_comparison(&scan.files, &comparison, |done, total, msg| {
+                    let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+                    let _ = tx.send(CohortWorkerMessage::Progress(base + stage_weight * frac, msg.to_string()));
+                }) {
+                    Ok(result) => immune = Some(result),
+                    Err(e) => immune_error = Some(format!("{e:#}")),
                 }
             }
 
@@ -2840,10 +3206,18 @@ impl MergeApp {
                 comparison,
                 gene,
                 gene_error,
+                transcript,
+                transcript_error,
                 bcr,
                 bcr_error,
                 bcr_isotype,
                 bcr_isotype_error,
+                tcr_alpha,
+                tcr_alpha_error,
+                tcr_beta,
+                tcr_beta_error,
+                immune,
+                immune_error,
             }));
         });
     }
@@ -2865,15 +3239,41 @@ impl MergeApp {
         }
         if let Some(bundle) = done {
             let mut messages = Vec::new();
-            if let Some(err) = &bundle.gene_error {
-                messages.push(format!("Gene: {err}"));
+            if let Some(err) = &bundle.gene_error { messages.push(format!("Gene: {err}")); }
+            if let Some(err) = &bundle.transcript_error { messages.push(format!("Transcript: {err}")); }
+            if let Some(err) = &bundle.bcr_error { messages.push(format!("BCR: {err}")); }
+            if let Some(err) = &bundle.bcr_isotype_error { messages.push(format!("BCR isotype: {err}")); }
+            if let Some(err) = &bundle.tcr_alpha_error { messages.push(format!("TCR alpha: {err}")); }
+            if let Some(err) = &bundle.tcr_beta_error { messages.push(format!("TCR beta: {err}")); }
+            if let Some(err) = &bundle.immune_error { messages.push(format!("Immune infiltrate: {err}")); }
+
+            let current_available = match self.cohort_result_view {
+                CohortResultView::Gene => bundle.gene.is_some(),
+                CohortResultView::Transcript => bundle.transcript.is_some(),
+                CohortResultView::Bcr => bundle.bcr.is_some(),
+                CohortResultView::BcrIsotype => bundle.bcr_isotype.is_some(),
+                CohortResultView::TcrAlpha => bundle.tcr_alpha.is_some(),
+                CohortResultView::TcrBeta => bundle.tcr_beta.is_some(),
+                CohortResultView::Immune => bundle.immune.is_some(),
+            };
+            if !current_available {
+                self.cohort_result_view = if bundle.gene.is_some() {
+                    CohortResultView::Gene
+                } else if bundle.transcript.is_some() {
+                    CohortResultView::Transcript
+                } else if bundle.bcr.is_some() {
+                    CohortResultView::Bcr
+                } else if bundle.bcr_isotype.is_some() {
+                    CohortResultView::BcrIsotype
+                } else if bundle.tcr_alpha.is_some() {
+                    CohortResultView::TcrAlpha
+                } else if bundle.tcr_beta.is_some() {
+                    CohortResultView::TcrBeta
+                } else {
+                    CohortResultView::Immune
+                };
             }
-            if let Some(err) = &bundle.bcr_error {
-                messages.push(format!("BCR: {err}"));
-            }
-            if let Some(err) = &bundle.bcr_isotype_error {
-                messages.push(format!("BCR isotype: {err}"));
-            }
+
             self.cohort_results = Some(bundle);
             self.cohort_running = false;
             self.cohort_progress = 1.0;

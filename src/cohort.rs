@@ -231,6 +231,52 @@ pub struct BcrIsotypeComparisonResult {
     pub tests: Vec<FeatureTestResult>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TcrSampleSummary {
+    pub sample_id: String,
+    pub group: String,
+    pub chain: String,
+    pub total_clone_count: f64,
+    pub unique_clones: f64,
+    pub shannon: f64,
+    pub simpson: f64,
+    pub clonality: f64,
+    pub effective_n: f64,
+    pub top_clone_fraction: f64,
+    pub weighted_mean_cdr3_aa_length: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TcrComparisonResult {
+    pub chain: String,
+    pub files_used: usize,
+    pub files_skipped_not_in_groups: usize,
+    pub file_errors: Vec<String>,
+    pub sample_summaries: Vec<TcrSampleSummary>,
+    pub metric_tests: Vec<FeatureTestResult>,
+    pub v_gene_tests: Vec<FeatureTestResult>,
+    pub j_gene_tests: Vec<FeatureTestResult>,
+    pub vj_pair_tests: Vec<FeatureTestResult>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImmuneSampleValue {
+    pub sample_id: String,
+    pub group: String,
+    pub cell_type: String,
+    pub lineage: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImmuneComparisonResult {
+    pub files_used: usize,
+    pub files_skipped_not_in_groups: usize,
+    pub file_errors: Vec<String>,
+    pub values: Vec<ImmuneSampleValue>,
+    pub tests: Vec<FeatureTestResult>,
+}
+
 pub fn scan_project(root: &Path) -> Result<ProjectScan> {
     if !root.is_dir() {
         bail!("Project root is not a directory: {}", root.display());
@@ -656,6 +702,18 @@ where
     })
 }
 
+pub fn run_transcript_comparison<F>(
+    merged_tsv: &Path,
+    comparison: &CohortComparison,
+    metric: &str,
+    progress: F,
+) -> Result<GeneComparisonResult>
+where
+    F: FnMut(usize, usize, &str),
+{
+    run_gene_comparison(merged_tsv, comparison, metric, progress)
+}
+
 pub fn run_bcr_comparison<F>(
     files: &[DetectedCohortFile],
     comparison: &CohortComparison,
@@ -833,6 +891,283 @@ where
     })
 }
 
+pub fn run_tcr_comparison<F>(
+    files: &[DetectedCohortFile],
+    comparison: &CohortComparison,
+    modality: CohortModality,
+    mut progress: F,
+) -> Result<TcrComparisonResult>
+where
+    F: FnMut(usize, usize, &str),
+{
+    let chain = match modality {
+        CohortModality::TcrAlpha => "TCR alpha",
+        CohortModality::TcrBeta => "TCR beta",
+        _ => bail!("run_tcr_comparison requires TCR alpha or beta modality"),
+    };
+    let all_files: Vec<_> = files.iter().filter(|f| f.modality == modality).collect();
+    if all_files.is_empty() {
+        bail!("No {chain} clone-report files were detected");
+    }
+    let mut chosen: BTreeMap<String, &DetectedCohortFile> = BTreeMap::new();
+    let mut file_errors = Vec::new();
+    for file in all_files {
+        let key = normalize_sample_id(&file.sample_id);
+        if let Some(first) = chosen.get(&key) {
+            file_errors.push(format!(
+                "Duplicate {chain} sample '{}': using {} and ignoring {}",
+                file.sample_id,
+                first.path.display(),
+                file.path.display()
+            ));
+        } else {
+            chosen.insert(key, file);
+        }
+    }
+    let selected: Vec<_> = chosen.into_values().collect();
+    let total = selected.len();
+    let mut files_used = 0usize;
+    let mut skipped_not_in_groups = 0usize;
+    let mut summaries = Vec::new();
+    let mut v_maps = Vec::new();
+    let mut j_maps = Vec::new();
+    let mut vj_maps = Vec::new();
+
+    for (i, file) in selected.iter().enumerate() {
+        let key = normalize_sample_id(&file.sample_id);
+        let group = if comparison.case_ids.contains(&key) {
+            comparison.case_label.clone()
+        } else if comparison.control_ids.contains(&key) {
+            comparison.control_label.clone()
+        } else {
+            skipped_not_in_groups += 1;
+            continue;
+        };
+        progress(i + 1, total.max(1), &format!("{chain}: {}", file.sample_id));
+        let parsed = match parse_tcr_file(&file.path)
+            .with_context(|| format!("While reading {}", file.path.display()))
+        {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                file_errors.push(format!("{}: {e:#}", file.path.display()));
+                continue;
+            }
+        };
+        files_used += 1;
+        summaries.push(TcrSampleSummary {
+            sample_id: file.sample_id.clone(),
+            group: group.clone(),
+            chain: chain.to_string(),
+            total_clone_count: parsed.total_clone_count,
+            unique_clones: parsed.unique_clones as f64,
+            shannon: parsed.shannon,
+            simpson: parsed.simpson,
+            clonality: parsed.clonality,
+            effective_n: parsed.effective_n,
+            top_clone_fraction: parsed.top_clone_fraction,
+            weighted_mean_cdr3_aa_length: parsed.weighted_mean_cdr3_aa_length,
+        });
+        v_maps.push((file.sample_id.clone(), group.clone(), parsed.v_fraction));
+        j_maps.push((file.sample_id.clone(), group.clone(), parsed.j_fraction));
+        vj_maps.push((file.sample_id.clone(), group, parsed.vj_fraction));
+    }
+
+    let metric_tests = compare_tcr_metrics(&summaries, comparison);
+    let v_gene_tests = compare_feature_maps(v_maps, comparison);
+    let j_gene_tests = compare_feature_maps(j_maps, comparison);
+    let vj_pair_tests = compare_feature_maps(vj_maps, comparison);
+    Ok(TcrComparisonResult {
+        chain: chain.to_string(),
+        files_used,
+        files_skipped_not_in_groups: skipped_not_in_groups,
+        file_errors,
+        sample_summaries: summaries,
+        metric_tests,
+        v_gene_tests,
+        j_gene_tests,
+        vj_pair_tests,
+    })
+}
+
+pub fn run_immune_infiltrate_comparison<F>(
+    files: &[DetectedCohortFile],
+    comparison: &CohortComparison,
+    mut progress: F,
+) -> Result<ImmuneComparisonResult>
+where
+    F: FnMut(usize, usize, &str),
+{
+    let all_files: Vec<_> = files
+        .iter()
+        .filter(|f| f.modality == CohortModality::ImmuneInfiltrate)
+        .collect();
+    if all_files.is_empty() {
+        bail!("No immune-infiltrate workbooks were detected");
+    }
+    let mut chosen: BTreeMap<String, &DetectedCohortFile> = BTreeMap::new();
+    let mut file_errors = Vec::new();
+    for file in all_files {
+        let key = normalize_sample_id(&file.sample_id);
+        if let Some(first) = chosen.get(&key) {
+            file_errors.push(format!(
+                "Duplicate immune-infiltrate sample '{}': using {} and ignoring {}",
+                file.sample_id,
+                first.path.display(),
+                file.path.display()
+            ));
+        } else {
+            chosen.insert(key, file);
+        }
+    }
+    let selected: Vec<_> = chosen.into_values().collect();
+    let total = selected.len();
+    let mut files_used = 0usize;
+    let mut skipped_not_in_groups = 0usize;
+    let mut values = Vec::new();
+    let mut sample_maps = Vec::new();
+    let mut lineage_by_feature = HashMap::<String, String>::new();
+
+    for (i, file) in selected.iter().enumerate() {
+        let key = normalize_sample_id(&file.sample_id);
+        let group = if comparison.case_ids.contains(&key) {
+            comparison.case_label.clone()
+        } else if comparison.control_ids.contains(&key) {
+            comparison.control_label.clone()
+        } else {
+            skipped_not_in_groups += 1;
+            continue;
+        };
+        progress(i + 1, total.max(1), &format!("Immune infiltrate: {}", file.sample_id));
+        let rows = match parse_immune_infiltrate_file(&file.path) {
+            Ok(rows) => rows,
+            Err(e) => {
+                file_errors.push(format!("{}: {e:#}", file.path.display()));
+                continue;
+            }
+        };
+        let mut map = HashMap::new();
+        for (cell_type, lineage, score) in rows {
+            lineage_by_feature.entry(cell_type.clone()).or_insert_with(|| lineage.clone());
+            map.insert(cell_type.clone(), score);
+            values.push(ImmuneSampleValue {
+                sample_id: file.sample_id.clone(),
+                group: group.clone(),
+                cell_type,
+                lineage,
+                score,
+            });
+        }
+        sample_maps.push((file.sample_id.clone(), group, map));
+        files_used += 1;
+    }
+    let mut tests = compare_continuous_feature_maps(sample_maps, comparison);
+    for test in &mut tests {
+        test.secondary_id = lineage_by_feature.get(&test.feature).cloned().unwrap_or_default();
+    }
+    Ok(ImmuneComparisonResult {
+        files_used,
+        files_skipped_not_in_groups: skipped_not_in_groups,
+        file_errors,
+        values,
+        tests,
+    })
+}
+
+#[derive(Debug)]
+struct ParsedTcr {
+    total_clone_count: f64,
+    unique_clones: usize,
+    shannon: f64,
+    simpson: f64,
+    clonality: f64,
+    effective_n: f64,
+    top_clone_fraction: f64,
+    weighted_mean_cdr3_aa_length: f64,
+    v_fraction: HashMap<String, f64>,
+    j_fraction: HashMap<String, f64>,
+    vj_fraction: HashMap<String, f64>,
+}
+
+fn parse_tcr_file(path: &Path) -> Result<ParsedTcr> {
+    let (headers, rows) = read_first_sheet(path)?;
+    let columns = header_map(&headers);
+    let count_idx = find_header(&columns, &["Clone Count"])
+        .ok_or_else(|| anyhow!("Missing 'Clone Count' column"))?;
+    let v_idx = find_header(&columns, &["Top V Hits"]);
+    let j_idx = find_header(&columns, &["Top J Hits"]);
+    let cdr3_idx = find_header(&columns, &["CDR3 Amino Acid Sequence"]);
+    let mut counts = Vec::new();
+    let mut total = 0.0;
+    let mut top = 0.0_f64;
+    let mut weighted_len_sum = 0.0;
+    let mut weighted_len_den = 0.0;
+    let mut v = HashMap::<String, f64>::new();
+    let mut j = HashMap::<String, f64>::new();
+    let mut vj = HashMap::<String, f64>::new();
+    for row in rows {
+        let count = row.get(count_idx).and_then(cell_f64).unwrap_or(0.0);
+        if count <= 0.0 { continue; }
+        counts.push(count);
+        total += count;
+        top = top.max(count);
+        if let Some(idx) = cdr3_idx {
+            let text = row.get(idx).map(cell_text).unwrap_or_default();
+            if !text.is_empty() {
+                weighted_len_sum += count * text.chars().count() as f64;
+                weighted_len_den += count;
+            }
+        }
+        let v_call = v_idx.and_then(|idx| row.get(idx)).map(cell_text).unwrap_or_default();
+        let j_call = j_idx.and_then(|idx| row.get(idx)).map(cell_text).unwrap_or_default();
+        let v_first = v_call.split(',').next().unwrap_or_default().trim().to_string();
+        let j_first = j_call.split(',').next().unwrap_or_default().trim().to_string();
+        if !v_first.is_empty() { *v.entry(v_first.clone()).or_insert(0.0) += count; }
+        if !j_first.is_empty() { *j.entry(j_first.clone()).or_insert(0.0) += count; }
+        if !v_first.is_empty() && !j_first.is_empty() {
+            *vj.entry(format!("{v_first} | {j_first}")).or_insert(0.0) += count;
+        }
+    }
+    if total <= 0.0 { bail!("No positive clone counts"); }
+    normalize_feature_map(&mut v, total);
+    normalize_feature_map(&mut j, total);
+    normalize_feature_map(&mut vj, total);
+    let shannon = shannon_entropy(&counts);
+    let simpson = simpson_diversity(&counts);
+    let clonality = if counts.len() > 1 { 1.0 - shannon / (counts.len() as f64).ln() } else { f64::NAN };
+    Ok(ParsedTcr {
+        total_clone_count: total,
+        unique_clones: counts.len(),
+        shannon,
+        simpson,
+        clonality,
+        effective_n: shannon.exp(),
+        top_clone_fraction: top / total,
+        weighted_mean_cdr3_aa_length: if weighted_len_den > 0.0 { weighted_len_sum / weighted_len_den } else { f64::NAN },
+        v_fraction: v,
+        j_fraction: j,
+        vj_fraction: vj,
+    })
+}
+
+fn parse_immune_infiltrate_file(path: &Path) -> Result<Vec<(String, String, f64)>> {
+    let (headers, rows) = read_first_sheet(path)?;
+    let columns = header_map(&headers);
+    let type_idx = find_header(&columns, &["Immune Cell Type"])
+        .ok_or_else(|| anyhow!("Missing 'Immune Cell Type' column"))?;
+    let lineage_idx = find_header(&columns, &["Lineage"]);
+    let score_idx = find_header(&columns, &["ssGSEA Score"])
+        .ok_or_else(|| anyhow!("Missing 'ssGSEA Score' column"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let cell_type = row.get(type_idx).map(cell_text).unwrap_or_default();
+        let lineage = lineage_idx.and_then(|idx| row.get(idx)).map(cell_text).unwrap_or_default();
+        let score = row.get(score_idx).and_then(cell_f64).unwrap_or(f64::NAN);
+        if !cell_type.is_empty() && score.is_finite() { out.push((cell_type, lineage, score)); }
+    }
+    if out.is_empty() { bail!("No usable immune-cell ssGSEA rows"); }
+    Ok(out)
+}
+
 #[derive(Debug)]
 struct ParsedBcr {
     total_clone_count: f64,
@@ -970,6 +1305,54 @@ fn compare_bcr_metrics(rows: &[BcrSampleSummary], comparison: &CohortComparison)
             continue;
         }
         out.push(make_feature_test(name.to_string(), String::new(), &case, &ctrl, false));
+    }
+    apply_bh(&mut out);
+    out.sort_by(feature_result_order);
+    out
+}
+
+fn compare_tcr_metrics(rows: &[TcrSampleSummary], comparison: &CohortComparison) -> Vec<FeatureTestResult> {
+    let specs: [(&str, fn(&TcrSampleSummary) -> f64); 8] = [
+        ("Total clone count", |r| r.total_clone_count),
+        ("Unique clones", |r| r.unique_clones),
+        ("Shannon diversity", |r| r.shannon),
+        ("Simpson diversity", |r| r.simpson),
+        ("Clonality", |r| r.clonality),
+        ("Effective clonotypes", |r| r.effective_n),
+        ("Top clone fraction", |r| r.top_clone_fraction),
+        ("Weighted mean CDR3 AA length", |r| r.weighted_mean_cdr3_aa_length),
+    ];
+    let mut out = Vec::new();
+    for (name, getter) in specs {
+        let case = rows.iter().filter(|r| r.group == comparison.case_label).map(getter).filter(|x| x.is_finite()).collect::<Vec<_>>();
+        let ctrl = rows.iter().filter(|r| r.group == comparison.control_label).map(getter).filter(|x| x.is_finite()).collect::<Vec<_>>();
+        if case.len() < 2 || ctrl.len() < 2 { continue; }
+        out.push(make_feature_test(name.to_string(), String::new(), &case, &ctrl, false));
+    }
+    apply_bh(&mut out);
+    out.sort_by(feature_result_order);
+    out
+}
+
+fn compare_continuous_feature_maps(
+    sample_maps: Vec<(String, String, HashMap<String, f64>)>,
+    comparison: &CohortComparison,
+) -> Vec<FeatureTestResult> {
+    let features: BTreeSet<String> = sample_maps.iter().flat_map(|(_, _, map)| map.keys().cloned()).collect();
+    let mut out = Vec::new();
+    for feature in features {
+        let case = sample_maps.iter()
+            .filter(|(_, group, _)| group == &comparison.case_label)
+            .filter_map(|(_, _, map)| map.get(&feature).copied())
+            .filter(|v| v.is_finite())
+            .collect::<Vec<_>>();
+        let ctrl = sample_maps.iter()
+            .filter(|(_, group, _)| group == &comparison.control_label)
+            .filter_map(|(_, _, map)| map.get(&feature).copied())
+            .filter(|v| v.is_finite())
+            .collect::<Vec<_>>();
+        if case.len() < 2 || ctrl.len() < 2 { continue; }
+        out.push(make_feature_test(feature, String::new(), &case, &ctrl, false));
     }
     apply_bh(&mut out);
     out.sort_by(feature_result_order);
@@ -1393,6 +1776,33 @@ pub fn write_bcr_isotype_values(path: &Path, rows: &[BcrIsotypeSampleValue]) -> 
     Ok(())
 }
 
+pub fn write_tcr_sample_summaries(path: &Path, rows: &[TcrSampleSummary]) -> Result<()> {
+    let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    writer.write_record([
+        "sample_id", "group", "chain", "total_clone_count", "unique_clones", "shannon", "simpson",
+        "clonality", "effective_n", "top_clone_fraction", "weighted_mean_cdr3_aa_length",
+    ])?;
+    for r in rows {
+        writer.write_record([
+            r.sample_id.clone(), r.group.clone(), r.chain.clone(), r.total_clone_count.to_string(),
+            r.unique_clones.to_string(), r.shannon.to_string(), r.simpson.to_string(), r.clonality.to_string(),
+            r.effective_n.to_string(), r.top_clone_fraction.to_string(), r.weighted_mean_cdr3_aa_length.to_string(),
+        ])?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn write_immune_values(path: &Path, rows: &[ImmuneSampleValue]) -> Result<()> {
+    let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    writer.write_record(["sample_id", "group", "cell_type", "lineage", "ssgsea_score"])?;
+    for r in rows {
+        writer.write_record([r.sample_id.clone(), r.group.clone(), r.cell_type.clone(), r.lineage.clone(), r.score.to_string()])?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 fn write_mapping_audit_delimited(path: &Path, mapping: &CohortMapping, delimiter: u8) -> Result<()> {
     let mut writer = csv::WriterBuilder::new().delimiter(delimiter).from_path(path)?;
     writer.write_record([
@@ -1471,6 +1881,14 @@ mod tests {
         .unwrap();
         assert_eq!(kind, CohortModality::GeneExpression);
         assert_eq!(id, "4C_465");
+
+        let (kind, id) = classify_workbook_name("Normal_FJ_RNA_23_tcr_alpha_clone_report.xlsx").unwrap();
+        assert_eq!(kind, CohortModality::TcrAlpha);
+        assert_eq!(id, "Normal_FJ_RNA_23");
+
+        let (kind, id) = classify_workbook_name("4C_CHBA-2-25-18_immune_infiltrate.xlsx").unwrap();
+        assert_eq!(kind, CohortModality::ImmuneInfiltrate);
+        assert_eq!(id, "4C_CHBA-2-25-18");
     }
 
     #[test]
