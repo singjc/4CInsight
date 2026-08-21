@@ -279,10 +279,10 @@ A single executable cannot run unchanged on all three operating systems because 
 
 For cohort analysis in particular, useful next modules are:
 
-- BCR abundance-weighted overlap/Morisita-Horn similarity, PCoA, hierarchical clustering, public/private clonotypes, AA convergence, and matched-depth repertoire diversity.
-- Advanced TCR alpha/beta repertoire analysis with matched-depth rarefaction, Morisita-Horn similarity/PCoA, public/private clonotypes, and AA convergence (V/J/V–J first-pass comparisons are now included).
-- Immune-infiltrate cell-type heatmaps and cross-modal correlation with expression/repertoire features (basic group comparisons are now included).
-- Pathway analysis from gene results using a user-supplied/versioned GMT collection (over-representation and ranked enrichment).
+- Repertoire similarity heatmaps / dendrograms and richer public/longitudinal clonotype browsers on top of the corrected Morisita-Horn/Jaccard and matched-depth analyses.
+- Immune-infiltrate cell-type heatmaps and cross-modal correlation with expression/repertoire features.
+- Ranked pathway enrichment in addition to the corrected GMT-based ORA now available.
+- A more specialized DTU model (e.g. Dirichlet-multinomial/DEXSeq-like) if we decide to reproduce that machinery natively; the current corrected layer provides a transparent CLR/Simes DTU screen.
 - Gene-expression PCA/correlation heatmaps and selected top-gene heatmaps.
 - Cross-modal candidate-biomarker summaries that combine gene, immune-infiltrate, BCR, BCR-isotype, and later TCR evidence.
 - A later rigorous-analysis mode for longitudinal/repeated measures and covariate adjustment.
@@ -300,3 +300,23 @@ General merge/QC additions:
 - Optional XLSX export for modest-sized matrices.
 - Long-format export matching the legacy R workflow.
 - A detailed QA report listing schema mismatches, missing/extra rows, and duplicate identifiers per sample.
+
+## v0.7 corrected / standard analysis layer
+
+Cohort Analysis now has two explicit layers:
+
+- **Exploratory discovery** preserves the original all-sample first-pass screens requested for hypothesis generation.
+- **Corrected / standard** adds subject-aware and covariate-adjusted analyses implemented directly in Rust with no new numerical/statistical runtime dependencies.
+
+The corrected layer supports:
+
+- Gene raw counts and transcript Total Reads: positive-count median-ratio normalization, a native NB2 GLM with log(size-factor) offset and per-feature unshrunk dispersion, metadata covariates, subject-clustered sandwich SEs for repeated sampling, BH FDR, subject-collapsed log2-normalized sensitivity tests, and PCA of variable normalized features. Transcript data additionally gets a within-gene CLR/Simes/BH differential-transcript-usage screen (explicitly labeled as a dependency-light alternative, not DEXSeq/DRIMSeq).
+- BCR/TCR: exact without-replacement matched-depth rarefaction, adjusted repertoire metrics, subject-aware private/longitudinal/public clonotype fractions, Morisita-Horn and Jaccard PCoA, subject-blocked permutation PERMANOVA, and CLR/Aitchison composition analysis.
+- TCR: AA-convergence read fraction when nucleotide clonal sequences are available.
+- BCR/TCR V/D/J/V-J ambiguity handling: exclude tied calls (default), split weight, legacy first-hit, or gene-family collapse.
+- Dedicated BCR isotypes: CLR/Aitchison analysis, optionally excluding `Undetermined` and renormalizing as a sensitivity analysis.
+- Immune infiltrate: covariate-adjusted ssGSEA models plus PCA on per-cell-type z-scores.
+- Optional pathway analysis from corrected gene-count results using a user-supplied/versioned GMT: hypergeometric over-representation testing against the tested-gene universe, odds ratios, explicit overlap genes, and BH FDR.
+- Corrected TSV exports and a separate self-contained corrected HTML report.
+
+The native expression model deliberately does **not** claim to reproduce DESeq2, edgeR, or limma-voom empirical-Bayes/dispersion machinery. It provides a transparent dependency-light NB model with unshrunk feature-wise dispersion while keeping the exploratory layer available for comparison.

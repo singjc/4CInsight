@@ -3,6 +3,10 @@ use crate::cohort::{
     CohortMapping, CohortModality, FeatureTestResult, GeneComparisonResult, ImmuneComparisonResult,
     MappingStatus, TcrComparisonResult, TcrSampleSummary,
 };
+use crate::corrected::{
+    AdjustedFeatureResult, CorrectedCompositionResult, CorrectedExpressionResult, CorrectedImmuneResult,
+    CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult, DtuGeneResult, OrdinationResult,
+};
 use anyhow::{Context, Result};
 use maud::{html, Markup};
 use report_builder::plots::plot_boxplot;
@@ -846,4 +850,175 @@ mod tests {
         assert!(!html.contains("https://cdnjs.cloudflare.com/ajax/libs/jquery/"));
         assert!(html.contains("Plotly"));
     }
+}
+
+pub struct CorrectedReportInputs<'a> {
+    pub comparison: &'a CohortComparison,
+    pub mapping: Option<&'a CohortMapping>,
+    pub spec: &'a CorrectedModelSpec,
+    pub gene: Option<&'a CorrectedExpressionResult>,
+    pub gene_error: Option<&'a str>,
+    pub transcript: Option<&'a CorrectedExpressionResult>,
+    pub transcript_error: Option<&'a str>,
+    pub bcr: Option<&'a CorrectedRepertoireResult>,
+    pub bcr_error: Option<&'a str>,
+    pub bcr_isotype: Option<&'a CorrectedIsotypeResult>,
+    pub bcr_isotype_error: Option<&'a str>,
+    pub tcr_alpha: Option<&'a CorrectedRepertoireResult>,
+    pub tcr_alpha_error: Option<&'a str>,
+    pub tcr_beta: Option<&'a CorrectedRepertoireResult>,
+    pub tcr_beta_error: Option<&'a str>,
+    pub immune: Option<&'a CorrectedImmuneResult>,
+    pub immune_error: Option<&'a str>,
+    pub pathway: Option<&'a CorrectedPathwayResult>,
+    pub pathway_error: Option<&'a str>,
+}
+
+pub fn generate_corrected_html_report(path: &Path, inputs: CorrectedReportInputs<'_>) -> Result<()> {
+    let title = format!("4C corrected cohort analysis — {}", inputs.comparison.name);
+    let mut report = Report::new("4C Cohort Explorer", env!("CARGO_PKG_VERSION"), None, &title);
+    let subject = inputs.spec.subject_column.as_deref().unwrap_or("none");
+    let covariates = if inputs.spec.covariates.is_empty() { "none".to_string() } else { inputs.spec.covariates.join(", ") };
+    let mut overview = ReportSection::new("Overview");
+    overview.add_content(html! {
+        h3 { (inputs.comparison.name) " — corrected / standard layer" }
+        p { strong { "Case: " } (inputs.comparison.case_label) " | " strong { "Control: " } (inputs.comparison.control_label) }
+        p { strong { "Subject / repeated-measure column: " } (subject) }
+        p { strong { "Covariates: " } (covariates) }
+        p { "Expression uses positive-count median-ratio normalization followed by a native per-feature NB2 GLM with a log(size-factor) offset. Dispersions are estimated per feature without empirical-Bayes shrinkage. Subject-clustered sandwich SEs are used when a subject column is configured; a subject-collapsed non-parametric sensitivity test is reported in parallel." }
+        p { em { "The native expression model is intentionally not labeled DESeq2/edgeR/limma-voom because their empirical-Bayes and dispersion/precision-weight machinery is not reproduced." } }
+        p { "Repertoire analyses use matched-depth rarefaction, subject-aware clonotype sharing, Morisita-Horn and Jaccard PCoA/PERMANOVA, and CLR/Aitchison composition analysis. Immune-infiltrate tests use original ssGSEA scores with adjusted robust models." }
+    });
+    report.add_section(overview);
+    if let Some(mapping)=inputs.mapping { report.add_section(build_mapping_section(mapping)); }
+    if let Some(r)=inputs.gene { report.add_section(build_corrected_expression_section("Gene counts",r)); }
+    else if let Some(e)=inputs.gene_error { report.add_section(corrected_error_section("Gene counts",e)); }
+    if let Some(r)=inputs.transcript { report.add_section(build_corrected_expression_section("Transcript counts",r)); }
+    else if let Some(e)=inputs.transcript_error { report.add_section(corrected_error_section("Transcript counts",e)); }
+    if let Some(r)=inputs.bcr { report.add_section(build_corrected_repertoire_section("BCR",r)); }
+    else if let Some(e)=inputs.bcr_error { report.add_section(corrected_error_section("BCR",e)); }
+    if let Some(r)=inputs.bcr_isotype { report.add_section(build_corrected_isotype_section(r)); }
+    else if let Some(e)=inputs.bcr_isotype_error { report.add_section(corrected_error_section("BCR isotype",e)); }
+    if let Some(r)=inputs.tcr_alpha { report.add_section(build_corrected_repertoire_section("TCR alpha",r)); }
+    else if let Some(e)=inputs.tcr_alpha_error { report.add_section(corrected_error_section("TCR alpha",e)); }
+    if let Some(r)=inputs.tcr_beta { report.add_section(build_corrected_repertoire_section("TCR beta",r)); }
+    else if let Some(e)=inputs.tcr_beta_error { report.add_section(corrected_error_section("TCR beta",e)); }
+    if let Some(r)=inputs.immune { report.add_section(build_corrected_immune_section(r)); }
+    else if let Some(e)=inputs.immune_error { report.add_section(corrected_error_section("Immune infiltrate",e)); }
+    if let Some(r)=inputs.pathway { report.add_section(build_corrected_pathway_section(r)); }
+    else if let Some(e)=inputs.pathway_error { report.add_section(corrected_error_section("Pathways",e)); }
+    let output = path.to_string_lossy().to_string();
+    report.save_to_file(&output).with_context(||format!("Could not write corrected HTML report to {}",path.display()))?;
+    make_report_self_contained(path)?;
+    Ok(())
+}
+
+fn corrected_error_section(title:&str,error:&str)->ReportSection { let mut s=ReportSection::new(title); s.add_content(html!{p{(error)}});s }
+
+fn build_corrected_expression_section(title:&str,r:&CorrectedExpressionResult)->ReportSection {
+    let mut s=ReportSection::new(title);
+    s.add_content(html!{
+        p { (r.normalization) }
+        p { (r.model_description) }
+        p { "Model samples: " (r.n_model_samples) ", subjects: " (r.n_subjects) ", tested features: " (r.tested_features) ", low-count filtered: " (r.filtered_features) "." }
+        @for w in &r.warnings { p { em { "Warning: " (w) } } }
+    });
+    if let Some(p)=adjusted_volcano_plot(&r.tests,&format!("{title}: adjusted feature screen")){s.add_plot(p);}
+    if let Some(ord)=&r.pca { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    s.add_content(adjusted_table("Adjusted feature tests",&r.tests,150));
+    if let Some(dtu)=&r.dtu {
+        s.add_content(html!{
+            h3 { "Differential transcript usage" }
+            p { (dtu.method_description) }
+            p { "Genes tested: " (dtu.genes_tested) ", transcripts tested: " (dtu.transcripts_tested) "." }
+        });
+        s.add_content(dtu_gene_table(&dtu.gene_tests,120));
+        s.add_content(adjusted_table("Transcript-level CLR usage tests",&dtu.transcript_tests,150));
+    }
+    s
+}
+
+fn build_corrected_repertoire_section(title:&str,r:&CorrectedRepertoireResult)->ReportSection {
+    let mut s=ReportSection::new(title);
+    s.add_content(html!{
+        p { "Samples: " (r.files_used) ", matched depth: " (r.matched_depth) ", rarefaction repeats: " (r.rarefaction_reps) "." }
+        p { "Ambiguous V/D/J calls: " (r.ambiguous_policy.display_name()) }
+        @for w in &r.warnings { p { em { "Warning: " (w) } } }
+    });
+    s.add_content(adjusted_table("Adjusted matched-depth / repertoire metrics",&r.metric_tests,100));
+    if let Some(ord)=&r.morisita_horn { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    if let Some(ord)=&r.jaccard { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    for comp in &r.compositions {
+        s.add_content(html!{h3{(comp.family) " — CLR/Aitchison"} p{"Retained features: "(comp.retained_features)}});
+        if let Some(ord)=&comp.ordination { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+        s.add_content(adjusted_table(&format!("{} adjusted CLR tests",comp.family),&comp.tests,80));
+    }
+    s
+}
+
+fn build_corrected_isotype_section(r:&CorrectedIsotypeResult)->ReportSection {
+    let mut s=ReportSection::new("BCR isotype");
+    s.add_content(html!{p{"Files/samples: "(r.files_used) ". " @if r.determined_only {"Undetermined was excluded and the determined isotypes were renormalized."} @else {"Undetermined was retained in the composition."}} @for w in &r.warnings{p{em{"Warning: "(w)}}}});
+    if let Some(ord)=&r.ordination { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    s.add_content(adjusted_table("Isotype CLR tests",&r.tests,50)); s
+}
+
+fn build_corrected_immune_section(r:&CorrectedImmuneResult)->ReportSection {
+    let mut s=ReportSection::new("Immune infiltrate");
+    s.add_content(html!{p{"Samples: "(r.files_used) ". Original ssGSEA scores are used for adjusted tests; PCA uses cell-type z-scores."} @for w in &r.warnings{p{em{"Warning: "(w)}}}});
+    if let Some(ord)=&r.pca { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    s.add_content(adjusted_table("Adjusted immune-cell tests",&r.tests,80)); s
+}
+
+fn build_corrected_pathway_section(r:&CorrectedPathwayResult)->ReportSection {
+    let mut s=ReportSection::new("Pathways");
+    s.add_content(html!{
+        p { "GMT: " code { (r.gmt_path.to_string_lossy()) } }
+        p { "Tested-gene universe: " (r.universe_size) "; foreground: " (r.foreground_size) "; foreground definition: BH q ≤ " (fmt(r.q_threshold)) " and |adjusted log2FC| ≥ " (fmt(r.effect_threshold)) "." }
+        p { "Over-representation uses the one-sided hypergeometric upper tail and BH correction across retained gene sets. Gene sets with " (r.min_set_size) "–" (r.max_set_size) " measured genes are tested." }
+    });
+    let rows=r.tests.iter().filter(|x|x.q_value.is_finite()&&x.q_value>0.0).take(120).collect::<Vec<_>>();
+    if !rows.is_empty(){
+        let x=rows.iter().map(|x|x.odds_ratio.max(1e-12).ln()).collect();
+        let y=rows.iter().map(|x|-x.q_value.max(1e-300).log10()).collect();
+        let h=rows.iter().map(|x|format!("<b>{}</b><br>Overlap: {}/{}<br>Odds ratio: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Genes: {}",escape_hover_text(&x.pathway),x.overlap,x.measured_set_size,x.odds_ratio,x.p_value,x.q_value,escape_hover_text(&x.overlap_genes))).collect();
+        if let Some(p)=labeled_scatter_plot(vec![("Pathways".to_string(),x,y,h)],"Pathway over-representation","ln odds ratio","-log10(BH q)"){s.add_plot(p);}
+    }
+    s.add_content(pathway_table(r,150));
+    s
+}
+
+fn pathway_table(r:&CorrectedPathwayResult,limit:usize)->Markup{
+    html!{h3{"Pathway ORA results ("(r.tests.len())" rows; showing up to "(limit.min(r.tests.len()))")"}div class="table-container"{table{thead{tr{th{"Pathway"}th{"Description"}th{"Set size"}th{"Overlap"}th{"Odds ratio"}th{"p"}th{"BH q"}th{"Overlap genes"}}}tbody{@for x in r.tests.iter().take(limit){tr{td{(x.pathway)}td{(x.description)}td{(x.measured_set_size)}td{(x.overlap)}td{(fmt(x.odds_ratio))}td{(fmt_sci(x.p_value))}td{(fmt_sci(x.q_value))}td{(x.overlap_genes)}}}}}}}
+}
+
+fn adjusted_hover(r:&AdjustedFeatureResult)->String {
+    format!("<b>{}</b>{}<br>Adjusted β: {:.4}<br>SE: {:.4}<br>z: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Subject-collapsed effect: {:.4}<br>Subject BH q: {:.3e}<br>Case/control mean: {:.4} / {:.4}<br>n samples/subjects: {} / {}",
+        escape_hover_text(&r.feature), if r.secondary_id.is_empty(){String::new()}else{format!("<br>{}",escape_hover_text(&r.secondary_id))},r.beta_group,r.robust_se,r.z_value,r.p_value,r.q_value,r.subject_effect,r.subject_q_value,r.mean_case,r.mean_control,r.n_samples,r.n_subjects)
+}
+
+fn adjusted_volcano_plot(tests:&[AdjustedFeatureResult],title:&str)->Option<Plot>{
+    let rows=tests.iter().filter(|r|r.beta_group.is_finite()&&r.q_value.is_finite()&&r.q_value>0.0).collect::<Vec<_>>(); if rows.is_empty(){return None;}
+    let x=rows.iter().map(|r|r.beta_group).collect(); let y=rows.iter().map(|r|-r.q_value.max(1e-300).log10()).collect(); let h=rows.iter().map(|r|adjusted_hover(r)).collect();
+    labeled_scatter_plot(vec![("Adjusted tests".to_string(),x,y,h)],title,"Adjusted group coefficient","-log10(BH q)")
+}
+
+fn corrected_ordination_plot(ord:&OrdinationResult)->Option<Plot>{
+    let mut traces=Vec::new();
+    for group in ["Control","Case"] {
+        let pts=ord.points.iter().filter(|p|p.group==group).collect::<Vec<_>>();
+        let x=pts.iter().map(|p|p.x).collect(); let y=pts.iter().map(|p|p.y).collect();
+        let hover=pts.iter().map(|p|format!("<b>{}</b><br>Group: {}<br>Subject: {}<br>{}: {:.4}<br>{}: {:.4}",escape_hover_text(&p.sample_id),p.group,escape_hover_text(&p.subject),ord.x_label,p.x,ord.y_label,p.y)).collect();
+        traces.push((group.to_string(),x,y,hover));
+    }
+    let title=if ord.permanova_p.is_finite(){format!("{} — PERMANOVA F={:.3}, p={:.3e}",ord.name,ord.permanova_f,ord.permanova_p)}else{ord.name.clone()};
+    labeled_scatter_plot(traces,&title,&ord.x_label,&ord.y_label)
+}
+
+fn dtu_gene_table(tests:&[DtuGeneResult],limit:usize)->Markup {
+    html!{h4{"Gene-level DTU screen ("(tests.len())" rows; showing up to "(limit.min(tests.len()))")"} div class="table-container"{table{thead{tr{th{"NCBI Gene ID"}th{"Transcripts"}th{"Simes p"}th{"BH q"}th{"Max |CLR effect|"}}}tbody{@for r in tests.iter().take(limit){tr{td{(r.gene_id)}td{(r.n_transcripts)}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.max_abs_clr_effect))}}}}}}}
+}
+
+fn adjusted_table(title:&str,tests:&[AdjustedFeatureResult],limit:usize)->Markup{
+    html!{h3{(title)" ("(tests.len())" rows; showing up to "(limit.min(tests.len()))")"} div class="table-container"{table{thead{tr{th{"Feature"}th{"ID/family"}th{"β group"}th{"SE"}th{"p"}th{"BH q"}th{"Subject effect"}th{"Subject BH q"}th{"n"}th{"subjects"}th{"Case mean"}th{"Control mean"}}} tbody{@for r in tests.iter().take(limit){tr{td{(r.feature)}td{(r.secondary_id)}td{(fmt(r.beta_group))}td{(fmt(r.robust_se))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.subject_effect))}td{(fmt_sci(r.subject_q_value))}td{(r.n_samples)}td{(r.n_subjects)}td{(fmt(r.mean_case))}td{(fmt(r.mean_control))}}}}}}}
 }

@@ -7,7 +7,13 @@ use cfs_expression_merger::cohort::{
     FeatureTestResult, GeneComparisonResult, ImmuneComparisonResult, MappingStatus, MetadataTable,
     ProjectScan, CohortModality, TcrComparisonResult,
 };
-use cfs_expression_merger::report::{generate_cohort_html_report, CohortReportInputs};
+use cfs_expression_merger::report::{generate_cohort_html_report, generate_corrected_html_report, CohortReportInputs, CorrectedReportInputs};
+use cfs_expression_merger::corrected::{
+    run_corrected_expression, run_corrected_immune, run_corrected_isotype, run_corrected_repertoire, run_pathway_ora,
+    write_adjusted_tests, write_corrected_repertoire_samples, write_dtu_gene_tests, write_ordination, write_pathway_ora, AdjustedFeatureResult,
+    AmbiguousCallPolicy, CorrectedCompositionResult, CorrectedExpressionResult, CorrectedImmuneResult,
+    CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult, OrdinationResult,
+};
 use cfs_expression_merger::{
     all_metrics, collaborator_default_metrics, inspect_kind, inspect_merged_tsv, load_entity_catalog,
     load_entity_catalog_from_merged, load_entity_profile, load_entity_profile_from_merged,
@@ -82,6 +88,24 @@ enum CohortResultView {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CohortAnalysisMode {
+    Exploratory,
+    Corrected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CorrectedResultView {
+    Gene,
+    Transcript,
+    Bcr,
+    BcrIsotype,
+    TcrAlpha,
+    TcrBeta,
+    Immune,
+    Pathway,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BcrMetricView {
     Shannon,
     Clonality,
@@ -143,6 +167,28 @@ struct CohortAnalysisBundle {
     immune_error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct CorrectedAnalysisBundle {
+    comparison: CohortComparison,
+    spec: CorrectedModelSpec,
+    gene: Option<CorrectedExpressionResult>,
+    gene_error: Option<String>,
+    transcript: Option<CorrectedExpressionResult>,
+    transcript_error: Option<String>,
+    bcr: Option<CorrectedRepertoireResult>,
+    bcr_error: Option<String>,
+    bcr_isotype: Option<CorrectedIsotypeResult>,
+    bcr_isotype_error: Option<String>,
+    tcr_alpha: Option<CorrectedRepertoireResult>,
+    tcr_alpha_error: Option<String>,
+    tcr_beta: Option<CorrectedRepertoireResult>,
+    tcr_beta_error: Option<String>,
+    immune: Option<CorrectedImmuneResult>,
+    immune_error: Option<String>,
+    pathway: Option<CorrectedPathwayResult>,
+    pathway_error: Option<String>,
+}
+
 enum MergeWorkerMessage {
     Progress(usize, usize, String),
     Done(Result<MergeSummary, String>),
@@ -158,6 +204,7 @@ enum AnalysisWorkerMessage {
 enum CohortWorkerMessage {
     Progress(f32, String),
     Done(CohortAnalysisBundle),
+    CorrectedDone(CorrectedAnalysisBundle),
 }
 
 struct MergeApp {
@@ -209,6 +256,20 @@ struct MergeApp {
     cohort_receiver: Option<Receiver<CohortWorkerMessage>>,
     cohort_results: Option<CohortAnalysisBundle>,
     cohort_result_view: CohortResultView,
+    cohort_analysis_mode: CohortAnalysisMode,
+    corrected_results: Option<CorrectedAnalysisBundle>,
+    corrected_result_view: CorrectedResultView,
+    corrected_subject_column: Option<String>,
+    corrected_covariates: HashSet<String>,
+    corrected_ambiguous_policy: AmbiguousCallPolicy,
+    corrected_exclude_undetermined: bool,
+    corrected_permutations: usize,
+    corrected_rarefaction_reps: usize,
+    corrected_rarefaction_cap: usize,
+    corrected_run_pathway: bool,
+    corrected_gmt_path: Option<PathBuf>,
+    corrected_pathway_q: f64,
+    corrected_pathway_effect: f64,
     cohort_run_gene: bool,
     cohort_gene_metric: Metric,
     cohort_run_transcript: bool,
@@ -286,6 +347,20 @@ impl MergeApp {
             cohort_receiver: None,
             cohort_results: None,
             cohort_result_view: CohortResultView::Gene,
+            cohort_analysis_mode: CohortAnalysisMode::Exploratory,
+            corrected_results: None,
+            corrected_result_view: CorrectedResultView::Gene,
+            corrected_subject_column: None,
+            corrected_covariates: HashSet::new(),
+            corrected_ambiguous_policy: AmbiguousCallPolicy::Exclude,
+            corrected_exclude_undetermined: false,
+            corrected_permutations: 499,
+            corrected_rarefaction_reps: 3,
+            corrected_rarefaction_cap: 50_000,
+            corrected_run_pathway: false,
+            corrected_gmt_path: None,
+            corrected_pathway_q: 0.05,
+            corrected_pathway_effect: 0.5,
             cohort_run_gene: true,
             cohort_gene_metric: Metric::Tpm,
             cohort_run_transcript: false,
@@ -1707,6 +1782,7 @@ impl MergeApp {
                         if let Some(meta) = &mut this.cohort_metadata {
                             meta.id_column = selected_id;
                         }
+                        this.corrected_results = None;
                         this.rebuild_cohort_mapping();
                     }
                 }
@@ -1719,10 +1795,37 @@ impl MergeApp {
         ui.add_space(10.0);
         self.render_cohort_mapping_card(ui);
         ui.add_space(10.0);
-        self.render_cohort_comparison_card(ui);
-        if self.cohort_results.is_some() {
-            ui.add_space(10.0);
-            self.render_cohort_results_card(ui);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Analysis layer:").strong());
+            ui.selectable_value(
+                &mut self.cohort_analysis_mode,
+                CohortAnalysisMode::Exploratory,
+                "Exploratory discovery",
+            )
+            .on_hover_text("Original first-pass screens: all mapped samples are observations; non-parametric tests and effect sizes are used without repeated-measure/covariate adjustment.");
+            ui.selectable_value(
+                &mut self.cohort_analysis_mode,
+                CohortAnalysisMode::Corrected,
+                "Corrected / standard",
+            )
+            .on_hover_text("Subject-aware and covariate-adjusted analyses, matched-depth repertoire diversity, compositional CLR/Aitchison analyses, ordination, and restricted-permutation PERMANOVA.");
+        });
+        ui.add_space(8.0);
+        match self.cohort_analysis_mode {
+            CohortAnalysisMode::Exploratory => {
+                self.render_cohort_comparison_card(ui);
+                if self.cohort_results.is_some() {
+                    ui.add_space(10.0);
+                    self.render_cohort_results_card(ui);
+                }
+            }
+            CohortAnalysisMode::Corrected => {
+                self.render_corrected_analysis_card(ui);
+                if self.corrected_results.is_some() {
+                    ui.add_space(10.0);
+                    self.render_corrected_results_card(ui);
+                }
+            }
         }
     }
 
@@ -2010,6 +2113,354 @@ impl MergeApp {
                 );
             }
             ui.label(&this.cohort_status);
+        });
+    }
+
+    fn render_corrected_analysis_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "3. Corrected / standard analysis", |this, ui| {
+            ui.label(
+                egui::RichText::new(
+                    "This layer is designed for the more rigorous pass: repeated samples can be clustered by subject, selected metadata covariates are included in the model, repertoire diversity is compared at a common depth, and repertoire/isotype compositions are analyzed in CLR/Aitchison space.",
+                )
+                .weak(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Comparison:");
+                ui.selectable_value(&mut this.cohort_preset, ComparisonPreset::HypVsTrueHc, "HYP vs True_HC")
+                    .on_hover_text("All HYP=yes samples versus true healthy controls.");
+                ui.selectable_value(&mut this.cohort_preset, ComparisonPreset::HypMecfsVsMecfsOnly, "HYP+ME/CFS vs ME/CFS-only")
+                    .on_hover_text("HYP+ME/CFS versus ME/CFS samples without HYP.");
+            });
+
+            let columns = this.cohort_metadata.as_ref().map(|m| m.columns.clone()).unwrap_or_default();
+            if !columns.is_empty() {
+                ui.separator();
+                ui.label(egui::RichText::new("Repeated measures & covariates").strong());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Subject / patient ID:")
+                        .on_hover_text("Repeated samples with the same value are treated as one subject cluster for sandwich standard errors, subject-collapsed sensitivity tests, restricted PERMANOVA permutations, and public-vs-longitudinal clonotype classification.");
+                    let selected = this.corrected_subject_column.clone().unwrap_or_else(|| "(none)".to_string());
+                    egui::ComboBox::from_id_salt("corrected_subject_column")
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut this.corrected_subject_column, None, "(none)");
+                            for col in &columns {
+                                if this.cohort_metadata.as_ref().is_some_and(|m| col == &m.id_column) { continue; }
+                                ui.selectable_value(&mut this.corrected_subject_column, Some(col.clone()), col);
+                            }
+                        });
+                });
+                if this.corrected_subject_column.is_none() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(230, 170, 70),
+                        "No subject column selected: repeated-measure correction cannot be applied. Count models use ordinary NB Wald SEs; continuous/compositional models use HC3 robust SEs; PERMANOVA permutations are unrestricted.",
+                    );
+                }
+
+                egui::CollapsingHeader::new(format!("Covariates ({})", this.corrected_covariates.len()))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Select adjustment variables such as age, sex, ethnicity, family/batch variables. Numeric columns are standardized; categorical columns are dummy encoded with one reference level.").small().weak());
+                        egui::ScrollArea::vertical().max_height(190.0).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for col in &columns {
+                                    let lower = col.to_ascii_lowercase();
+                                    let excluded = this.cohort_metadata.as_ref().is_some_and(|m| col == &m.id_column)
+                                        || this.corrected_subject_column.as_ref() == Some(col)
+                                        || matches!(lower.as_str(), "phenotype" | "hyp" | "healthy" | "hyp_type");
+                                    if excluded { continue; }
+                                    let mut selected = this.corrected_covariates.contains(col);
+                                    if ui.checkbox(&mut selected, col).changed() {
+                                        if selected { this.corrected_covariates.insert(col.clone()); }
+                                        else { this.corrected_covariates.remove(col); }
+                                    }
+                                }
+                            });
+                        });
+                    });
+            }
+
+            ui.separator();
+            ui.label(egui::RichText::new("Analyses to run").strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut this.cohort_run_gene, "Gene counts")
+                    .on_hover_text("Uses RNA-Seq Raw Count columns, positive-count median-ratio normalization, a native NB2 GLM with log(size-factor) offset, covariates, subject-clustered sandwich SEs when repeated samples are configured, BH FDR, subject-collapsed sensitivity tests, and PCA of variable genes.");
+                ui.checkbox(&mut this.cohort_run_transcript, "Transcript counts")
+                    .on_hover_text("Uses Total Reads with the same NB count model and also runs a dependency-light within-gene CLR differential-transcript-usage screen with Simes/BH gene-level summaries.");
+                ui.checkbox(&mut this.cohort_run_bcr, "BCR")
+                    .on_hover_text("Matched-depth richness/Shannon, subject-aware sharing, Morisita-Horn and Jaccard PCoA/PERMANOVA, and CLR/Aitchison isotype/V/D/J composition analyses.");
+                ui.checkbox(&mut this.cohort_run_bcr_isotype, "BCR isotype")
+                    .on_hover_text("CLR-transformed isotype composition with adjusted per-isotype models and Aitchison PCoA/PERMANOVA.");
+                ui.checkbox(&mut this.cohort_run_tcr_alpha, "TCR alpha")
+                    .on_hover_text("Matched-depth diversity, subject-aware sharing, AA convergence, Morisita-Horn/Jaccard ordination, and CLR V/J/V-J composition analysis.");
+                ui.checkbox(&mut this.cohort_run_tcr_beta, "TCR beta")
+                    .on_hover_text("Matched-depth diversity, subject-aware sharing, AA convergence, Morisita-Horn/Jaccard ordination, and CLR V/J/V-J composition analysis.");
+                ui.checkbox(&mut this.cohort_run_immune, "Immune infiltrate")
+                    .on_hover_text("Adjusted linear models of each ssGSEA score plus PCA of cell-type z-scores; ssGSEA values are treated as enrichment scores, not cell percentages.");
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut this.corrected_run_pathway, "Pathway ORA")
+                    .on_hover_text("Optional gene-set over-representation analysis using a user-supplied versioned GMT collection. It uses the corrected gene-count results, the tested-gene universe, a hypergeometric upper-tail test, odds ratio, and BH FDR.");
+                if ui.button("Choose GMT…").on_hover_text("Select a GMT pathway/gene-set collection. Keeping the GMT external makes the pathway database/version explicit and reproducible.").clicked() {
+                    let mut dialog=FileDialog::new().add_filter("GMT gene sets", &["gmt"]);
+                    if let Some(root)=&this.cohort_root {dialog=dialog.set_directory(root);}
+                    if let Some(path)=dialog.pick_file(){this.corrected_gmt_path=Some(path);}
+                }
+                if let Some(path)=&this.corrected_gmt_path {ui.monospace(path.file_name().and_then(|x|x.to_str()).unwrap_or("GMT"));}
+            });
+            if this.corrected_run_pathway {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Pathway foreground:");
+                    ui.label("BH q ≤"); ui.add(egui::DragValue::new(&mut this.corrected_pathway_q).range(0.001..=0.25).speed(0.005));
+                    ui.label("and |adjusted log2FC| ≥"); ui.add(egui::DragValue::new(&mut this.corrected_pathway_effect).range(0.0..=5.0).speed(0.1));
+                });
+            }
+
+            egui::CollapsingHeader::new("Advanced standard-analysis settings")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Ambiguous V/D/J calls:");
+                        egui::ComboBox::from_id_salt("corrected_ambiguous_policy")
+                            .selected_text(this.corrected_ambiguous_policy.display_name())
+                            .show_ui(ui, |ui| {
+                                for policy in AmbiguousCallPolicy::ALL {
+                                    ui.selectable_value(&mut this.corrected_ambiguous_policy, policy, policy.display_name())
+                                        .on_hover_text(policy.description());
+                                }
+                            });
+                    });
+                    ui.checkbox(&mut this.corrected_exclude_undetermined, "Renormalize BCR-isotype analysis after excluding Undetermined")
+                        .on_hover_text("The original composition remains preferable for QC. Enable this sensitivity view when the biological question is class-switching among determined IgA/IgD/IgG/IgM assignments.");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("PERMANOVA permutations:");
+                        ui.add(egui::DragValue::new(&mut this.corrected_permutations).range(99..=4999).speed(100));
+                        ui.label("Rarefaction repeats:");
+                        ui.add(egui::DragValue::new(&mut this.corrected_rarefaction_reps).range(1..=20));
+                        ui.label("Rarefaction depth cap:");
+                        ui.add(egui::DragValue::new(&mut this.corrected_rarefaction_cap).range(1_000..=500_000).speed(5_000));
+                    });
+                    ui.label(egui::RichText::new("Repertoire matched depth is the minimum usable library depth, capped by the value above to keep the native exact-without-replacement Monte-Carlo rarefaction responsive. The same depth is used for every included sample.").small().weak());
+                });
+
+            let ready = this.cohort_scan.is_some() && this.cohort_metadata.is_some() && !this.cohort_running
+                && (this.cohort_run_gene || this.cohort_run_transcript || this.cohort_run_bcr || this.cohort_run_bcr_isotype || this.cohort_run_tcr_alpha || this.cohort_run_tcr_beta || this.cohort_run_immune || this.corrected_run_pathway);
+            let run = ui.add_enabled(ready, egui::Button::new("Run corrected analyses"))
+                .on_hover_text("Run the selected corrected/standard analysis modules independently. A failure in one modality is reported without discarding successful modalities.");
+            if run.clicked() { this.start_corrected_analysis(); }
+            if this.cohort_running {
+                ui.add(egui::ProgressBar::new(this.cohort_progress).show_percentage().animate(true));
+            }
+            ui.label(&this.cohort_status);
+            ui.label(egui::RichText::new("Expression note: the native model deliberately does not claim to reproduce DESeq2/edgeR/limma empirical-Bayes machinery. It uses positive-count median-ratio normalization and a transparent NB2 GLM with per-feature unshrunk dispersion, optional covariates, subject-clustered robust inference, and a subject-collapsed sensitivity result.").small().weak());
+        });
+    }
+
+    fn render_corrected_results_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "4. Corrected / standard results", |this, ui| {
+            let Some(bundle) = this.corrected_results.clone() else { return; };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(format!("{} — corrected layer", bundle.comparison.name)).strong());
+                if ui.button("Save corrected tables…").on_hover_text("Export all available adjusted tests, ordination coordinates, repertoire sample summaries, and method notes as TSV files.").clicked() {
+                    let mut dialog = FileDialog::new();
+                    if let Some(root) = &this.cohort_root { dialog = dialog.set_directory(root); }
+                    if let Some(folder) = dialog.pick_folder() {
+                        match this.save_corrected_result_tables(&folder) {
+                            Ok(path) => this.cohort_status = format!("Saved corrected analysis tables to {}", path.display()),
+                            Err(e) => this.cohort_status = format!("Could not save corrected tables: {e:#}"),
+                        }
+                    }
+                }
+                if ui.button("Generate corrected HTML report…").on_hover_text("Generate a standalone offline HTML report for the corrected/standard analysis layer, including adjusted statistics, PCoA/PCA plots, PERMANOVA summaries, and ranked tables.").clicked() {
+                    let safe_name: String = bundle.comparison.name.chars().map(|c| if c.is_ascii_alphanumeric(){c}else{'_'}).collect();
+                    let mut dialog = FileDialog::new().add_filter("HTML report", &["html"]).set_file_name(format!("4c_corrected_report_{safe_name}.html"));
+                    if let Some(root)=&this.cohort_root { dialog=dialog.set_directory(root); }
+                    if let Some(path)=dialog.save_file() {
+                        let inputs=CorrectedReportInputs {
+                            comparison:&bundle.comparison, mapping:this.cohort_mapping.as_ref(), spec:&bundle.spec,
+                            gene:bundle.gene.as_ref(), gene_error:bundle.gene_error.as_deref(),
+                            transcript:bundle.transcript.as_ref(), transcript_error:bundle.transcript_error.as_deref(),
+                            bcr:bundle.bcr.as_ref(), bcr_error:bundle.bcr_error.as_deref(),
+                            bcr_isotype:bundle.bcr_isotype.as_ref(), bcr_isotype_error:bundle.bcr_isotype_error.as_deref(),
+                            tcr_alpha:bundle.tcr_alpha.as_ref(), tcr_alpha_error:bundle.tcr_alpha_error.as_deref(),
+                            tcr_beta:bundle.tcr_beta.as_ref(), tcr_beta_error:bundle.tcr_beta_error.as_deref(),
+                            immune:bundle.immune.as_ref(), immune_error:bundle.immune_error.as_deref(),
+                            pathway:bundle.pathway.as_ref(), pathway_error:bundle.pathway_error.as_deref(),
+                        };
+                        match generate_corrected_html_report(&path,inputs) {
+                            Ok(())=>this.cohort_status=format!("Generated corrected HTML report: {}",path.display()),
+                            Err(e)=>this.cohort_status=format!("Could not generate corrected report: {e:#}"),
+                        }
+                    }
+                }
+            });
+            ui.label(egui::RichText::new(format!(
+                "Subject column: {} | covariates: {} | ambiguous repertoire calls: {}",
+                bundle.spec.subject_column.as_deref().unwrap_or("none"),
+                if bundle.spec.covariates.is_empty() { "none".to_string() } else { bundle.spec.covariates.join(", ") },
+                bundle.spec.ambiguous_policy.display_name(),
+            )).small().weak());
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                if bundle.gene.is_some() || bundle.gene_error.is_some() { ui.selectable_value(&mut this.corrected_result_view, CorrectedResultView::Gene, "Gene counts"); }
+                if bundle.transcript.is_some() || bundle.transcript_error.is_some() { ui.selectable_value(&mut this.corrected_result_view, CorrectedResultView::Transcript, "Transcript counts"); }
+                if bundle.bcr.is_some() || bundle.bcr_error.is_some() { ui.selectable_value(&mut this.corrected_result_view, CorrectedResultView::Bcr, "BCR"); }
+                if bundle.bcr_isotype.is_some() || bundle.bcr_isotype_error.is_some() { ui.selectable_value(&mut this.corrected_result_view, CorrectedResultView::BcrIsotype, "BCR isotype"); }
+                if bundle.tcr_alpha.is_some() || bundle.tcr_alpha_error.is_some() { ui.selectable_value(&mut this.corrected_result_view, CorrectedResultView::TcrAlpha, "TCR alpha"); }
+                if bundle.tcr_beta.is_some() || bundle.tcr_beta_error.is_some() { ui.selectable_value(&mut this.corrected_result_view, CorrectedResultView::TcrBeta, "TCR beta"); }
+                if bundle.immune.is_some() || bundle.immune_error.is_some() { ui.selectable_value(&mut this.corrected_result_view, CorrectedResultView::Immune, "Immune infiltrate"); }
+                if bundle.pathway.is_some() || bundle.pathway_error.is_some() { ui.selectable_value(&mut this.corrected_result_view, CorrectedResultView::Pathway, "Pathways"); }
+            });
+            ui.separator();
+            match this.corrected_result_view {
+                CorrectedResultView::Gene => if let Some(r)=&bundle.gene { this.render_corrected_expression(ui,r,"corrected_gene"); } else { ui.label(bundle.gene_error.as_deref().unwrap_or("Gene corrected analysis not requested.")); },
+                CorrectedResultView::Transcript => if let Some(r)=&bundle.transcript { this.render_corrected_expression(ui,r,"corrected_transcript"); } else { ui.label(bundle.transcript_error.as_deref().unwrap_or("Transcript corrected analysis not requested.")); },
+                CorrectedResultView::Bcr => if let Some(r)=&bundle.bcr { this.render_corrected_repertoire(ui,r,"corrected_bcr"); } else { ui.label(bundle.bcr_error.as_deref().unwrap_or("BCR corrected analysis not requested.")); },
+                CorrectedResultView::BcrIsotype => if let Some(r)=&bundle.bcr_isotype { this.render_corrected_isotype(ui,r,"corrected_isotype"); } else { ui.label(bundle.bcr_isotype_error.as_deref().unwrap_or("BCR-isotype corrected analysis not requested.")); },
+                CorrectedResultView::TcrAlpha => if let Some(r)=&bundle.tcr_alpha { this.render_corrected_repertoire(ui,r,"corrected_tcra"); } else { ui.label(bundle.tcr_alpha_error.as_deref().unwrap_or("TCR-alpha corrected analysis not requested.")); },
+                CorrectedResultView::TcrBeta => if let Some(r)=&bundle.tcr_beta { this.render_corrected_repertoire(ui,r,"corrected_tcrb"); } else { ui.label(bundle.tcr_beta_error.as_deref().unwrap_or("TCR-beta corrected analysis not requested.")); },
+                CorrectedResultView::Immune => if let Some(r)=&bundle.immune { this.render_corrected_immune(ui,r,"corrected_immune"); } else { ui.label(bundle.immune_error.as_deref().unwrap_or("Immune corrected analysis not requested.")); },
+                CorrectedResultView::Pathway => if let Some(r)=&bundle.pathway { this.render_corrected_pathway(ui,r,"corrected_pathway"); } else { ui.label(bundle.pathway_error.as_deref().unwrap_or("Pathway analysis not requested.")); },
+            }
+        });
+    }
+
+    fn render_corrected_expression(&self, ui: &mut egui::Ui, result: &CorrectedExpressionResult, id: &str) {
+        ui.heading(format!("{} — corrected count analysis", result.feature_label));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Model samples: {}",result.n_model_samples)); ui.separator();
+            ui.label(format!("Subjects: {}",result.n_subjects)); ui.separator();
+            ui.label(format!("Tested: {}",result.tested_features)); ui.separator();
+            ui.label(format!("Filtered low-count: {}",result.filtered_features));
+        });
+        ui.label(egui::RichText::new(&result.normalization).small().weak());
+        ui.label(egui::RichText::new(&result.model_description).small().weak());
+        for warning in &result.warnings { ui.colored_label(egui::Color32::from_rgb(230,170,70),warning); }
+        if let Some(ord)=&result.pca { self.render_corrected_ordination(ui,ord,&format!("{id}_pca")); }
+        self.render_adjusted_test_table(ui,"Adjusted feature tests",&result.tests,560.0);
+        if let Some(dtu)=&result.dtu {
+            egui::CollapsingHeader::new(format!("Differential transcript usage ({} genes / {} transcripts)",dtu.genes_tested,dtu.transcripts_tested))
+                .default_open(true)
+                .show(ui,|ui|{
+                    ui.label(egui::RichText::new(&dtu.method_description).small().weak());
+                    ui.label(egui::RichText::new(format!("Gene-level DTU screen ({} rows)",dtu.gene_tests.len())).strong());
+                    egui::ScrollArea::both().max_height(360.0).show(ui,|ui|{
+                        egui::Grid::new(format!("{id}_dtu_genes")).striped(true).show(ui,|ui|{
+                            for h in ["NCBI Gene ID","Transcripts","Simes p","BH q","Max |CLR β|"] {ui.label(egui::RichText::new(h).strong());} ui.end_row();
+                            for r in &dtu.gene_tests {ui.monospace(&r.gene_id);ui.label(r.n_transcripts.to_string());ui.label(format!("{:.3e}",r.p_value));ui.label(format!("{:.3e}",r.q_value));ui.label(format!("{:.4}",r.max_abs_clr_effect));ui.end_row();}
+                        });
+                    });
+                    self.render_adjusted_test_table(ui,"Transcript-level CLR usage tests",&dtu.transcript_tests,460.0);
+                });
+        }
+    }
+
+    fn render_corrected_repertoire(&self, ui: &mut egui::Ui, result: &CorrectedRepertoireResult, id: &str) {
+        ui.heading(format!("{} — depth/composition corrected",result.modality));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Samples: {}",result.files_used)); ui.separator();
+            ui.label(format!("Matched depth: {} reads",result.matched_depth)); ui.separator();
+            ui.label(format!("Rarefaction repeats: {}",result.rarefaction_reps)); ui.separator();
+            ui.label(format!("Ambiguous calls: {}",result.ambiguous_policy.display_name()));
+        });
+        for warning in &result.warnings { ui.colored_label(egui::Color32::from_rgb(230,170,70),warning); }
+        self.render_adjusted_test_table(ui,"Adjusted repertoire metrics",&result.metric_tests,420.0);
+        ui.horizontal_wrapped(|ui| {
+            if let Some(ord)=&result.morisita_horn { ui.label(format!("Morisita-Horn PERMANOVA: F={:.3}, p={:.3e}",ord.permanova_f,ord.permanova_p)); }
+            if let Some(ord)=&result.jaccard { ui.label(format!("Jaccard PERMANOVA: F={:.3}, p={:.3e}",ord.permanova_f,ord.permanova_p)); }
+        });
+        if let Some(ord)=&result.morisita_horn { self.render_corrected_ordination(ui,ord,&format!("{id}_mh")); }
+        if let Some(ord)=&result.jaccard {
+            egui::CollapsingHeader::new("Jaccard presence/absence PCoA").show(ui,|ui|self.render_corrected_ordination(ui,ord,&format!("{id}_jaccard")));
+        }
+        for (idx,comp) in result.compositions.iter().enumerate() {
+            egui::CollapsingHeader::new(format!("{} CLR/Aitchison analysis ({} retained features)",comp.family,comp.retained_features))
+                .default_open(idx==0)
+                .show(ui,|ui|self.render_corrected_composition(ui,comp,&format!("{id}_comp_{idx}")));
+        }
+        egui::CollapsingHeader::new("Matched-depth & sharing sample table").show(ui,|ui|{
+            egui::ScrollArea::both().max_height(430.0).show(ui,|ui|{
+                egui::Grid::new(format!("{id}_samples")).striped(true).show(ui,|ui|{
+                    for h in ["Sample","Group","Subject","Observed richness","Rarefied richness","Rarefied Shannon","Private","Longitudinal","Public"] { ui.label(egui::RichText::new(h).strong()); } ui.end_row();
+                    for r in &result.sample_summaries { ui.monospace(&r.sample_id);ui.label(&r.group);ui.monospace(&r.subject);ui.label(format!("{:.1}",r.observed_richness));ui.label(format!("{:.1}",r.rarefied_richness));ui.label(format!("{:.3}",r.rarefied_shannon));ui.label(format!("{:.1}%",100.0*r.private_fraction));ui.label(format!("{:.1}%",100.0*r.longitudinal_shared_fraction));ui.label(format!("{:.1}%",100.0*r.public_fraction));ui.end_row(); }
+                });
+            });
+        });
+    }
+
+    fn render_corrected_composition(&self, ui:&mut egui::Ui, result:&CorrectedCompositionResult, id:&str) {
+        if let Some(ord)=&result.ordination {
+            ui.label(format!("Global Aitchison PERMANOVA: F={:.3}, p={:.3e} ({} permutations)",ord.permanova_f,ord.permanova_p,ord.permutations));
+            self.render_corrected_ordination(ui,ord,&format!("{id}_ord"));
+        }
+        self.render_adjusted_test_table(ui,&format!("{} adjusted CLR tests",result.family),&result.tests,500.0);
+    }
+
+    fn render_corrected_isotype(&self, ui:&mut egui::Ui, result:&CorrectedIsotypeResult, id:&str) {
+        ui.heading("BCR isotype — compositional corrected analysis");
+        ui.label(format!("Samples: {} | {}",result.files_used,if result.determined_only{"Undetermined excluded and composition renormalized"}else{"Original composition including Undetermined"}));
+        for warning in &result.warnings { ui.colored_label(egui::Color32::from_rgb(230,170,70),warning); }
+        if let Some(ord)=&result.ordination { self.render_corrected_ordination(ui,ord,&format!("{id}_ord")); }
+        self.render_adjusted_test_table(ui,"Isotype CLR tests",&result.tests,480.0);
+    }
+
+    fn render_corrected_immune(&self, ui:&mut egui::Ui, result:&CorrectedImmuneResult, id:&str) {
+        ui.heading("Immune infiltrate — adjusted ssGSEA analysis");
+        ui.label(format!("Samples: {}. Tests use original ssGSEA scores; PCA uses per-cell-type z-scores.",result.files_used));
+        for warning in &result.warnings { ui.colored_label(egui::Color32::from_rgb(230,170,70),warning); }
+        if let Some(ord)=&result.pca { self.render_corrected_ordination(ui,ord,&format!("{id}_pca")); }
+        self.render_adjusted_test_table(ui,"Adjusted immune-cell tests",&result.tests,520.0);
+    }
+
+    fn render_corrected_pathway(&self, ui:&mut egui::Ui, result:&CorrectedPathwayResult, id:&str) {
+        ui.heading("Pathway over-representation analysis");
+        ui.label(format!("GMT: {} | tested-gene universe: {} | foreground: {} | criteria: q ≤ {:.3}, |adjusted log2FC| ≥ {:.3}",result.gmt_path.display(),result.universe_size,result.foreground_size,result.q_threshold,result.effect_threshold));
+        ui.label(egui::RichText::new(format!("Hypergeometric upper-tail test with BH correction; gene sets retained at {}-{} measured genes.",result.min_set_size,result.max_set_size)).small().weak());
+        let has_points=result.tests.iter().any(|r|r.q_value.is_finite()&&r.q_value>0.0);
+        if has_points{
+            Plot::new(format!("{id}_plot")).height(340.0).x_axis_label("ln odds ratio").y_axis_label("-log10(BH q)").show(ui,|plot_ui|{
+                for r in result.tests.iter().filter(|r|r.q_value.is_finite()&&r.q_value>0.0).take(100){
+                    let label=format!("{}\nOverlap: {}/{}\nOR: {:.3}\np: {:.3e}\nq: {:.3e}\nGenes: {}",r.pathway,r.overlap,r.measured_set_size,r.odds_ratio,r.p_value,r.q_value,r.overlap_genes);
+                    plot_ui.points(Points::new(label,vec![[r.odds_ratio.ln(),-r.q_value.max(1e-300).log10()]]).radius(4.0));
+                }
+            });
+        }
+        egui::ScrollArea::both().max_height(560.0).show(ui,|ui|{
+            egui::Grid::new(format!("{id}_table")).striped(true).show(ui,|ui|{
+                for h in ["Pathway","Set size","Overlap","Odds ratio","p","BH q","Overlap genes"]{ui.label(egui::RichText::new(h).strong());}ui.end_row();
+                for r in &result.tests{ui.monospace(&r.pathway);ui.label(r.measured_set_size.to_string());ui.label(r.overlap.to_string());ui.label(format!("{:.3}",r.odds_ratio));ui.label(format!("{:.3e}",r.p_value));ui.label(format!("{:.3e}",r.q_value));ui.label(&r.overlap_genes);ui.end_row();}
+            });
+        });
+    }
+
+    fn render_corrected_ordination(&self, ui:&mut egui::Ui, ord:&OrdinationResult, id:&str) {
+        ui.label(egui::RichText::new(&ord.name).strong());
+        if ord.permanova_p.is_finite() { ui.label(format!("PERMANOVA: pseudo-F {:.3}, p {:.3e}, {} permutations",ord.permanova_f,ord.permanova_p,ord.permutations)); }
+        let case_points=ord.points.iter().filter(|p|p.group=="Case").map(|p|[p.x,p.y]).collect::<Vec<_>>();
+        let ctrl_points=ord.points.iter().filter(|p|p.group=="Control").map(|p|[p.x,p.y]).collect::<Vec<_>>();
+        let accent=ui.visuals().selection.bg_fill;
+        Plot::new(id).height(390.0).x_axis_label(&ord.x_label).y_axis_label(&ord.y_label)
+            .label_formatter(|hover|match hover{HoverPosition::NearDataPoint{plot_name,..}if !plot_name.is_empty()=>Some(plot_name.to_string()),_=>None})
+            .show(ui,|plot_ui|{
+                if !ctrl_points.is_empty(){plot_ui.points(Points::new("Control",ctrl_points).color(egui::Color32::from_rgb(120,170,230)).radius(4.0));}
+                if !case_points.is_empty(){plot_ui.points(Points::new("Case",case_points).color(accent).radius(4.0));}
+                for p in ord.points.iter().take(500) {
+                    let label=format!("{}\n{}\nSubject: {}\n{}: {:.4}\n{}: {:.4}",p.sample_id,p.group,p.subject,ord.x_label,p.x,ord.y_label,p.y);
+                    plot_ui.points(Points::new(label,vec![[p.x,p.y]]).radius(2.0).allow_hover(true));
+                }
+            });
+    }
+
+    fn render_adjusted_test_table(&self, ui:&mut egui::Ui, title:&str, tests:&[AdjustedFeatureResult], height:f32) {
+        ui.label(egui::RichText::new(format!("{title} ({} rows)",tests.len())).strong());
+        ui.label(egui::RichText::new("β is the adjusted case-vs-control coefficient on the modeled scale. q is BH-adjusted for the robust model. Subject p/q comes from averaging repeated samples within each subject and applying a non-parametric sensitivity test.").small().weak());
+        egui::ScrollArea::both().max_height(height).show(ui,|ui|{
+            egui::Grid::new(format!("adjusted_table_{}", title.replace(' ', "_"))).striped(true).show(ui,|ui|{
+                for h in ["Feature","ID/family","β group","SE","p","BH q","Subject effect","Subject q","n","subjects","case mean","ctrl mean"] { ui.label(egui::RichText::new(h).strong()); } ui.end_row();
+                for r in tests {
+                    ui.monospace(&r.feature);ui.monospace(&r.secondary_id);ui.label(format!("{:.4}",r.beta_group));ui.label(format!("{:.4}",r.robust_se));ui.label(format!("{:.3e}",r.p_value));ui.label(format!("{:.3e}",r.q_value));ui.label(format!("{:.4}",r.subject_effect));ui.label(format!("{:.3e}",r.subject_q_value));ui.label(r.n_samples.to_string());ui.label(r.n_subjects.to_string());ui.label(format!("{:.4}",r.mean_case));ui.label(format!("{:.4}",r.mean_control));ui.end_row();
+                }
+            });
         });
     }
 
@@ -2995,6 +3446,97 @@ impl MergeApp {
         Ok(outdir)
     }
 
+    fn save_corrected_result_tables(&self, parent: &Path) -> anyhow::Result<PathBuf> {
+        let bundle = self.corrected_results.as_ref().ok_or_else(|| anyhow::anyhow!("No corrected results are available"))?;
+        let safe_name: String = bundle.comparison.name.chars().map(|c| if c.is_ascii_alphanumeric(){c}else{'_'}).collect();
+        let outdir = parent.join(format!("4c_corrected_analysis_{safe_name}"));
+        fs::create_dir_all(&outdir)?;
+        if let Some(mapping)=&self.cohort_mapping { write_mapping_audit(&outdir.join("sample_mapping_audit.tsv"),mapping)?; write_mapping_audit_csv(&outdir.join("sample_mapping_audit.csv"),mapping)?; }
+        if let Some(r)=&bundle.gene { write_adjusted_tests(&outdir.join("gene_adjusted_tests.tsv"),&r.tests)?; if let Some(o)=&r.pca{write_ordination(&outdir.join("gene_pca.tsv"),o)?;} }
+        if let Some(r)=&bundle.transcript {
+            write_adjusted_tests(&outdir.join("transcript_adjusted_tests.tsv"),&r.tests)?;
+            if let Some(o)=&r.pca{write_ordination(&outdir.join("transcript_pca.tsv"),o)?;}
+            if let Some(dtu)=&r.dtu {
+                write_adjusted_tests(&outdir.join("transcript_dtu_transcript_tests.tsv"),&dtu.transcript_tests)?;
+                write_dtu_gene_tests(&outdir.join("transcript_dtu_gene_tests.tsv"),&dtu.gene_tests)?;
+            }
+        }
+        for (prefix,r) in [("bcr",bundle.bcr.as_ref()),("tcr_alpha",bundle.tcr_alpha.as_ref()),("tcr_beta",bundle.tcr_beta.as_ref())] {
+            if let Some(r)=r {
+                write_corrected_repertoire_samples(&outdir.join(format!("{prefix}_matched_depth_sample_metrics.tsv")),&r.sample_summaries)?;
+                write_adjusted_tests(&outdir.join(format!("{prefix}_adjusted_metric_tests.tsv")),&r.metric_tests)?;
+                if let Some(o)=&r.morisita_horn{write_ordination(&outdir.join(format!("{prefix}_morisita_horn_pcoa.tsv")),o)?;}
+                if let Some(o)=&r.jaccard{write_ordination(&outdir.join(format!("{prefix}_jaccard_pcoa.tsv")),o)?;}
+                for comp in &r.compositions {
+                    let fam:String=comp.family.chars().map(|c|if c.is_ascii_alphanumeric(){c.to_ascii_lowercase()}else{'_'}).collect();
+                    write_adjusted_tests(&outdir.join(format!("{prefix}_{fam}_clr_tests.tsv")),&comp.tests)?;
+                    if let Some(o)=&comp.ordination{write_ordination(&outdir.join(format!("{prefix}_{fam}_aitchison_pcoa.tsv")),o)?;}
+                }
+                if !r.warnings.is_empty(){fs::write(outdir.join(format!("{prefix}_warnings.txt")),r.warnings.join("\n"))?;}
+            }
+        }
+        if let Some(r)=&bundle.bcr_isotype { write_adjusted_tests(&outdir.join("bcr_isotype_clr_tests.tsv"),&r.tests)?; if let Some(o)=&r.ordination{write_ordination(&outdir.join("bcr_isotype_aitchison_pcoa.tsv"),o)?;} if !r.warnings.is_empty(){fs::write(outdir.join("bcr_isotype_warnings.txt"),r.warnings.join("\n"))?;} }
+        if let Some(r)=&bundle.immune { write_adjusted_tests(&outdir.join("immune_adjusted_tests.tsv"),&r.tests)?; if let Some(o)=&r.pca{write_ordination(&outdir.join("immune_pca.tsv"),o)?;} if !r.warnings.is_empty(){fs::write(outdir.join("immune_warnings.txt"),r.warnings.join("\n"))?;} }
+        if let Some(r)=&bundle.pathway { write_pathway_ora(&outdir.join("pathway_ora.tsv"),r)?; }
+        let notes=format!("4C Cohort Explorer corrected/standard analysis\nComparison: {}\nCase: {}\nControl: {}\nSubject column: {}\nCovariates: {}\n\nExpression uses positive-count median-ratio normalization followed by a native NB2 GLM with a log(size-factor) offset and per-feature unshrunk dispersion. Subject-clustered sandwich SEs are used when a subject column is configured, and a subject-collapsed non-parametric sensitivity result is also reported. This is intentionally not labeled DESeq2/edgeR/limma-voom because their cross-feature empirical-Bayes/dispersion-shrinkage machinery is not reproduced.\n\nRepertoire analyses use matched-depth exact-without-replacement Monte-Carlo rarefaction, subject-aware public/private sharing, Morisita-Horn and Jaccard distances, PCoA/PERMANOVA, and CLR/Aitchison composition analysis.\n",
+            bundle.comparison.name,bundle.comparison.case_label,bundle.comparison.control_label,bundle.spec.subject_column.as_deref().unwrap_or("none"),if bundle.spec.covariates.is_empty(){"none".to_string()}else{bundle.spec.covariates.join(", ")});
+        fs::write(outdir.join("README.txt"),notes)?;
+        Ok(outdir)
+    }
+
+    fn configure_corrected_metadata_defaults(&mut self) {
+        let Some(meta)=&self.cohort_metadata else {return;};
+        let columns=meta.columns.clone();
+        if self.corrected_subject_column.as_ref().is_none_or(|c|!columns.contains(c)) {
+            self.corrected_subject_column=columns.iter().find(|c|{
+                let l=c.to_ascii_lowercase();
+                l=="subject"||l=="subject_id"||l=="patient"||l=="patient_id"||l=="participant"||l=="participant_id"||l.contains("patient id")||l.contains("subject id")
+            }).cloned();
+        }
+        self.corrected_covariates.retain(|c|columns.contains(c));
+        if self.corrected_covariates.is_empty() {
+            for c in &columns {
+                let l=c.to_ascii_lowercase();
+                if l=="age"||l.contains("age_at")||l=="sex"||l=="gender"||l.contains("ethnic")||l=="race"||l.contains("batch") {
+                    if Some(c)!=self.corrected_subject_column.as_ref() && c!=&meta.id_column { self.corrected_covariates.insert(c.clone()); }
+                }
+            }
+        }
+    }
+
+    fn start_corrected_analysis(&mut self) {
+        let (Some(scan),Some(metadata))=(self.cohort_scan.clone(),self.cohort_metadata.clone()) else {self.cohort_status="Load a project and metadata first.".to_string();return;};
+        let comparison=match build_comparison(&metadata,self.cohort_preset){Ok(c)=>c,Err(e)=>{self.cohort_status=format!("Could not build comparison: {e:#}");return;}};
+        let mut covariates=self.corrected_covariates.iter().cloned().collect::<Vec<_>>();covariates.sort();
+        let spec=CorrectedModelSpec{subject_column:self.corrected_subject_column.clone(),covariates,permutations:self.corrected_permutations,rarefaction_reps:self.corrected_rarefaction_reps,rarefaction_cap:self.corrected_rarefaction_cap,ambiguous_policy:self.corrected_ambiguous_policy,exclude_undetermined_isotype:self.corrected_exclude_undetermined,..CorrectedModelSpec::default()};
+        let run_pathway=self.corrected_run_pathway;
+        let run_gene=self.cohort_run_gene || run_pathway;let run_transcript=self.cohort_run_transcript;let run_bcr=self.cohort_run_bcr;let run_iso=self.cohort_run_bcr_isotype;let run_tcra=self.cohort_run_tcr_alpha;let run_tcrb=self.cohort_run_tcr_beta;let run_immune=self.cohort_run_immune;
+        let gmt_path=self.corrected_gmt_path.clone();let pathway_q=self.corrected_pathway_q;let pathway_effect=self.corrected_pathway_effect;
+        let stage_count=[run_gene,run_transcript,run_bcr,run_iso,run_tcra,run_tcrb,run_immune,run_pathway].into_iter().filter(|x|*x).count().max(1)as f32;
+        let(tx,rx)=mpsc::channel();self.cohort_receiver=Some(rx);self.cohort_running=true;self.cohort_progress=0.0;self.cohort_status=format!("Running corrected {}…",comparison.name);self.corrected_results=None;
+        std::thread::spawn(move||{
+            let mut stage=0usize;let weight=1.0/stage_count;
+            let(mut gene,mut gene_error,mut transcript,mut transcript_error,mut bcr,mut bcr_error,mut iso,mut iso_error,mut tcra,mut tcra_error,mut tcrb,mut tcrb_error,mut immune,mut immune_error,mut pathway,mut pathway_error)=(None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None);
+            macro_rules! prog {($base:expr,$prefix:expr)=>{|done,total,msg|{let frac=if total==0{0.0}else{done as f32/total as f32};let _=tx.send(CohortWorkerMessage::Progress($base+weight*frac,format!("{} — {}",$prefix,msg)));}}}
+            if run_gene {let base=stage as f32*weight;if let Some(path)=scan.merged_gene_tsv.clone(){match run_corrected_expression(&path,&metadata,&comparison,"Raw Count","Gene",&spec,prog!(base,"Gene corrected")){Ok(r)=>gene=Some(r),Err(e)=>gene_error=Some(format!("{e:#}"))}}else{gene_error=Some("No merged gene-expression TSV detected.".to_string());}stage+=1;}
+            if run_transcript {let base=stage as f32*weight;if let Some(path)=scan.merged_transcript_tsv.clone(){match run_corrected_expression(&path,&metadata,&comparison,"Total Reads","Transcript",&spec,prog!(base,"Transcript corrected")){Ok(r)=>transcript=Some(r),Err(e)=>transcript_error=Some(format!("{e:#}"))}}else{transcript_error=Some("No merged transcript-expression TSV detected.".to_string());}stage+=1;}
+            if run_bcr {let base=stage as f32*weight;match run_corrected_repertoire(&scan.files,&metadata,&comparison,CohortModality::Bcr,&spec,prog!(base,"BCR corrected")){Ok(r)=>bcr=Some(r),Err(e)=>bcr_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_iso {let base=stage as f32*weight;match run_corrected_isotype(&scan.files,&metadata,&comparison,&spec,prog!(base,"BCR isotype corrected")){Ok(r)=>iso=Some(r),Err(e)=>iso_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_tcra {let base=stage as f32*weight;match run_corrected_repertoire(&scan.files,&metadata,&comparison,CohortModality::TcrAlpha,&spec,prog!(base,"TCR alpha corrected")){Ok(r)=>tcra=Some(r),Err(e)=>tcra_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_tcrb {let base=stage as f32*weight;match run_corrected_repertoire(&scan.files,&metadata,&comparison,CohortModality::TcrBeta,&spec,prog!(base,"TCR beta corrected")){Ok(r)=>tcrb=Some(r),Err(e)=>tcrb_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_immune {let base=stage as f32*weight;match run_corrected_immune(&scan.files,&metadata,&comparison,&spec,prog!(base,"Immune corrected")){Ok(r)=>immune=Some(r),Err(e)=>immune_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_pathway {
+                let _=tx.send(CohortWorkerMessage::Progress(stage as f32*weight,"Pathway ORA".to_string()));
+                match (gene.as_ref(),gmt_path.as_ref()) {
+                    (Some(g),Some(path))=>match run_pathway_ora(path,g,pathway_q,pathway_effect){Ok(r)=>pathway=Some(r),Err(e)=>pathway_error=Some(format!("{e:#}"))},
+                    (None,_)=>pathway_error=Some("Pathway ORA requires a successful corrected gene-count analysis.".to_string()),
+                    (_,None)=>pathway_error=Some("Choose a GMT gene-set file before running pathway ORA.".to_string()),
+                }
+            }
+            let _=tx.send(CohortWorkerMessage::CorrectedDone(CorrectedAnalysisBundle{comparison,spec,gene,gene_error,transcript,transcript_error,bcr,bcr_error,bcr_isotype:iso,bcr_isotype_error:iso_error,tcr_alpha:tcra,tcr_alpha_error:tcra_error,tcr_beta:tcrb,tcr_beta_error:tcrb_error,immune,immune_error,pathway,pathway_error}));
+        });
+    }
+
     fn load_cohort_project(&mut self, root: PathBuf) {
         match scan_project(&root) {
             Ok(scan) => {
@@ -3007,6 +3549,7 @@ impl MergeApp {
                 let auto_meta = scan.metadata_candidates.first().cloned();
                 self.cohort_scan = Some(scan);
                 self.cohort_results = None;
+                self.corrected_results = None;
                 if let Some(path) = auto_meta {
                     self.load_cohort_metadata_path(path);
                 } else {
@@ -3029,6 +3572,8 @@ impl MergeApp {
                 self.cohort_metadata_path = Some(path);
                 self.cohort_metadata = Some(meta);
                 self.cohort_results = None;
+                self.corrected_results = None;
+                self.configure_corrected_metadata_defaults();
                 self.rebuild_cohort_mapping();
                 self.cohort_status = format!(
                     "Metadata loaded: {rows} rows; matching on '{id_column}'."
@@ -3223,7 +3768,8 @@ impl MergeApp {
     }
 
     fn poll_cohort_worker(&mut self) {
-        let mut done = None;
+        let mut exploratory_done = None;
+        let mut corrected_done = None;
         if let Some(rx) = &self.cohort_receiver {
             while let Ok(message) = rx.try_recv() {
                 match message {
@@ -3231,13 +3777,12 @@ impl MergeApp {
                         self.cohort_progress = frac.clamp(0.0, 1.0);
                         self.cohort_status = text;
                     }
-                    CohortWorkerMessage::Done(bundle) => {
-                        done = Some(bundle);
-                    }
+                    CohortWorkerMessage::Done(bundle) => exploratory_done = Some(bundle),
+                    CohortWorkerMessage::CorrectedDone(bundle) => corrected_done = Some(bundle),
                 }
             }
         }
-        if let Some(bundle) = done {
+        if let Some(bundle) = exploratory_done {
             let mut messages = Vec::new();
             if let Some(err) = &bundle.gene_error { messages.push(format!("Gene: {err}")); }
             if let Some(err) = &bundle.transcript_error { messages.push(format!("Transcript: {err}")); }
@@ -3246,47 +3791,32 @@ impl MergeApp {
             if let Some(err) = &bundle.tcr_alpha_error { messages.push(format!("TCR alpha: {err}")); }
             if let Some(err) = &bundle.tcr_beta_error { messages.push(format!("TCR beta: {err}")); }
             if let Some(err) = &bundle.immune_error { messages.push(format!("Immune infiltrate: {err}")); }
-
             let current_available = match self.cohort_result_view {
-                CohortResultView::Gene => bundle.gene.is_some(),
-                CohortResultView::Transcript => bundle.transcript.is_some(),
-                CohortResultView::Bcr => bundle.bcr.is_some(),
-                CohortResultView::BcrIsotype => bundle.bcr_isotype.is_some(),
-                CohortResultView::TcrAlpha => bundle.tcr_alpha.is_some(),
-                CohortResultView::TcrBeta => bundle.tcr_beta.is_some(),
+                CohortResultView::Gene => bundle.gene.is_some(), CohortResultView::Transcript => bundle.transcript.is_some(),
+                CohortResultView::Bcr => bundle.bcr.is_some(), CohortResultView::BcrIsotype => bundle.bcr_isotype.is_some(),
+                CohortResultView::TcrAlpha => bundle.tcr_alpha.is_some(), CohortResultView::TcrBeta => bundle.tcr_beta.is_some(),
                 CohortResultView::Immune => bundle.immune.is_some(),
             };
             if !current_available {
-                self.cohort_result_view = if bundle.gene.is_some() {
-                    CohortResultView::Gene
-                } else if bundle.transcript.is_some() {
-                    CohortResultView::Transcript
-                } else if bundle.bcr.is_some() {
-                    CohortResultView::Bcr
-                } else if bundle.bcr_isotype.is_some() {
-                    CohortResultView::BcrIsotype
-                } else if bundle.tcr_alpha.is_some() {
-                    CohortResultView::TcrAlpha
-                } else if bundle.tcr_beta.is_some() {
-                    CohortResultView::TcrBeta
-                } else {
-                    CohortResultView::Immune
-                };
+                self.cohort_result_view = if bundle.gene.is_some(){CohortResultView::Gene}else if bundle.transcript.is_some(){CohortResultView::Transcript}else if bundle.bcr.is_some(){CohortResultView::Bcr}else if bundle.bcr_isotype.is_some(){CohortResultView::BcrIsotype}else if bundle.tcr_alpha.is_some(){CohortResultView::TcrAlpha}else if bundle.tcr_beta.is_some(){CohortResultView::TcrBeta}else{CohortResultView::Immune};
             }
-
-            self.cohort_results = Some(bundle);
-            self.cohort_running = false;
-            self.cohort_progress = 1.0;
-            self.cohort_receiver = None;
-            self.cohort_status = if messages.is_empty() {
-                "Exploratory comparison complete.".to_string()
-            } else {
-                format!(
-                    "Comparison completed with {} modality warning(s): {}",
-                    messages.len(),
-                    messages.join(" | ")
-                )
-            };
+            self.cohort_results=Some(bundle); self.cohort_running=false; self.cohort_progress=1.0; self.cohort_receiver=None;
+            self.cohort_status=if messages.is_empty(){"Exploratory comparison complete.".to_string()}else{format!("Comparison completed with {} modality warning(s): {}",messages.len(),messages.join(" | "))};
+        }
+        if let Some(bundle) = corrected_done {
+            let mut messages=Vec::new();
+            if let Some(err)=&bundle.gene_error{messages.push(format!("Gene: {err}"));}
+            if let Some(err)=&bundle.transcript_error{messages.push(format!("Transcript: {err}"));}
+            if let Some(err)=&bundle.bcr_error{messages.push(format!("BCR: {err}"));}
+            if let Some(err)=&bundle.bcr_isotype_error{messages.push(format!("BCR isotype: {err}"));}
+            if let Some(err)=&bundle.tcr_alpha_error{messages.push(format!("TCR alpha: {err}"));}
+            if let Some(err)=&bundle.tcr_beta_error{messages.push(format!("TCR beta: {err}"));}
+            if let Some(err)=&bundle.immune_error{messages.push(format!("Immune: {err}"));}
+            if let Some(err)=&bundle.pathway_error{messages.push(format!("Pathway: {err}"));}
+            let current=match self.corrected_result_view{CorrectedResultView::Gene=>bundle.gene.is_some(),CorrectedResultView::Transcript=>bundle.transcript.is_some(),CorrectedResultView::Bcr=>bundle.bcr.is_some(),CorrectedResultView::BcrIsotype=>bundle.bcr_isotype.is_some(),CorrectedResultView::TcrAlpha=>bundle.tcr_alpha.is_some(),CorrectedResultView::TcrBeta=>bundle.tcr_beta.is_some(),CorrectedResultView::Immune=>bundle.immune.is_some(),CorrectedResultView::Pathway=>bundle.pathway.is_some()};
+            if !current {self.corrected_result_view=if bundle.gene.is_some(){CorrectedResultView::Gene}else if bundle.transcript.is_some(){CorrectedResultView::Transcript}else if bundle.bcr.is_some(){CorrectedResultView::Bcr}else if bundle.bcr_isotype.is_some(){CorrectedResultView::BcrIsotype}else if bundle.tcr_alpha.is_some(){CorrectedResultView::TcrAlpha}else if bundle.tcr_beta.is_some(){CorrectedResultView::TcrBeta}else if bundle.immune.is_some(){CorrectedResultView::Immune}else{CorrectedResultView::Pathway};}
+            self.corrected_results=Some(bundle);self.cohort_running=false;self.cohort_progress=1.0;self.cohort_receiver=None;
+            self.cohort_status=if messages.is_empty(){"Corrected / standard analysis complete.".to_string()}else{format!("Corrected analysis completed with {} modality warning(s): {}",messages.len(),messages.join(" | "))};
         }
     }
 
