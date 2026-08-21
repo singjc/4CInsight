@@ -1393,11 +1393,12 @@ pub fn write_bcr_isotype_values(path: &Path, rows: &[BcrIsotypeSampleValue]) -> 
     Ok(())
 }
 
-pub fn write_mapping_audit(path: &Path, mapping: &CohortMapping) -> Result<()> {
-    let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+fn write_mapping_audit_delimited(path: &Path, mapping: &CohortMapping, delimiter: u8) -> Result<()> {
+    let mut writer = csv::WriterBuilder::new().delimiter(delimiter).from_path(path)?;
     writer.write_record([
         "sample_id",
         "mapping_status",
+        "metadata_row",
         "phenotype",
         "hyp",
         "gene_files",
@@ -1407,6 +1408,7 @@ pub fn write_mapping_audit(path: &Path, mapping: &CohortMapping) -> Result<()> {
         "tcr_alpha_files",
         "tcr_beta_files",
         "immune_infiltrate_files",
+        "duplicate_notes",
     ])?;
     for r in &mapping.rows {
         let status = match r.mapping_status {
@@ -1416,9 +1418,19 @@ pub fn write_mapping_audit(path: &Path, mapping: &CohortMapping) -> Result<()> {
             MappingStatus::MetadataOnly => "metadata_only",
         };
         let count = |m| r.counts.get(&m).copied().unwrap_or(0).to_string();
+        let duplicates = r
+            .counts
+            .iter()
+            .filter(|(_, n)| **n > 1)
+            .map(|(m, n)| format!("{}x{}", m.display_name(), n))
+            .collect::<Vec<_>>()
+            .join("; ");
         writer.write_record([
             r.sample_id.clone(),
             status.to_string(),
+            r.metadata_row
+                .map(|idx| (idx + 2).to_string())
+                .unwrap_or_default(),
             r.phenotype.clone(),
             r.hyp.clone(),
             count(CohortModality::GeneExpression),
@@ -1428,10 +1440,19 @@ pub fn write_mapping_audit(path: &Path, mapping: &CohortMapping) -> Result<()> {
             count(CohortModality::TcrAlpha),
             count(CohortModality::TcrBeta),
             count(CohortModality::ImmuneInfiltrate),
+            duplicates,
         ])?;
     }
     writer.flush()?;
     Ok(())
+}
+
+pub fn write_mapping_audit(path: &Path, mapping: &CohortMapping) -> Result<()> {
+    write_mapping_audit_delimited(path, mapping, b'\t')
+}
+
+pub fn write_mapping_audit_csv(path: &Path, mapping: &CohortMapping) -> Result<()> {
+    write_mapping_audit_delimited(path, mapping, b',')
 }
 
 #[cfg(test)]

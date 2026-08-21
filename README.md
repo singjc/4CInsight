@@ -1,8 +1,15 @@
-# CFS Cohort Explorer
+# 4C Cohort Explorer
 
 A native Rust application for memory-bounded RNA expression merging plus metadata-driven cohort exploration across gene expression, BCR, BCR isotypes, and additional immune data types.
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
+
+## What v0.4.1 adds
+
+- Renames the desktop application to **4C Cohort Explorer**.
+- Adds a one-click **Export mapping CSV…** action in the sample mapping & coverage audit so unmatched/ambiguous/metadata-only samples and cross-modality coverage can be sent back for metadata correction.
+- Makes large cohort result tables substantially taller and reserves a fixed scrollable viewport so V/D/J-gene and differential-feature tables no longer collapse to only a few visible rows inside the outer page.
+- Increases the on-screen sample mapping audit height for easier review.
 
 ## What v0.4 adds
 

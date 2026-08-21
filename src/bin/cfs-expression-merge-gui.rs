@@ -1,7 +1,7 @@
 use cfs_expression_merger::cohort::{
     build_comparison, build_mapping, load_metadata, run_bcr_comparison, run_bcr_isotype_comparison,
     run_gene_comparison, scan_project, write_bcr_isotype_values, write_bcr_sample_summaries,
-    write_feature_tests, write_mapping_audit, BcrComparisonResult, BcrIsotypeComparisonResult,
+    write_feature_tests, write_mapping_audit, write_mapping_audit_csv, BcrComparisonResult, BcrIsotypeComparisonResult,
     CohortComparison, CohortMapping, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
     MappingStatus, MetadataTable, ProjectScan, CohortModality,
 };
@@ -29,7 +29,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "CFS Cohort Explorer",
+        "4C Cohort Explorer",
         options,
         Box::new(|cc| Ok(Box::new(MergeApp::new(cc)))),
     )
@@ -270,7 +270,7 @@ impl MergeApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
-                            egui::RichText::new("CFS Cohort Explorer")
+                            egui::RichText::new("4C Cohort Explorer")
                                 .size(24.0)
                                 .strong()
                                 .color(accent),
@@ -1658,7 +1658,7 @@ impl MergeApp {
 
     fn render_cohort_mapping_card(&mut self, ui: &mut egui::Ui) {
         self.card(ui, "2. Sample mapping & coverage audit", |this, ui| {
-            let Some(mapping) = &this.cohort_mapping else {
+            let Some(mapping) = this.cohort_mapping.clone() else {
                 ui.label(
                     egui::RichText::new(
                         "Load both a project and metadata to audit cross-modality sample mapping.",
@@ -1692,9 +1692,38 @@ impl MergeApp {
                 .weak(),
             );
 
+            ui.horizontal_wrapped(|ui| {
+                let export = ui
+                    .button("Export mapping CSV…")
+                    .on_hover_text("Export the complete sample mapping and modality-coverage audit as a CSV file. This is useful for sending unmatched, ambiguous, metadata-only, or duplicate entries back for metadata correction.");
+                if export.clicked() {
+                    let mut dialog = FileDialog::new()
+                        .add_filter("CSV", &["csv"])
+                        .set_file_name("sample_mapping_and_coverage.csv");
+                    if let Some(root) = &this.cohort_root {
+                        dialog = dialog.set_directory(root);
+                    }
+                    if let Some(path) = dialog.save_file() {
+                        match write_mapping_audit_csv(&path, &mapping) {
+                            Ok(()) => {
+                                this.cohort_status = format!(
+                                    "Saved sample mapping and coverage audit to {}",
+                                    path.display()
+                                );
+                            }
+                            Err(e) => {
+                                this.cohort_status = format!(
+                                    "Could not export sample mapping CSV: {e:#}"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+
             ui.add_space(6.0);
             egui::ScrollArea::vertical()
-                .max_height(300.0)
+                .max_height(420.0)
                 .show_rows(ui, 24.0, mapping.rows.len(), |ui, range| {
                     egui::Grid::new("cohort_mapping_grid")
                         .striped(true)
@@ -2056,7 +2085,7 @@ impl MergeApp {
             .small()
             .weak(),
         );
-        self.render_feature_test_table(ui, "Top differential genes", &result.tests, 350.0);
+        self.render_feature_test_table(ui, "Top differential genes", &result.tests, 520.0);
         ui.label(
             egui::RichText::new(
                 "Pathway enrichment is not yet run in v0.4. The next gene-analysis step will accept a GMT gene-set library and support both hit-list ORA and ranked enrichment so pathway results remain explicit and reproducible.",
@@ -2085,18 +2114,18 @@ impl MergeApp {
             });
         }
         self.render_feature_effect_plot(ui, "cohort_bcr_metric_effects_v04", "BCR sample metrics", &result.metric_tests);
-        self.render_feature_test_table(ui, "Sample-level BCR metrics", &result.metric_tests, 260.0);
+        self.render_feature_test_table(ui, "Sample-level BCR metrics", &result.metric_tests, 360.0);
         ui.collapsing("BCR heavy-chain isotype usage", |ui| {
-            self.render_feature_test_table(ui, "Isotype fractions from BCR heavy-chain reports", &result.isotype_tests, 240.0);
+            self.render_feature_test_table(ui, "Isotype fractions from BCR heavy-chain reports", &result.isotype_tests, 420.0);
         });
         ui.collapsing("V-gene usage", |ui| {
-            self.render_feature_test_table(ui, "V-gene fraction tests", &result.v_gene_tests, 280.0);
+            self.render_feature_test_table(ui, "V-gene fraction tests", &result.v_gene_tests, 540.0);
         });
         ui.collapsing("D-gene usage", |ui| {
-            self.render_feature_test_table(ui, "D-gene fraction tests", &result.d_gene_tests, 280.0);
+            self.render_feature_test_table(ui, "D-gene fraction tests", &result.d_gene_tests, 540.0);
         });
         ui.collapsing("J-gene usage", |ui| {
-            self.render_feature_test_table(ui, "J-gene fraction tests", &result.j_gene_tests, 280.0);
+            self.render_feature_test_table(ui, "J-gene fraction tests", &result.j_gene_tests, 540.0);
         });
         ui.label(
             egui::RichText::new(
@@ -2129,7 +2158,7 @@ impl MergeApp {
             "BCR isotype median-fraction shifts",
             &result.tests,
         );
-        self.render_feature_test_table(ui, "BCR isotype fraction tests", &result.tests, 300.0);
+        self.render_feature_test_table(ui, "BCR isotype fraction tests", &result.tests, 420.0);
 
         let mut case_means: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
         let mut ctrl_means: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
@@ -2244,49 +2273,72 @@ impl MergeApp {
         tests: &[FeatureTestResult],
         max_height: f32,
     ) {
-        ui.label(egui::RichText::new(title).strong());
-        egui::ScrollArea::vertical()
-            .max_height(max_height)
-            .show_rows(ui, 24.0, tests.len(), |ui, range| {
-                egui::Grid::new(format!("feature_test_grid_{title}"))
-                    .striped(true)
-                    .num_columns(9)
-                    .show(ui, |ui| {
-                        if range.start == 0 {
-                            for heading in [
-                                "Feature",
-                                "Effect",
-                                "Cliff δ",
-                                "p",
-                                "BH q",
-                                "Median case",
-                                "Median ctrl",
-                                "n case",
-                                "n ctrl",
-                            ] {
-                                ui.label(egui::RichText::new(heading).strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(title).strong());
+            ui.label(egui::RichText::new(format!("({} rows)", tests.len())).small().weak());
+        });
+
+        if tests.is_empty() {
+            ui.label(egui::RichText::new("No rows available for this feature family.").weak());
+            return;
+        }
+
+        // Reserve a real viewport for larger result families. Without this, nested
+        // scroll areas can collapse to only a few visible rows near the bottom of
+        // the outer Cohort Analysis page even when the table contains many tests.
+        let row_height = 24.0_f32;
+        let content_height = row_height * (tests.len().saturating_add(1) as f32) + 10.0;
+        let desired_height = if tests.len() > 8 {
+            max_height
+        } else {
+            content_height.min(max_height)
+        };
+
+        ui.allocate_ui(egui::vec2(ui.available_width(), desired_height), |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(format!("feature_test_scroll_{title}"))
+                .max_height(desired_height)
+                .show_rows(ui, row_height, tests.len(), |ui, range| {
+                    egui::Grid::new(format!("feature_test_grid_{title}"))
+                        .striped(true)
+                        .num_columns(9)
+                        .show(ui, |ui| {
+                            if range.start == 0 {
+                                for heading in [
+                                    "Feature",
+                                    "Effect",
+                                    "Cliff δ",
+                                    "p",
+                                    "BH q",
+                                    "Median case",
+                                    "Median ctrl",
+                                    "n case",
+                                    "n ctrl",
+                                ] {
+                                    ui.label(egui::RichText::new(heading).strong());
+                                }
+                                ui.end_row();
                             }
-                            ui.end_row();
-                        }
-                        for idx in range {
-                            let r = &tests[idx];
-                            ui.monospace(&r.feature);
-                            ui.label(format!("{:.4}", r.effect));
-                            ui.label(format!("{:.3}", r.cliffs_delta));
-                            ui.label(format!("{:.3e}", r.p_value));
-                            ui.label(if r.q_value.is_finite() {
-                                format!("{:.3e}", r.q_value)
-                            } else {
-                                "NA".to_string()
-                            });
-                            ui.label(format!("{:.4}", r.median_case));
-                            ui.label(format!("{:.4}", r.median_control));
-                            ui.label(r.n_case.to_string());
-                            ui.label(r.n_control.to_string());
-                            ui.end_row();
-                        }
-                    });
-            });
+                            for idx in range {
+                                let r = &tests[idx];
+                                ui.monospace(&r.feature);
+                                ui.label(format!("{:.4}", r.effect));
+                                ui.label(format!("{:.3}", r.cliffs_delta));
+                                ui.label(format!("{:.3e}", r.p_value));
+                                ui.label(if r.q_value.is_finite() {
+                                    format!("{:.3e}", r.q_value)
+                                } else {
+                                    "NA".to_string()
+                                });
+                                ui.label(format!("{:.4}", r.median_case));
+                                ui.label(format!("{:.4}", r.median_control));
+                                ui.label(r.n_case.to_string());
+                                ui.label(r.n_control.to_string());
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
     }
 
 
@@ -2301,7 +2353,7 @@ impl MergeApp {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
-        let outdir = parent.join(format!("cfs_analysis_{safe_name}"));
+        let outdir = parent.join(format!("4c_analysis_{safe_name}"));
         fs::create_dir_all(&outdir)?;
         if let Some(mapping) = &self.cohort_mapping {
             write_mapping_audit(&outdir.join("sample_mapping_audit.tsv"), mapping)?;
