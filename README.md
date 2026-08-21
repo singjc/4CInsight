@@ -4,6 +4,14 @@ A native Rust application for memory-bounded RNA expression merging plus metadat
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.5 adds
+
+- Adds a **Generate HTML report…** action to Cohort Analysis using the `report-builder` Rust crate. The report combines the comparison definition, mapping audit, interactive plots, ranked tables, analysis caveats, and modality warnings into one HTML file.
+- Adds a **gene detection-shift plot** comparing the fraction of case versus control samples in which each gene is detected.
+- Adds selectable **case/control BCR distribution box plots** for Shannon diversity, clonality, unique clones, top-clone fraction, effective clonotypes, and weighted mean CDR3 AA length, including individual sample points.
+- Adds a **group-mean BCR-isotype composition plot** alongside the existing effect/test table.
+- Adds an automated report-generation unit test in addition to the existing cohort tests.
+
 ## What v0.4.1 adds
 
 - Renames the desktop application to **4C Cohort Explorer**.
@@ -180,9 +188,24 @@ A selected gene/transcript has one value per sample, so the profile view uses in
 4. Choose one of the current study presets: **HYP vs True_HC** or **HYP+ME/CFS vs ME/CFS-only**.
 5. Select Gene expression, BCR, and/or BCR isotype. Gene expression defaults to TPM but can use FPKM, CPM, or Raw Count if those suffixes exist in the merged table.
 6. Run the exploratory comparison. Each modality runs independently so a missing or malformed input does not prevent the others from completing.
-7. Inspect the interactive result panels and use **Save result tables…** to export the mapping audit and statistical tables as TSV files.
+7. Inspect the interactive result panels. v0.5 adds a gene detection-shift plot, selectable case/control BCR metric distributions, and a group-mean BCR-isotype composition plot.
+8. Use **Save result tables…** to export the mapping audit and statistical tables as TSV files, or **Generate HTML report…** to create a single shareable HTML summary with interactive Plotly figures and ranked tables.
 
 The cohort analysis is intentionally exploratory. Longitudinal/repeated samples are currently treated as observations, matching the first-pass study request; covariate-aware and repeated-measures models belong in a later rigorous-analysis mode.
+
+
+### HTML reports
+
+The cohort results card can generate a single HTML report using the [`report-builder`](https://github.com/singjc/report-builder) Rust crate. The report includes:
+
+- comparison definition and first-pass modelling caveats;
+- sample mapping/coverage audit;
+- gene-expression volcano and detection-shift plots plus the top differential-gene table;
+- BCR group box plots for key repertoire metrics and ranked sample-metric/isotype/V/D/J tests;
+- dedicated BCR-isotype composition plots and tests;
+- file warnings and unavailable-modality messages rather than silently dropping failed analyses.
+
+`report-builder` 0.1.1 normally references Plotly and optional table helpers from public CDNs. v0.5 compiles Plotly with its `plotly_embed_js` feature, injects that bundled JavaScript into the report, and removes the unused DataTables/FileSaver CDN helpers during finalization. The resulting `.html` is therefore one self-contained file whose interactive plots can be opened offline. This post-processing is pinned to the current report-builder 0.1.1 template and is covered by a report-generation unit test.
 
 ## CLI examples
 
@@ -238,6 +261,18 @@ The same source can be compiled into native releases for each operating system:
 A single executable cannot run unchanged on all three operating systems because their binary formats and ABIs differ. The included GitHub Actions workflow is the starting point for creating per-OS release artifacts.
 
 ## Good next additions
+
+For cohort analysis in particular, useful next modules are:
+
+- BCR abundance-weighted overlap/Morisita-Horn similarity, PCoA, hierarchical clustering, public/private clonotypes, AA convergence, and matched-depth repertoire diversity.
+- TCR alpha/beta repertoire analysis with matched-depth rarefaction, Morisita-Horn similarity/PCoA, public/private clonotypes, AA convergence, and V-J pairing.
+- Immune-infiltrate group comparisons, cell-type heatmaps, and cross-modal correlation with expression/repertoire features.
+- Pathway analysis from gene results using a user-supplied/versioned GMT collection (over-representation and ranked enrichment).
+- Gene-expression PCA/correlation heatmaps and selected top-gene heatmaps.
+- Cross-modal candidate-biomarker summaries that combine gene, immune-infiltrate, BCR, BCR-isotype, and later TCR evidence.
+- A later rigorous-analysis mode for longitudinal/repeated measures and covariate adjustment.
+
+General merge/QC additions:
 
 - Preflight schema validation for every workbook, not only the first report.
 - Duplicate sample-prefix detection and editable sample names.

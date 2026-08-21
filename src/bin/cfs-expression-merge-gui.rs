@@ -5,6 +5,7 @@ use cfs_expression_merger::cohort::{
     CohortComparison, CohortMapping, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
     MappingStatus, MetadataTable, ProjectScan, CohortModality,
 };
+use cfs_expression_merger::report::{generate_cohort_html_report, CohortReportInputs};
 use cfs_expression_merger::{
     all_metrics, collaborator_default_metrics, inspect_kind, inspect_merged_tsv, load_entity_catalog,
     load_entity_catalog_from_merged, load_entity_profile, load_entity_profile_from_merged,
@@ -13,7 +14,7 @@ use cfs_expression_merger::{
     MergedDatasetInfo, Metric, SampleDistributionSummary,
 };
 use eframe::egui;
-use egui_plot::{BoxElem, BoxPlot, BoxSpread, HoverPosition, Line, Plot, Points};
+use egui_plot::{Bar, BarChart, BoxElem, BoxPlot, BoxSpread, HoverPosition, Line, Plot, Points};
 use rfd::FileDialog;
 use std::collections::HashSet;
 use std::fs;
@@ -72,6 +73,49 @@ enum CohortResultView {
     Gene,
     Bcr,
     BcrIsotype,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BcrMetricView {
+    Shannon,
+    Clonality,
+    UniqueClones,
+    TopCloneFraction,
+    EffectiveClonotypes,
+    WeightedCdr3Length,
+}
+
+impl BcrMetricView {
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Shannon => "Shannon diversity",
+            Self::Clonality => "Clonality",
+            Self::UniqueClones => "Unique clones",
+            Self::TopCloneFraction => "Top clone fraction",
+            Self::EffectiveClonotypes => "Effective clonotypes",
+            Self::WeightedCdr3Length => "Weighted mean CDR3 AA length",
+        }
+    }
+
+    fn value(self, row: &cfs_expression_merger::cohort::BcrSampleSummary) -> f64 {
+        match self {
+            Self::Shannon => row.shannon,
+            Self::Clonality => row.clonality,
+            Self::UniqueClones => row.unique_clones,
+            Self::TopCloneFraction => row.top_clone_fraction,
+            Self::EffectiveClonotypes => row.effective_n,
+            Self::WeightedCdr3Length => row.weighted_mean_cdr3_aa_length,
+        }
+    }
+
+    const ALL: [Self; 6] = [
+        Self::Shannon,
+        Self::Clonality,
+        Self::UniqueClones,
+        Self::TopCloneFraction,
+        Self::EffectiveClonotypes,
+        Self::WeightedCdr3Length,
+    ];
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +199,7 @@ struct MergeApp {
     cohort_gene_metric: Metric,
     cohort_run_bcr: bool,
     cohort_run_bcr_isotype: bool,
+    cohort_bcr_metric_view: BcrMetricView,
 }
 
 impl MergeApp {
@@ -226,6 +271,7 @@ impl MergeApp {
             cohort_gene_metric: Metric::Tpm,
             cohort_run_bcr: true,
             cohort_run_bcr_isotype: true,
+            cohort_bcr_metric_view: BcrMetricView::Shannon,
         }
     }
 }
@@ -1946,6 +1992,45 @@ impl MergeApp {
                         }
                     }
                 }
+
+                let report_button = ui
+                    .button("Generate HTML report…")
+                    .on_hover_text("Generate one self-contained HTML file containing the study overview, mapping audit, interactive plots and ranked result tables using report-builder. Plotly JavaScript is embedded so the report can be opened offline.");
+                if report_button.clicked() {
+                    let safe_name: String = bundle
+                        .comparison
+                        .name
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                        .collect();
+                    let mut dialog = FileDialog::new()
+                        .add_filter("HTML report", &["html"])
+                        .set_file_name(format!("4c_cohort_report_{safe_name}.html"));
+                    if let Some(root) = &this.cohort_root {
+                        dialog = dialog.set_directory(root);
+                    }
+                    if let Some(path) = dialog.save_file() {
+                        this.remember_directory_for(&path);
+                        let inputs = CohortReportInputs {
+                            comparison: &bundle.comparison,
+                            mapping: this.cohort_mapping.as_ref(),
+                            gene: bundle.gene.as_ref(),
+                            gene_error: bundle.gene_error.as_deref(),
+                            bcr: bundle.bcr.as_ref(),
+                            bcr_error: bundle.bcr_error.as_deref(),
+                            bcr_isotype: bundle.bcr_isotype.as_ref(),
+                            bcr_isotype_error: bundle.bcr_isotype_error.as_deref(),
+                        };
+                        match generate_cohort_html_report(&path, inputs) {
+                            Ok(()) => {
+                                this.cohort_status = format!("Generated HTML report: {}", path.display());
+                            }
+                            Err(e) => {
+                                this.cohort_status = format!("Could not generate HTML report: {e:#}");
+                            }
+                        }
+                    }
+                }
             });
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(
@@ -2085,6 +2170,9 @@ impl MergeApp {
             .small()
             .weak(),
         );
+        ui.collapsing("Detection shift (case vs control)", |ui| {
+            self.render_gene_detection_shift(ui, result);
+        });
         self.render_feature_test_table(ui, "Top differential genes", &result.tests, 520.0);
         ui.label(
             egui::RichText::new(
@@ -2095,7 +2183,7 @@ impl MergeApp {
         );
     }
 
-    fn render_bcr_comparison_result(&self, ui: &mut egui::Ui, result: &BcrComparisonResult) {
+    fn render_bcr_comparison_result(&mut self, ui: &mut egui::Ui, result: &BcrComparisonResult) {
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("BCR files used: {}", result.files_used));
             ui.separator();
@@ -2113,7 +2201,10 @@ impl MergeApp {
                 }
             });
         }
-        self.render_feature_effect_plot(ui, "cohort_bcr_metric_effects_v04", "BCR sample metrics", &result.metric_tests);
+        ui.collapsing("Group distribution for a BCR metric", |ui| {
+            self.render_bcr_metric_distribution(ui, result);
+        });
+        self.render_feature_effect_plot(ui, "cohort_bcr_metric_effects_v05", "BCR sample metrics", &result.metric_tests);
         self.render_feature_test_table(ui, "Sample-level BCR metrics", &result.metric_tests, 360.0);
         ui.collapsing("BCR heavy-chain isotype usage", |ui| {
             self.render_feature_test_table(ui, "Isotype fractions from BCR heavy-chain reports", &result.isotype_tests, 420.0);
@@ -2152,9 +2243,10 @@ impl MergeApp {
                 }
             });
         }
+        self.render_bcr_isotype_group_means_plot(ui, result);
         self.render_feature_effect_plot(
             ui,
-            "cohort_bcr_isotype_effects_v04",
+            "cohort_bcr_isotype_effects_v05",
             "BCR isotype median-fraction shifts",
             &result.tests,
         );
@@ -2203,6 +2295,221 @@ impl MergeApp {
                     }
                 });
         });
+    }
+
+    fn render_gene_detection_shift(&self, ui: &mut egui::Ui, result: &GeneComparisonResult) {
+        let points: Vec<_> = result
+            .tests
+            .iter()
+            .filter_map(|r| Some((r, r.detection_case?, r.detection_control?)))
+            .filter(|(_, case, ctrl)| case.is_finite() && ctrl.is_finite())
+            .collect();
+        if points.is_empty() {
+            ui.label("Detection fractions are not available for this gene-expression result.");
+            return;
+        }
+        let all_points: Vec<[f64; 2]> = points
+            .iter()
+            .map(|(_, case, ctrl)| [100.0 * *ctrl, 100.0 * *case])
+            .collect();
+        let accent = ui.visuals().selection.bg_fill;
+        Plot::new("cohort_gene_detection_shift_v05")
+            .height(330.0)
+            .x_axis_label("Control detection (%)")
+            .y_axis_label("Case detection (%)")
+            .label_formatter(|hover| match hover {
+                HoverPosition::NearDataPoint { plot_name, .. } if !plot_name.is_empty() => {
+                    Some(plot_name.to_string())
+                }
+                _ => None,
+            })
+            .show(ui, |plot_ui| {
+                plot_ui.line(
+                    Line::new("Equal detection", vec![[0.0, 0.0], [100.0, 100.0]])
+                        .color(egui::Color32::from_gray(120)),
+                );
+                plot_ui.points(
+                    Points::new("All genes", all_points)
+                        .color(egui::Color32::from_gray(95))
+                        .radius(2.0),
+                );
+                for (r, case, ctrl) in points.iter().take(120) {
+                    let label = format!(
+                        "{}\ncase detection: {:.1}%\ncontrol detection: {:.1}%\nΔ detection: {:+.1} pp\nq: {:.3e}",
+                        r.feature,
+                        100.0 * *case,
+                        100.0 * *ctrl,
+                        100.0 * (*case - *ctrl),
+                        r.q_value,
+                    );
+                    let color = if r.q_value.is_finite() && r.q_value <= 0.05 {
+                        egui::Color32::from_rgb(230, 170, 70)
+                    } else {
+                        accent
+                    };
+                    plot_ui.points(
+                        Points::new(label, vec![[100.0 * *ctrl, 100.0 * *case]])
+                            .color(color)
+                            .radius(if r.q_value <= 0.05 { 4.0 } else { 3.0 }),
+                    );
+                }
+            });
+        ui.label(
+            egui::RichText::new(
+                "Genes above the diagonal are detected in a larger fraction of case samples; genes below it are detected more often in controls.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    fn render_bcr_metric_distribution(&mut self, ui: &mut egui::Ui, result: &BcrComparisonResult) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Metric:");
+            egui::ComboBox::from_id_salt("cohort_bcr_metric_distribution_combo")
+                .selected_text(self.cohort_bcr_metric_view.display_name())
+                .show_ui(ui, |ui| {
+                    for metric in BcrMetricView::ALL {
+                        ui.selectable_value(
+                            &mut self.cohort_bcr_metric_view,
+                            metric,
+                            metric.display_name(),
+                        );
+                    }
+                });
+        });
+        let Some(bundle) = &self.cohort_results else {
+            return;
+        };
+        let case_label = bundle.comparison.case_label.clone();
+        let control_label = bundle.comparison.control_label.clone();
+        let metric = self.cohort_bcr_metric_view;
+        let mut case_values = result
+            .sample_summaries
+            .iter()
+            .filter(|r| r.group == case_label)
+            .map(|r| (r.sample_id.clone(), metric.value(r)))
+            .filter(|(_, value)| value.is_finite())
+            .collect::<Vec<_>>();
+        let mut ctrl_values = result
+            .sample_summaries
+            .iter()
+            .filter(|r| r.group == control_label)
+            .map(|r| (r.sample_id.clone(), metric.value(r)))
+            .filter(|(_, value)| value.is_finite())
+            .collect::<Vec<_>>();
+        if case_values.len() < 2 || ctrl_values.len() < 2 {
+            ui.label("Not enough mapped samples to draw a case/control distribution.");
+            return;
+        }
+        let case_numeric = case_values.iter().map(|(_, v)| *v).collect::<Vec<_>>();
+        let ctrl_numeric = ctrl_values.iter().map(|(_, v)| *v).collect::<Vec<_>>();
+        let (Some(case_spread), Some(ctrl_spread)) = (
+            box_spread_from_values(&case_numeric),
+            box_spread_from_values(&ctrl_numeric),
+        ) else {
+            ui.label("Could not calculate quartiles for this metric.");
+            return;
+        };
+        let accent = ui.visuals().selection.bg_fill;
+        let case_fill = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 90);
+        let ctrl_fill = egui::Color32::from_rgba_unmultiplied(155, 155, 155, 75);
+        let boxes = vec![
+            BoxElem::new(0.0, ctrl_spread)
+                .name(control_label.clone())
+                .box_width(0.55)
+                .fill(ctrl_fill),
+            BoxElem::new(1.0, case_spread)
+                .name(case_label.clone())
+                .box_width(0.55)
+                .fill(case_fill),
+        ];
+        let labels = vec![control_label.clone(), case_label.clone()];
+        let box_plot = BoxPlot::new("BCR group distributions", boxes);
+        Plot::new("cohort_bcr_group_distribution_v05")
+            .height(330.0)
+            .x_axis_label("Group")
+            .y_axis_label(metric.display_name())
+            .x_axis_formatter(move |mark, _range| sample_tick_label(mark.value, &labels))
+            .label_formatter(|hover| match hover {
+                HoverPosition::NearDataPoint { plot_name, .. } if !plot_name.is_empty() => {
+                    Some(plot_name.to_string())
+                }
+                _ => None,
+            })
+            .show(ui, |plot_ui| {
+                plot_ui.box_plot(box_plot);
+                for (group_x, values) in [(0.0, &mut ctrl_values), (1.0, &mut case_values)] {
+                    for (idx, (sample, value)) in values.iter().enumerate() {
+                        let jitter = (((idx * 37) % 101) as f64 / 100.0 - 0.5) * 0.24;
+                        plot_ui.points(
+                            Points::new(
+                                format!("{}\n{}: {}", sample, metric.display_name(), format_value(*value)),
+                                vec![[group_x + jitter, *value]],
+                            )
+                            .radius(2.7),
+                        );
+                    }
+                }
+            });
+        ui.label(
+            egui::RichText::new(format!(
+                "{}: n={}  |  {}: n={}",
+                control_label,
+                ctrl_numeric.len(),
+                case_label,
+                case_numeric.len(),
+            ))
+            .small()
+            .weak(),
+        );
+    }
+
+    fn render_bcr_isotype_group_means_plot(
+        &self,
+        ui: &mut egui::Ui,
+        result: &BcrIsotypeComparisonResult,
+    ) {
+        let Some(bundle) = &self.cohort_results else { return; };
+        let case_label = bundle.comparison.case_label.clone();
+        let control_label = bundle.comparison.control_label.clone();
+        let mut case_values: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+        let mut ctrl_values: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+        for value in &result.values {
+            if value.group == case_label {
+                case_values.entry(value.isotype.clone()).or_default().push(value.fraction);
+            } else if value.group == control_label {
+                ctrl_values.entry(value.isotype.clone()).or_default().push(value.fraction);
+            }
+        }
+        let features: Vec<String> = case_values
+            .keys()
+            .chain(ctrl_values.keys())
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if features.is_empty() { return; }
+        let mut case_bars = Vec::new();
+        let mut ctrl_bars = Vec::new();
+        for (idx, feature) in features.iter().enumerate() {
+            let cm = case_values.get(feature).map(|v| v.iter().sum::<f64>() / v.len() as f64).unwrap_or(0.0);
+            let hm = ctrl_values.get(feature).map(|v| v.iter().sum::<f64>() / v.len() as f64).unwrap_or(0.0);
+            case_bars.push(Bar::new(idx as f64 + 0.18, cm).name(format!("{} — {}: {:.4}", feature, case_label, cm)).width(0.32));
+            ctrl_bars.push(Bar::new(idx as f64 - 0.18, hm).name(format!("{} — {}: {:.4}", feature, control_label, hm)).width(0.32));
+        }
+        let axis_features = features.clone();
+        let accent = ui.visuals().selection.bg_fill;
+        Plot::new("cohort_bcr_isotype_group_means_v05")
+            .height(320.0)
+            .x_axis_label("Isotype")
+            .y_axis_label("Mean isotype fraction")
+            .x_axis_formatter(move |mark, _range| sample_tick_label(mark.value, &axis_features))
+            .show(ui, |plot_ui| {
+                plot_ui.bar_chart(BarChart::new(control_label.clone(), ctrl_bars).color(egui::Color32::from_gray(145)));
+                plot_ui.bar_chart(BarChart::new(case_label.clone(), case_bars).color(accent));
+            });
+        ui.label(egui::RichText::new("Group means from the dedicated BCR isotype-composition files.").small().weak());
     }
 
     fn render_feature_effect_plot(
@@ -3304,6 +3611,58 @@ fn sample_tick_label(value: f64, samples: &[String]) -> String {
     }
     let idx = rounded as usize;
     samples.get(idx).cloned().unwrap_or_default()
+}
+
+fn box_spread_from_values(values: &[f64]) -> Option<BoxSpread> {
+    let mut sorted = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if sorted.is_empty() {
+        return None;
+    }
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let q1 = quantile_sorted(&sorted, 0.25);
+    let median = quantile_sorted(&sorted, 0.50);
+    let q3 = quantile_sorted(&sorted, 0.75);
+    let iqr = q3 - q1;
+    let lower_fence = q1 - 1.5 * iqr;
+    let upper_fence = q3 + 1.5 * iqr;
+    let lower_whisker = sorted
+        .iter()
+        .copied()
+        .find(|value| *value >= lower_fence)
+        .unwrap_or(sorted[0]);
+    let upper_whisker = sorted
+        .iter()
+        .copied()
+        .rev()
+        .find(|value| *value <= upper_fence)
+        .unwrap_or(*sorted.last().unwrap());
+    Some(BoxSpread::new(
+        lower_whisker,
+        q1,
+        median,
+        q3,
+        upper_whisker,
+    ))
+}
+
+fn quantile_sorted(values: &[f64], probability: f64) -> f64 {
+    debug_assert!(!values.is_empty());
+    if values.len() == 1 {
+        return values[0];
+    }
+    let position = probability.clamp(0.0, 1.0) * (values.len() - 1) as f64;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    if lower == upper {
+        values[lower]
+    } else {
+        let weight = position - lower as f64;
+        values[lower] * (1.0 - weight) + values[upper] * weight
+    }
 }
 
 fn format_optional(value: Option<f64>) -> String {
