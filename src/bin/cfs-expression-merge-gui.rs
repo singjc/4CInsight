@@ -41,6 +41,12 @@ enum AnalysisSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExplorePanel {
+    SampleQc,
+    EntityExplorer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SampleQcView {
     BoxPlots,
     DetectionRate,
@@ -83,6 +89,7 @@ struct MergeApp {
     merge_receiver: Option<Receiver<MergeWorkerMessage>>,
 
     analysis_source: AnalysisSource,
+    explore_panel: ExplorePanel,
     merged_analysis_path: Option<PathBuf>,
     merged_info: Option<MergedDatasetInfo>,
     analysis_metric: Metric,
@@ -136,6 +143,7 @@ impl MergeApp {
             running: false,
             merge_receiver: None,
             analysis_source: AnalysisSource::Workbooks,
+            explore_panel: ExplorePanel::SampleQc,
             merged_analysis_path: None,
             merged_info: None,
             analysis_metric: Metric::Tpm,
@@ -622,9 +630,41 @@ impl MergeApp {
         self.ensure_analysis_metric_valid();
         self.render_analysis_controls(ui);
         ui.add_space(10.0);
-        self.render_distribution_card(ui);
+
+        // Keep sample-level QC and identifier exploration in separate workspaces.
+        // Both can be data-heavy/tall, and stacking them caused the identifier
+        // browser to be pushed below the viewport after QC plots were built.
+        egui::Frame::group(ui.style())
+            .fill(ui.visuals().faint_bg_color)
+            .inner_margin(8)
+            .corner_radius(8)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Workspace:").strong());
+                    ui.selectable_value(
+                        &mut self.explore_panel,
+                        ExplorePanel::SampleQc,
+                        "Sample QC",
+                    )
+                    .on_hover_text(
+                        "Inspect sample-wide distributions, detection rates, and abundance-vs-detection QC plots.",
+                    );
+                    ui.selectable_value(
+                        &mut self.explore_panel,
+                        ExplorePanel::EntityExplorer,
+                        "Gene / transcript explorer",
+                    )
+                    .on_hover_text(
+                        "Browse genes/transcripts and plot one selected identifier across all samples. This view keeps the tall browser and profile side by side.",
+                    );
+                });
+            });
+
         ui.add_space(10.0);
-        self.render_entity_profile_card(ui);
+        match self.explore_panel {
+            ExplorePanel::SampleQc => self.render_distribution_card(ui),
+            ExplorePanel::EntityExplorer => self.render_entity_profile_card(ui),
+        }
     }
 
     fn render_analysis_source_card(&mut self, ui: &mut egui::Ui) {
@@ -1135,9 +1175,12 @@ impl MergeApp {
                     let catalog = &this.entity_catalog;
                     let visible = &this.entity_visible;
                     let selected = &mut this.selected_entity;
+                    // Keep the browser beside the profile, but give it substantially more
+                    // vertical room so users can browse many identifiers without constant scrolling.
                     egui::ScrollArea::vertical()
-                        .id_salt("entity_browser_scroll_v03")
-                        .max_height(390.0)
+                        .id_salt("entity_browser_scroll_v032")
+                        .max_height(650.0)
+                        .auto_shrink([false, false])
                         .show_rows(left, row_height, total_rows, |ui, row_range| {
                             egui::Grid::new("entity_browser_rows_v03")
                                 .striped(true)
