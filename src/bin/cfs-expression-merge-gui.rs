@@ -5,14 +5,15 @@ use cfs_expression_merger::cohort::{
     write_immune_values, write_mapping_audit, write_mapping_audit_csv, write_tcr_sample_summaries,
     BcrComparisonResult, BcrIsotypeComparisonResult, CohortComparison, CohortMapping, ComparisonPreset,
     FeatureTestResult, GeneComparisonResult, ImmuneComparisonResult, MappingStatus, MetadataTable,
-    ProjectScan, CohortModality, TcrComparisonResult,
+    ProjectScan, CohortModality, TcrComparisonResult, normalize_sample_id,
 };
-use cfs_expression_merger::report::{generate_cohort_html_report, generate_corrected_html_report, CohortReportInputs, CorrectedReportInputs};
+use cfs_expression_merger::report::{generate_cohort_html_report, generate_corrected_html_report, generate_focused_candidate_html_report, CohortReportInputs, CorrectedReportInputs};
+use cfs_expression_merger::focused::{build_focused_candidate_summary, write_focused_candidate_tables, FocusedCandidateSettings, FocusedCandidateSummary};
 use cfs_expression_merger::corrected::{
     run_corrected_expression, run_corrected_immune, run_corrected_isotype, run_corrected_repertoire, run_pathway_ora,
-    write_adjusted_tests, write_corrected_repertoire_samples, write_dtu_gene_tests, write_ordination, write_pathway_ora, AdjustedFeatureResult,
+    write_adjusted_tests, write_corrected_repertoire_samples, write_dendrogram, write_dtu_gene_tests, write_ordination, write_pathway_ora, AdjustedFeatureResult,
     AmbiguousCallPolicy, CorrectedCompositionResult, CorrectedExpressionResult, CorrectedImmuneResult,
-    CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult, OrdinationResult,
+    CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult, DendrogramResult, OrdinationResult,
 };
 use cfs_expression_merger::{
     all_metrics, collaborator_default_metrics, inspect_kind, inspect_merged_tsv, load_entity_catalog,
@@ -22,9 +23,9 @@ use cfs_expression_merger::{
     MergedDatasetInfo, Metric, SampleDistributionSummary,
 };
 use eframe::egui;
-use egui_plot::{Bar, BarChart, BoxElem, BoxPlot, BoxSpread, HoverPosition, Line, Plot, Points};
+use egui_plot::{Bar, BarChart, BoxElem, BoxPlot, BoxSpread, HoverPosition, Legend, Line, Plot, Points};
 use rfd::FileDialog;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -91,6 +92,7 @@ enum CohortResultView {
 enum CohortAnalysisMode {
     Exploratory,
     Corrected,
+    Focused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +105,15 @@ enum CorrectedResultView {
     TcrBeta,
     Immune,
     Pathway,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusedResultView {
+    Overview,
+    Genes,
+    Pathways,
+    Other,
+    Transcripts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +200,12 @@ struct CorrectedAnalysisBundle {
     pathway_error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct FocusedAnalysisBundle {
+    corrected: CorrectedAnalysisBundle,
+    candidates: FocusedCandidateSummary,
+}
+
 enum MergeWorkerMessage {
     Progress(usize, usize, String),
     Done(Result<MergeSummary, String>),
@@ -205,6 +222,7 @@ enum CohortWorkerMessage {
     Progress(f32, String),
     Done(CohortAnalysisBundle),
     CorrectedDone(CorrectedAnalysisBundle),
+    FocusedDone(FocusedAnalysisBundle),
 }
 
 struct MergeApp {
@@ -270,6 +288,14 @@ struct MergeApp {
     corrected_gmt_path: Option<PathBuf>,
     corrected_pathway_q: f64,
     corrected_pathway_effect: f64,
+    corrected_ordination_color_by: String,
+    focused_metadata_path: Option<PathBuf>,
+    focused_metadata: Option<MetadataTable>,
+    focused_mapping: Option<CohortMapping>,
+    focused_run_exploratory_concordance: bool,
+    focused_settings: FocusedCandidateSettings,
+    focused_results: Option<FocusedCandidateSummary>,
+    focused_result_view: FocusedResultView,
     cohort_run_gene: bool,
     cohort_gene_metric: Metric,
     cohort_run_transcript: bool,
@@ -280,6 +306,70 @@ struct MergeApp {
     cohort_run_tcr_beta: bool,
     cohort_run_immune: bool,
     cohort_bcr_metric_view: BcrMetricView,
+}
+
+fn fixed_table_viewport<F>(ui:&mut egui::Ui,id:&str,height:f32,min_width:f32,add:F)
+where F:FnOnce(&mut egui::Ui) {
+    let width=ui.available_width().max(320.0);
+    ui.allocate_ui(egui::vec2(width,height),|ui|{
+        egui::ScrollArea::both().id_salt(id).max_height(height).show(ui,|ui|{
+            ui.set_min_width(min_width.max(width-20.0));
+            add(ui);
+        });
+    });
+}
+
+fn nearest_hover_label(x:f64,y:f64,points:&[(f64,f64,String)])->Option<String>{
+    points.iter().min_by(|a,b|{
+        let da=(a.0-x).powi(2)+(a.1-y).powi(2);
+        let db=(b.0-x).powi(2)+(b.1-y).powi(2);
+        da.total_cmp(&db)
+    }).map(|p|p.2.clone())
+}
+
+fn compact_comma_list(text:&str,max_items:usize,max_chars:usize)->String{
+    let items=text.split(',').map(str::trim).filter(|x|!x.is_empty()).collect::<Vec<_>>();
+    if items.is_empty(){return "none".to_string();}
+    let mut shown=Vec::new();
+    let mut chars=0usize;
+    for item in items.iter().take(max_items){
+        let extra=if shown.is_empty(){item.len()}else{item.len()+2};
+        if !shown.is_empty() && chars+extra>max_chars{break;}
+        shown.push(*item); chars+=extra;
+    }
+    let remaining=items.len().saturating_sub(shown.len());
+    if remaining>0{format!("{} … (+{} more)",shown.join(", "),remaining)}else{shown.join(", ")}
+}
+
+fn bounded_plot_indices(n: usize, max_total: usize, keep_head: usize) -> Vec<usize> {
+    if n <= max_total { return (0..n).collect(); }
+    let head = keep_head.min(max_total).min(n);
+    let mut out = (0..head).collect::<Vec<_>>();
+    let remaining = n - head;
+    let slots = max_total.saturating_sub(head).min(remaining);
+    if slots == 0 { return out; }
+    for k in 0..slots {
+        out.push(head + (k * remaining) / slots);
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn category_color(category:&str,index:usize,color_by:&str,accent:egui::Color32)->egui::Color32{
+    if color_by=="Analysis group"{
+        return match category{
+            "Case"=>accent,
+            "Control"=>egui::Color32::from_rgb(105,165,225),
+            _=>egui::Color32::from_gray(160),
+        };
+    }
+    const PALETTE:[(u8,u8,u8);12]=[
+        (70,145,210),(225,125,65),(90,180,120),(195,95,155),(175,145,70),(120,105,200),
+        (70,175,175),(220,90,95),(150,165,80),(120,175,230),(210,135,190),(165,165,165),
+    ];
+    let (r,g,b)=PALETTE[index%PALETTE.len()];
+    egui::Color32::from_rgb(r,g,b)
 }
 
 impl MergeApp {
@@ -361,6 +451,14 @@ impl MergeApp {
             corrected_gmt_path: None,
             corrected_pathway_q: 0.05,
             corrected_pathway_effect: 0.5,
+            corrected_ordination_color_by: "Analysis group".to_string(),
+            focused_metadata_path: None,
+            focused_metadata: None,
+            focused_mapping: None,
+            focused_run_exploratory_concordance: true,
+            focused_settings: FocusedCandidateSettings::default(),
+            focused_results: None,
+            focused_result_view: FocusedResultView::Overview,
             cohort_run_gene: true,
             cohort_gene_metric: Metric::Tpm,
             cohort_run_transcript: false,
@@ -643,27 +741,25 @@ impl MergeApp {
             ui.label(
                 egui::RichText::new(format!("Sample preview ({})", this.files.len())).strong(),
             );
-            egui::ScrollArea::vertical()
-                .max_height(245.0)
-                .show(ui, |ui| {
-                    egui::Grid::new("sample_preview_grid_v03")
-                        .striped(true)
-                        .num_columns(3)
-                        .min_col_width(50.0)
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new("#").strong());
-                            ui.label(egui::RichText::new("Sample ID").strong());
-                            ui.label(egui::RichText::new("Source workbook").strong());
-                            ui.end_row();
+            fixed_table_viewport(ui, "sample_preview_scroll_v08", 320.0, 820.0, |ui| {
+                egui::Grid::new("sample_preview_grid_v08")
+                    .striped(true)
+                    .num_columns(3)
+                    .min_col_width(50.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("#").strong());
+                        ui.label(egui::RichText::new("Sample ID").strong());
+                        ui.label(egui::RichText::new("Source workbook").strong());
+                        ui.end_row();
 
-                            for (idx, path) in matching {
-                                ui.label((idx + 1).to_string());
-                                ui.monospace(sample_name(path));
-                                ui.label(path.file_name().unwrap_or_default().to_string_lossy());
-                                ui.end_row();
-                            }
-                        });
-                });
+                        for (idx, path) in matching {
+                            ui.label((idx + 1).to_string());
+                            ui.monospace(sample_name(path));
+                            ui.label(path.file_name().unwrap_or_default().to_string_lossy());
+                            ui.end_row();
+                        }
+                    });
+            });
         });
     }
 
@@ -1082,10 +1178,8 @@ impl MergeApp {
 
             ui.add_space(8.0);
             ui.label(egui::RichText::new("QC summary").strong());
-            egui::ScrollArea::vertical()
-                .max_height(210.0)
-                .show(ui, |ui| {
-                    egui::Grid::new("distribution_summary_grid_v03")
+            fixed_table_viewport(ui, "distribution_summary_scroll_v08", 360.0, 760.0, |ui| {
+                    egui::Grid::new("distribution_summary_grid_v08")
                         .striped(true)
                         .num_columns(6)
                         .show(ui, |ui| {
@@ -1625,10 +1719,8 @@ impl MergeApp {
 
     fn render_profile_values_table(&self, ui: &mut egui::Ui) {
         ui.collapsing("Sample values", |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    egui::Grid::new("profile_value_grid_v03")
+            fixed_table_viewport(ui, "profile_value_scroll_v08", 340.0, 520.0, |ui| {
+                    egui::Grid::new("profile_value_grid_v08")
                         .striped(true)
                         .num_columns(2)
                         .show(ui, |ui| {
@@ -1809,6 +1901,12 @@ impl MergeApp {
                 "Corrected / standard",
             )
             .on_hover_text("Subject-aware and covariate-adjusted analyses, matched-depth repertoire diversity, compositional CLR/Aitchison analyses, ordination, and restricted-permutation PERMANOVA.");
+            ui.selectable_value(
+                &mut self.cohort_analysis_mode,
+                CohortAnalysisMode::Focused,
+                "Focused candidate signals",
+            )
+            .on_hover_text("Use a collaborator-supplied filtered metadata list, run the corrected analysis on that direct one-sample-per-individual comparison, and produce a short ranked set of preliminary genes, pathways, and other candidate signals. Optional exploratory expression screening is used only as a direction-concordance check.");
         });
         ui.add_space(8.0);
         match self.cohort_analysis_mode {
@@ -1824,6 +1922,13 @@ impl MergeApp {
                 if self.corrected_results.is_some() {
                     ui.add_space(10.0);
                     self.render_corrected_results_card(ui);
+                }
+            }
+            CohortAnalysisMode::Focused => {
+                self.render_focused_analysis_card(ui);
+                if self.focused_results.is_some() {
+                    ui.add_space(10.0);
+                    self.render_focused_results_card(ui);
                 }
             }
         }
@@ -1895,82 +2000,60 @@ impl MergeApp {
             });
 
             ui.add_space(6.0);
-            egui::ScrollArea::vertical()
-                .max_height(420.0)
-                .show_rows(ui, 24.0, mapping.rows.len(), |ui, range| {
-                    egui::Grid::new("cohort_mapping_grid")
-                        .striped(true)
-                        .num_columns(12)
-                        .show(ui, |ui| {
-                            if range.start == 0 {
-                                for heading in [
-                                    "Sample",
-                                    "Map",
-                                    "Phenotype",
-                                    "HYP",
-                                    "Gene",
-                                    "Tx",
-                                    "BCR",
-                                    "Iso",
-                                    "TCRα",
-                                    "TCRβ",
-                                    "Immune",
-                                    "Notes",
-                                ] {
-                                    ui.label(egui::RichText::new(heading).strong());
+            let mapping_view_width = ui.available_width().max(320.0);
+            ui.allocate_ui(egui::vec2(mapping_view_width, 470.0), |ui| {
+                egui::ScrollArea::both()
+                    .id_salt("cohort_mapping_scroll_v08")
+                    .max_height(470.0)
+                    .auto_shrink([false, false])
+                    .show_rows(ui, 24.0, mapping.rows.len(), |ui, range| {
+                        ui.set_min_width(1280.0);
+                        egui::Grid::new("cohort_mapping_grid_v08")
+                            .striped(true)
+                            .num_columns(12)
+                            .show(ui, |ui| {
+                                if range.start == 0 {
+                                    for heading in [
+                                        "Sample", "Map", "Phenotype", "HYP", "Gene", "Tx", "BCR", "Iso",
+                                        "TCRα", "TCRβ", "Immune", "Notes",
+                                    ] {
+                                        ui.label(egui::RichText::new(heading).strong());
+                                    }
+                                    ui.end_row();
                                 }
-                                ui.end_row();
-                            }
-                            for row_idx in range {
-                                let row = &mapping.rows[row_idx];
-                                ui.monospace(&row.sample_id);
-                                match row.mapping_status {
-                                    MappingStatus::Matched => {
-                                        ui.colored_label(egui::Color32::from_rgb(105, 190, 130), "matched");
+                                for row_idx in range {
+                                    let row = &mapping.rows[row_idx];
+                                    ui.monospace(&row.sample_id);
+                                    match row.mapping_status {
+                                        MappingStatus::Matched => { ui.colored_label(egui::Color32::from_rgb(105, 190, 130), "matched"); }
+                                        MappingStatus::Unmatched => { ui.colored_label(egui::Color32::from_rgb(230, 190, 90), "unmatched"); }
+                                        MappingStatus::Ambiguous => { ui.colored_label(egui::Color32::from_rgb(225, 120, 110), "ambiguous"); }
+                                        MappingStatus::MetadataOnly => { ui.colored_label(egui::Color32::from_rgb(130, 165, 220), "metadata only"); }
                                     }
-                                    MappingStatus::Unmatched => {
-                                        ui.colored_label(egui::Color32::from_rgb(230, 190, 90), "unmatched");
+                                    ui.label(&row.phenotype);
+                                    ui.label(&row.hyp);
+                                    for modality in [
+                                        CohortModality::GeneExpression,
+                                        CohortModality::TranscriptExpression,
+                                        CohortModality::Bcr,
+                                        CohortModality::BcrIsotype,
+                                        CohortModality::TcrAlpha,
+                                        CohortModality::TcrBeta,
+                                        CohortModality::ImmuneInfiltrate,
+                                    ] {
+                                        let n = row.counts.get(&modality).copied().unwrap_or(0);
+                                        if n > 0 { ui.label(n.to_string()); } else { ui.label("·"); }
                                     }
-                                    MappingStatus::Ambiguous => {
-                                        ui.colored_label(egui::Color32::from_rgb(225, 120, 110), "ambiguous");
-                                    }
-                                    MappingStatus::MetadataOnly => {
-                                        ui.colored_label(egui::Color32::from_rgb(130, 165, 220), "metadata only");
-                                    }
+                                    let duplicates: Vec<_> = row.counts.iter()
+                                        .filter(|(_, n)| **n > 1)
+                                        .map(|(m, n)| format!("{}×{}", m.display_name(), n))
+                                        .collect();
+                                    ui.label(if duplicates.is_empty() { String::new() } else { format!("duplicate: {}", duplicates.join(", ")) });
+                                    ui.end_row();
                                 }
-                                ui.label(&row.phenotype);
-                                ui.label(&row.hyp);
-                                for modality in [
-                                    CohortModality::GeneExpression,
-                                    CohortModality::TranscriptExpression,
-                                    CohortModality::Bcr,
-                                    CohortModality::BcrIsotype,
-                                    CohortModality::TcrAlpha,
-                                    CohortModality::TcrBeta,
-                                    CohortModality::ImmuneInfiltrate,
-                                ] {
-                                    let n = row.counts.get(&modality).copied().unwrap_or(0);
-                                    if n > 0 {
-                                        ui.label(n.to_string());
-                                    } else {
-                                        ui.label("·");
-                                    }
-                                }
-                                let duplicates: Vec<_> = row
-                                    .counts
-                                    .iter()
-                                    .filter(|(_, n)| **n > 1)
-                                    .map(|(m, n)| format!("{}×{}", m.display_name(), n))
-                                    .collect();
-                                ui.label(if duplicates.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("duplicate: {}", duplicates.join(", "))
-                                });
-                                ui.end_row();
-                            }
-                        });
-                });
+                            });
+                    });
+            });
         });
     }
 
@@ -2116,6 +2199,224 @@ impl MergeApp {
         });
     }
 
+    fn render_focused_analysis_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "3. Focused candidate-signal workflow", |this, ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Use a filtered metadata file containing the direct comparison you want to present (ideally one sample per individual). The corrected/standard analysis is the primary inference; an optional exploratory expression screen is used only to show whether the direction of change agrees across two analysis views of the same samples.",
+                )
+                .weak(),
+            );
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 190, 90),
+                "Outputs are preliminary candidate signals for follow-up, not validated biomarkers.",
+            );
+
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Focused sample list / metadata").strong());
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Choose filtered metadata…")
+                    .on_hover_text("Load the collaborator-curated sample list. Rows absent from this file are excluded from the focused comparison without changing the full project metadata used by the other analysis layers.")
+                    .clicked()
+                {
+                    let mut dialog = FileDialog::new().add_filter("Metadata", &["xlsx", "xls", "csv", "tsv", "txt"]);
+                    if let Some(root) = &this.cohort_root { dialog = dialog.set_directory(root); }
+                    if let Some(path) = dialog.pick_file() { this.load_focused_metadata_path(path); }
+                }
+                if ui.button("Use current project metadata")
+                    .on_hover_text("Copy the currently loaded project metadata into the focused workflow. This is useful for testing the candidate-ranking layer before a collaborator-supplied filtered list is available.")
+                    .clicked()
+                {
+                    if let (Some(path), Some(meta)) = (this.cohort_metadata_path.clone(), this.cohort_metadata.clone()) {
+                        this.focused_metadata_path = Some(path);
+                        this.focused_metadata = Some(meta);
+                        this.focused_results = None;
+                        this.rebuild_focused_mapping();
+                    }
+                }
+                if let Some(path) = &this.focused_metadata_path {
+                    ui.monospace(path.file_name().and_then(|x| x.to_str()).unwrap_or("focused metadata"));
+                }
+            });
+
+            if this.focused_metadata.is_some() {
+                let (mut selected_id, columns, row_count, current_id) = this.focused_metadata.as_ref()
+                    .map(|m|(m.id_column.clone(),m.columns.clone(),m.rows.len(),m.id_column.clone()))
+                    .unwrap_or_default();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Sample ID column:");
+                    egui::ComboBox::from_id_salt("focused_metadata_id_column")
+                        .selected_text(&selected_id)
+                        .show_ui(ui, |ui| {
+                            for col in &columns { ui.selectable_value(&mut selected_id, col.clone(), col); }
+                        });
+                });
+                if selected_id != current_id {
+                    if let Some(meta) = &mut this.focused_metadata { meta.id_column = selected_id; }
+                    this.focused_results = None;
+                    this.rebuild_focused_mapping();
+                }
+                if let Some(mapping) = &this.focused_mapping {
+                    ui.label(format!(
+                        "Focused metadata rows: {} | matched files: {} | unmatched files: {} | metadata-only samples: {}",
+                        row_count, mapping.matched_files, mapping.unmatched_files, mapping.metadata_only_samples
+                    ));
+                }
+            }
+
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Comparison:");
+                ui.selectable_value(&mut this.cohort_preset, ComparisonPreset::HypVsTrueHc, "HYP vs True_HC")
+                    .on_hover_text("All HYP=yes samples in the focused metadata versus Phenotype=True_HC.");
+                ui.selectable_value(&mut this.cohort_preset, ComparisonPreset::HypMecfsVsMecfsOnly, "HYP+ME/CFS vs ME/CFS-only")
+                    .on_hover_text("Phenotype=HYP+ME/CFS versus Phenotype=ME/CFS without HYP, restricted to the focused metadata rows.");
+            });
+            if let Some(meta) = &this.focused_metadata {
+                match build_comparison(meta, this.cohort_preset) {
+                    Ok(comp) => ui.label(format!("Direct comparison: {} case samples / {} control samples", comp.case_metadata_rows, comp.control_metadata_rows)),
+                    Err(e) => ui.colored_label(egui::Color32::from_rgb(225,120,110), format!("Comparison cannot be built: {e:#}")),
+                };
+            }
+
+            ui.separator();
+            ui.label(egui::RichText::new("Analyses to include").strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut this.cohort_run_gene, "Gene counts").on_hover_text("Primary source for candidate genes and pathway analysis.");
+                ui.checkbox(&mut this.cohort_run_transcript, "Transcript counts").on_hover_text("Adds candidate transcript abundance signals and the standard corrected transcript analysis.");
+                ui.checkbox(&mut this.cohort_run_bcr, "BCR").on_hover_text("Adds repertoire and composition signals to the focused shortlist.");
+                ui.checkbox(&mut this.cohort_run_bcr_isotype, "BCR isotype").on_hover_text("Adds corrected isotype-composition signals.");
+                ui.checkbox(&mut this.cohort_run_tcr_alpha, "TCR alpha").on_hover_text("Adds corrected alpha-chain repertoire signals.");
+                ui.checkbox(&mut this.cohort_run_tcr_beta, "TCR beta").on_hover_text("Adds corrected beta-chain repertoire signals.");
+                ui.checkbox(&mut this.cohort_run_immune, "Immune infiltrate").on_hover_text("Adds corrected immune-cell ssGSEA signals.");
+            });
+            ui.checkbox(&mut this.focused_run_exploratory_concordance, "Run exploratory expression direction check")
+                .on_hover_text("Runs TPM-based exploratory gene/transcript screens on the same focused samples. These results do not increase statistical evidence; they only flag whether the direction agrees with the corrected count analysis.");
+
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut this.corrected_run_pathway, "Pathway ORA")
+                    .on_hover_text("Use the corrected focused gene results with a GMT collection to prioritize pathway-level signals.");
+                if ui.button("Choose GMT…").on_hover_text("Select the GMT collection used for focused pathway prioritization.").clicked() {
+                    let mut dialog=FileDialog::new().add_filter("GMT gene sets", &["gmt"]);
+                    if let Some(root)=&this.cohort_root { dialog=dialog.set_directory(root); }
+                    if let Some(path)=dialog.pick_file(){ this.corrected_gmt_path=Some(path); }
+                }
+                if let Some(path)=&this.corrected_gmt_path { ui.monospace(path.file_name().and_then(|x|x.to_str()).unwrap_or("GMT")); }
+            });
+
+            egui::CollapsingHeader::new("Candidate shortlist settings")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Top genes:"); ui.add(egui::DragValue::new(&mut this.focused_settings.top_genes).range(3..=100));
+                        ui.label("Top transcripts:"); ui.add(egui::DragValue::new(&mut this.focused_settings.top_transcripts).range(3..=100));
+                        ui.label("Top pathways:"); ui.add(egui::DragValue::new(&mut this.focused_settings.top_pathways).range(3..=100));
+                        ui.label("Top other signals:"); ui.add(egui::DragValue::new(&mut this.focused_settings.top_other).range(5..=100));
+                        ui.label("Minimum |adjusted log2FC|:"); ui.add(egui::DragValue::new(&mut this.focused_settings.min_gene_abs_log2fc).range(0.0..=5.0).speed(0.1));
+                    });
+                    ui.label(egui::RichText::new("Ranking is transparent: corrected BH q-value first, then nominal p-value and effect magnitude. FDR-supported results are labeled separately from promising/suggestive ranked signals so a small cohort does not force an all-or-nothing interpretation.").small().weak());
+                });
+
+            let ready = this.cohort_scan.is_some() && this.focused_metadata.is_some() && !this.cohort_running
+                && (this.cohort_run_gene || this.cohort_run_transcript || this.cohort_run_bcr || this.cohort_run_bcr_isotype || this.cohort_run_tcr_alpha || this.cohort_run_tcr_beta || this.cohort_run_immune || this.corrected_run_pathway);
+            if ui.add_enabled(ready, egui::Button::new("Run focused candidate workflow"))
+                .on_hover_text("Run the selected corrected analyses on the filtered metadata, optionally run exploratory expression direction checks, then build a concise candidate-gene/pathway/other-signal shortlist.")
+                .clicked()
+            {
+                this.start_focused_analysis();
+            }
+            if this.cohort_running { ui.add(egui::ProgressBar::new(this.cohort_progress).show_percentage().animate(true)); }
+            ui.label(&this.cohort_status);
+        });
+    }
+
+    fn render_focused_results_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "4. Focused candidate signals", |this, ui| {
+            let Some(summary)=this.focused_results.clone() else { return; };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(format!("{} vs {} — preliminary shortlist",summary.case_label,summary.control_label)).strong());
+                if ui.button("Export candidate CSVs…").on_hover_text("Export concise CSV files for candidate genes, pathways, transcripts, and other modality signals, plus interpretation notes.").clicked() {
+                    let mut dialog=FileDialog::new(); if let Some(root)=&this.cohort_root{dialog=dialog.set_directory(root);}
+                    if let Some(folder)=dialog.pick_folder(){ match write_focused_candidate_tables(&folder,&summary){Ok(path)=>this.cohort_status=format!("Saved focused candidate tables to {}",path.display()),Err(e)=>this.cohort_status=format!("Could not save focused candidate tables: {e:#}")}; }
+                }
+                if ui.button("Generate focused HTML report…").on_hover_text("Generate a concise standalone report intended for a less technical audience. It emphasizes preliminary candidate genes/pathways, clear interpretation, and limitations rather than exhaustive analysis tables.").clicked() {
+                    let safe=format!("{}_vs_{}",summary.case_label,summary.control_label).chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'_'}).collect::<String>();
+                    let mut dialog=FileDialog::new().add_filter("HTML report", &["html"]).set_file_name(format!("4c_focused_candidates_{safe}.html")); if let Some(root)=&this.cohort_root{dialog=dialog.set_directory(root);}
+                    if let Some(path)=dialog.save_file(){ match generate_focused_candidate_html_report(&path,&summary){Ok(())=>this.cohort_status=format!("Generated focused candidate report: {}",path.display()),Err(e)=>this.cohort_status=format!("Could not generate focused report: {e:#}")}; }
+                }
+            });
+            ui.label(format!("Focused metadata: {} | {} case / {} control",summary.metadata_path.file_name().and_then(|x|x.to_str()).unwrap_or("metadata"),summary.n_case,summary.n_control));
+            ui.colored_label(egui::Color32::from_rgb(230,190,90),"These are preliminary signals for follow-up, not validated biomarkers.");
+
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut this.focused_result_view,FocusedResultView::Overview,"Overview");
+                ui.selectable_value(&mut this.focused_result_view,FocusedResultView::Genes,format!("Genes ({})",summary.genes.len()));
+                if !summary.pathways.is_empty(){ui.selectable_value(&mut this.focused_result_view,FocusedResultView::Pathways,format!("Pathways ({})",summary.pathways.len()));}
+                if !summary.other.is_empty(){ui.selectable_value(&mut this.focused_result_view,FocusedResultView::Other,format!("Other signals ({})",summary.other.len()));}
+                if !summary.transcripts.is_empty(){ui.selectable_value(&mut this.focused_result_view,FocusedResultView::Transcripts,format!("Transcripts ({})",summary.transcripts.len()));}
+            });
+            ui.separator();
+
+            match this.focused_result_view {
+                FocusedResultView::Overview => {
+                    let fdr_genes=summary.genes.iter().filter(|r|r.q_value.is_finite()&&r.q_value<=0.05).count();
+                    let fdr_pathways=summary.pathways.iter().filter(|r|r.q_value.is_finite()&&r.q_value<=0.05).count();
+                    ui.heading("Presentation-ready summary");
+                    ui.label(format!("{} shortlisted genes ({} FDR-supported) and {} shortlisted pathways ({} FDR-supported).",summary.genes.len(),fdr_genes,summary.pathways.len(),fdr_pathways));
+                    if let Some(top)=summary.genes.first(){ui.label(format!("Top ranked gene: {} — adjusted log2FC {:.2}, BH q {:.2e}.",top.gene,top.adjusted_log2fc,top.q_value));}
+                    if let Some(top)=summary.pathways.first(){ui.label(format!("Top ranked pathway: {} — odds ratio {:.2}, BH q {:.2e}.",top.pathway,top.odds_ratio,top.q_value));}
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Interpretation").strong());
+                    for note in &summary.notes { ui.label(format!("• {note}")); }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Suggested wording for a nontechnical audience").strong());
+                    ui.label("“Using a simplified one-sample-per-individual comparison, we identified a small set of genes and biological pathways that show the strongest preliminary differences between the groups. These signals are not yet validated biomarkers, but they provide specific candidates for follow-up and independent replication.”");
+                }
+                FocusedResultView::Genes => {
+                    ui.label("Corrected count-model results drive the ranking. Exploratory TPM direction, when available, is shown only as method concordance. Pathway support counts q≤0.10 enriched pathways containing the gene.");
+                    fixed_table_viewport(ui,"focused_gene_candidates_v09",620.0,1500.0,|ui|{
+                        egui::Grid::new("focused_gene_candidates_grid_v09").striped(true).show(ui,|ui|{
+                            for h in ["Rank","Gene","Gene ID","Adj log2FC","p","BH q","Case mean","Control mean","TPM direction","Pathway support","Evidence"]{ui.label(egui::RichText::new(h).strong());}ui.end_row();
+                            for r in &summary.genes{
+                                ui.label(r.rank.to_string());ui.monospace(&r.gene);ui.monospace(&r.gene_id);ui.label(format!("{:.3}",r.adjusted_log2fc));ui.label(format!("{:.2e}",r.p_value));ui.label(format!("{:.2e}",r.q_value));ui.label(format!("{:.3}",r.case_mean));ui.label(format!("{:.3}",r.control_mean));
+                                ui.label(match r.direction_concordant{Some(true)=>"same",Some(false)=>"opposite",None=>"—"});
+                                ui.label(if r.pathway_support_count==0{"—".to_string()}else{format!("{}",r.pathway_support_count)}).on_hover_text(if r.pathway_support.is_empty(){"No q≤0.10 pathway support recorded".to_string()}else{r.pathway_support.clone()});
+                                ui.label(&r.evidence);ui.end_row();
+                            }
+                        });
+                    });
+                }
+                FocusedResultView::Pathways => {
+                    ui.label("Pathways are ranked by corrected over-representation BH q-value. Closely related gene sets can share many genes, so interpret clusters of pathways as broader biological themes.");
+                    fixed_table_viewport(ui,"focused_pathway_candidates_v09",620.0,1500.0,|ui|{
+                        egui::Grid::new("focused_pathway_candidates_grid_v09").striped(true).show(ui,|ui|{
+                            for h in ["Rank","Pathway","Odds ratio","Overlap","Set size","p","BH q","Evidence","Overlap genes"]{ui.label(egui::RichText::new(h).strong());}ui.end_row();
+                            for r in &summary.pathways{ui.label(r.rank.to_string());ui.monospace(&r.pathway);ui.label(format!("{:.3}",r.odds_ratio));ui.label(r.overlap.to_string());ui.label(r.measured_set_size.to_string());ui.label(format!("{:.2e}",r.p_value));ui.label(format!("{:.2e}",r.q_value));ui.label(&r.evidence);ui.label(compact_comma_list(&r.overlap_genes,8,120)).on_hover_text(&r.overlap_genes);ui.end_row();}
+                        });
+                    });
+                }
+                FocusedResultView::Other => {
+                    ui.label("Effects are on each modality's corrected analysis scale. Compare significance and direction within a modality/family rather than comparing raw effect magnitudes between, for example, TCR CLR effects and immune ssGSEA coefficients.");
+                    fixed_table_viewport(ui,"focused_other_candidates_v09",620.0,1500.0,|ui|{
+                        egui::Grid::new("focused_other_candidates_grid_v09").striped(true).show(ui,|ui|{
+                            for h in ["Rank","Modality","Family","Feature","ID","Effect","p","BH q","Case mean","Control mean","Evidence"]{ui.label(egui::RichText::new(h).strong());}ui.end_row();
+                            for r in &summary.other{ui.label(r.rank.to_string());ui.label(&r.modality);ui.label(&r.family);ui.monospace(&r.feature);ui.monospace(&r.secondary_id);ui.label(format!("{:.3}",r.effect));ui.label(format!("{:.2e}",r.p_value));ui.label(format!("{:.2e}",r.q_value));ui.label(format!("{:.3}",r.case_mean));ui.label(format!("{:.3}",r.control_mean));ui.label(&r.evidence);ui.end_row();}
+                        });
+                    });
+                }
+                FocusedResultView::Transcripts => {
+                    ui.label("Transcript abundance candidates are shown separately from gene candidates. Treat these as isoform follow-up leads rather than evidence of differential transcript usage unless the dedicated DTU analysis also supports the gene.");
+                    fixed_table_viewport(ui,"focused_transcript_candidates_v09",620.0,1450.0,|ui|{
+                        egui::Grid::new("focused_transcript_candidates_grid_v09").striped(true).show(ui,|ui|{
+                            for h in ["Rank","Transcript","Gene ID","Adjusted effect","p","BH q","Case mean","Control mean","TPM direction","Evidence"]{ui.label(egui::RichText::new(h).strong());}ui.end_row();
+                            for r in &summary.transcripts{ui.label(r.rank.to_string());ui.monospace(&r.gene);ui.monospace(&r.gene_id);ui.label(format!("{:.3}",r.adjusted_log2fc));ui.label(format!("{:.2e}",r.p_value));ui.label(format!("{:.2e}",r.q_value));ui.label(format!("{:.3}",r.case_mean));ui.label(format!("{:.3}",r.control_mean));ui.label(match r.direction_concordant{Some(true)=>"same",Some(false)=>"opposite",None=>"—"});ui.label(&r.evidence);ui.end_row();}
+                        });
+                    });
+                }
+            }
+        });
+    }
+
     fn render_corrected_analysis_card(&mut self, ui: &mut egui::Ui) {
         self.card(ui, "3. Corrected / standard analysis", |this, ui| {
             ui.label(
@@ -2184,9 +2485,9 @@ impl MergeApp {
             ui.label(egui::RichText::new("Analyses to run").strong());
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut this.cohort_run_gene, "Gene counts")
-                    .on_hover_text("Uses RNA-Seq Raw Count columns, positive-count median-ratio normalization, a native NB2 GLM with log(size-factor) offset, covariates, subject-clustered sandwich SEs when repeated samples are configured, BH FDR, subject-collapsed sensitivity tests, and PCA of variable genes.");
+                    .on_hover_text("Uses RNA-Seq Raw Count columns, positive-count median-ratio normalization, a negative-binomial log-link count model with a size-factor offset, optional covariates, subject-clustered standard errors when repeated samples are configured, BH FDR, a subject-collapsed sensitivity analysis, PCA, and hierarchical clustering.");
                 ui.checkbox(&mut this.cohort_run_transcript, "Transcript counts")
-                    .on_hover_text("Uses Total Reads with the same NB count model and also runs a dependency-light within-gene CLR differential-transcript-usage screen with Simes/BH gene-level summaries.");
+                    .on_hover_text("Uses Total Reads with the same count model and also runs a within-gene CLR differential-transcript-usage screen with Simes/BH gene-level summaries.");
                 ui.checkbox(&mut this.cohort_run_bcr, "BCR")
                     .on_hover_text("Matched-depth richness/Shannon, subject-aware sharing, Morisita-Horn and Jaccard PCoA/PERMANOVA, and CLR/Aitchison isotype/V/D/J composition analyses.");
                 ui.checkbox(&mut this.cohort_run_bcr_isotype, "BCR isotype")
@@ -2240,7 +2541,7 @@ impl MergeApp {
                         ui.label("Rarefaction depth cap:");
                         ui.add(egui::DragValue::new(&mut this.corrected_rarefaction_cap).range(1_000..=500_000).speed(5_000));
                     });
-                    ui.label(egui::RichText::new("Repertoire matched depth is the minimum usable library depth, capped by the value above to keep the native exact-without-replacement Monte-Carlo rarefaction responsive. The same depth is used for every included sample.").small().weak());
+                    ui.label(egui::RichText::new("Repertoire matched depth is the minimum usable library depth, capped by the value above to keep exact-without-replacement Monte-Carlo rarefaction responsive. The same depth is used for every included sample.").small().weak());
                 });
 
             let ready = this.cohort_scan.is_some() && this.cohort_metadata.is_some() && !this.cohort_running
@@ -2252,7 +2553,7 @@ impl MergeApp {
                 ui.add(egui::ProgressBar::new(this.cohort_progress).show_percentage().animate(true));
             }
             ui.label(&this.cohort_status);
-            ui.label(egui::RichText::new("Expression note: the native model deliberately does not claim to reproduce DESeq2/edgeR/limma empirical-Bayes machinery. It uses positive-count median-ratio normalization and a transparent NB2 GLM with per-feature unshrunk dispersion, optional covariates, subject-clustered robust inference, and a subject-collapsed sensitivity result.").small().weak());
+            ui.label(egui::RichText::new("Expression note: count models use positive-count median-ratio normalization, a negative-binomial log-link model with per-feature dispersion, optional covariates, subject-clustered inference when repeated samples are configured, and a subject-collapsed sensitivity result. Results should be interpreted as this model's estimates rather than as output from a different external package.").small().weak());
         });
     }
 
@@ -2300,6 +2601,29 @@ impl MergeApp {
                 if bundle.spec.covariates.is_empty() { "none".to_string() } else { bundle.spec.covariates.join(", ") },
                 bundle.spec.ambiguous_policy.display_name(),
             )).small().weak());
+            ui.horizontal_wrapped(|ui| {
+                ui.label("PCA / PCoA / dendrogram color:")
+                    .on_hover_text("Choose how samples are colored in unsupervised sample-level plots. Analysis group shows the selected case/control comparison; metadata columns can reveal batch, phenotype, sex, timepoint, or other structure.");
+                egui::ComboBox::from_id_salt("corrected_ordination_color_by")
+                    .selected_text(&this.corrected_ordination_color_by)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut this.corrected_ordination_color_by, "Analysis group".to_string(), "Analysis group");
+                        ui.selectable_value(&mut this.corrected_ordination_color_by, "Subject / patient".to_string(), "Subject / patient");
+                        if let Some(meta) = &this.cohort_metadata {
+                            for column in &meta.columns {
+                                ui.selectable_value(&mut this.corrected_ordination_color_by, column.clone(), column);
+                            }
+                        }
+                    });
+            });
+            egui::CollapsingHeader::new("How to interpret the corrected / standard layer")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label("Adjusted feature tests ask whether the case/control contrast remains after the selected covariates are included. BH q-values control the false-discovery rate within each reported feature family.");
+                    ui.label("PCA, PCoA, and dendrograms are unsupervised views: visible case/control separation is supportive when present, but lack of separation does not rule out individual biomarkers. Conversely, clustering can reflect batch, subject, timepoint, or other metadata rather than disease status.");
+                    ui.label("PERMANOVA tests whether multivariate distances differ between the two comparison groups. With a subject column selected, permutations are restricted at the subject level.");
+                    ui.label("Pathway over-representation asks whether the foreground gene list contains more members of a gene set than expected from the measured-gene universe; it should be interpreted alongside effect direction, overlap size, and redundancy among gene sets.");
+                });
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 if bundle.gene.is_some() || bundle.gene_error.is_some() { ui.selectable_value(&mut this.corrected_result_view, CorrectedResultView::Gene, "Gene counts"); }
@@ -2325,7 +2649,7 @@ impl MergeApp {
         });
     }
 
-    fn render_corrected_expression(&self, ui: &mut egui::Ui, result: &CorrectedExpressionResult, id: &str) {
+    fn render_corrected_expression(&mut self, ui: &mut egui::Ui, result: &CorrectedExpressionResult, id: &str) {
         ui.heading(format!("{} — corrected count analysis", result.feature_label));
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("Model samples: {}",result.n_model_samples)); ui.separator();
@@ -2335,27 +2659,38 @@ impl MergeApp {
         });
         ui.label(egui::RichText::new(&result.normalization).small().weak());
         ui.label(egui::RichText::new(&result.model_description).small().weak());
+        egui::CollapsingHeader::new("Analysis guide").default_open(false).show(ui, |ui| {
+            ui.label("The count model tests the case/control coefficient after the selected covariates are included. Positive coefficients indicate higher modeled counts in cases; negative coefficients indicate lower modeled counts.");
+            ui.label("BH q-values control the false-discovery rate across the tested genes or transcripts. The subject-collapsed result is a sensitivity analysis that gives each subject one averaged observation when repeated samples are configured.");
+            ui.label("PCA and hierarchical clustering use the most variable normalized features and are unsupervised. They are useful for detecting broad phenotype structure, batch effects, outlying samples, or other metadata-driven clustering, but are not significance tests for individual genes.");
+        });
         for warning in &result.warnings { ui.colored_label(egui::Color32::from_rgb(230,170,70),warning); }
         if let Some(ord)=&result.pca { self.render_corrected_ordination(ui,ord,&format!("{id}_pca")); }
-        self.render_adjusted_test_table(ui,"Adjusted feature tests",&result.tests,560.0);
+        if let Some(tree)=&result.dendrogram {
+            egui::CollapsingHeader::new("Hierarchical clustering").default_open(false).show(ui, |ui| {
+                self.render_corrected_dendrogram(ui, tree, &format!("{id}_dendrogram"));
+            });
+        }
+        self.render_adjusted_test_table(ui,"Adjusted feature tests",&result.tests,600.0);
         if let Some(dtu)=&result.dtu {
             egui::CollapsingHeader::new(format!("Differential transcript usage ({} genes / {} transcripts)",dtu.genes_tested,dtu.transcripts_tested))
                 .default_open(true)
                 .show(ui,|ui|{
                     ui.label(egui::RichText::new(&dtu.method_description).small().weak());
+                    ui.label("This screen asks whether the relative contribution of transcripts from the same gene changes between groups, rather than whether total gene expression changes.");
                     ui.label(egui::RichText::new(format!("Gene-level DTU screen ({} rows)",dtu.gene_tests.len())).strong());
-                    egui::ScrollArea::both().max_height(360.0).show(ui,|ui|{
+                    fixed_table_viewport(ui, &format!("{id}_dtu_genes_scroll"), 430.0, 820.0, |ui| {
                         egui::Grid::new(format!("{id}_dtu_genes")).striped(true).show(ui,|ui|{
                             for h in ["NCBI Gene ID","Transcripts","Simes p","BH q","Max |CLR β|"] {ui.label(egui::RichText::new(h).strong());} ui.end_row();
                             for r in &dtu.gene_tests {ui.monospace(&r.gene_id);ui.label(r.n_transcripts.to_string());ui.label(format!("{:.3e}",r.p_value));ui.label(format!("{:.3e}",r.q_value));ui.label(format!("{:.4}",r.max_abs_clr_effect));ui.end_row();}
                         });
                     });
-                    self.render_adjusted_test_table(ui,"Transcript-level CLR usage tests",&dtu.transcript_tests,460.0);
+                    self.render_adjusted_test_table(ui,"Transcript-level CLR usage tests",&dtu.transcript_tests,520.0);
                 });
         }
     }
 
-    fn render_corrected_repertoire(&self, ui: &mut egui::Ui, result: &CorrectedRepertoireResult, id: &str) {
+    fn render_corrected_repertoire(&mut self, ui: &mut egui::Ui, result: &CorrectedRepertoireResult, id: &str) {
         ui.heading(format!("{} — depth/composition corrected",result.modality));
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("Samples: {}",result.files_used)); ui.separator();
@@ -2363,13 +2698,24 @@ impl MergeApp {
             ui.label(format!("Rarefaction repeats: {}",result.rarefaction_reps)); ui.separator();
             ui.label(format!("Ambiguous calls: {}",result.ambiguous_policy.display_name()));
         });
+        egui::CollapsingHeader::new("Analysis guide").default_open(false).show(ui, |ui| {
+            ui.label("Richness and Shannon diversity are compared after rarefying every repertoire to a common read depth, reducing the effect of unequal library depth. Clonality, CDR3 length, sharing, and convergence describe complementary repertoire properties.");
+            ui.label("Morisita-Horn emphasizes abundance-weighted clonotype similarity; Jaccard uses presence/absence. PCoA visualizes these pairwise distances, while PERMANOVA tests whether the case/control groups differ globally in multivariate repertoire space.");
+            ui.label("The dendrogram uses average-linkage hierarchical clustering on Morisita-Horn distance. Branches show similarity structure without using phenotype labels; leaf colors can be changed using the metadata color selector above.");
+            ui.label("V/D/J/V-J and isotype families are compositional. CLR/Aitchison analysis evaluates relative composition, so individual positive or negative coefficients should be interpreted as changes relative to the rest of the composition.");
+        });
         for warning in &result.warnings { ui.colored_label(egui::Color32::from_rgb(230,170,70),warning); }
-        self.render_adjusted_test_table(ui,"Adjusted repertoire metrics",&result.metric_tests,420.0);
+        self.render_adjusted_test_table(ui,"Adjusted repertoire metrics",&result.metric_tests,480.0);
         ui.horizontal_wrapped(|ui| {
             if let Some(ord)=&result.morisita_horn { ui.label(format!("Morisita-Horn PERMANOVA: F={:.3}, p={:.3e}",ord.permanova_f,ord.permanova_p)); }
             if let Some(ord)=&result.jaccard { ui.label(format!("Jaccard PERMANOVA: F={:.3}, p={:.3e}",ord.permanova_f,ord.permanova_p)); }
         });
         if let Some(ord)=&result.morisita_horn { self.render_corrected_ordination(ui,ord,&format!("{id}_mh")); }
+        if let Some(tree)=&result.dendrogram {
+            egui::CollapsingHeader::new("Morisita-Horn hierarchical clustering").default_open(false).show(ui, |ui| {
+                self.render_corrected_dendrogram(ui, tree, &format!("{id}_mh_tree"));
+            });
+        }
         if let Some(ord)=&result.jaccard {
             egui::CollapsingHeader::new("Jaccard presence/absence PCoA").show(ui,|ui|self.render_corrected_ordination(ui,ord,&format!("{id}_jaccard")));
         }
@@ -2379,7 +2725,7 @@ impl MergeApp {
                 .show(ui,|ui|self.render_corrected_composition(ui,comp,&format!("{id}_comp_{idx}")));
         }
         egui::CollapsingHeader::new("Matched-depth & sharing sample table").show(ui,|ui|{
-            egui::ScrollArea::both().max_height(430.0).show(ui,|ui|{
+            fixed_table_viewport(ui, &format!("{id}_samples_scroll"), 520.0, 1180.0, |ui| {
                 egui::Grid::new(format!("{id}_samples")).striped(true).show(ui,|ui|{
                     for h in ["Sample","Group","Subject","Observed richness","Rarefied richness","Rarefied Shannon","Private","Longitudinal","Public"] { ui.label(egui::RichText::new(h).strong()); } ui.end_row();
                     for r in &result.sample_summaries { ui.monospace(&r.sample_id);ui.label(&r.group);ui.monospace(&r.subject);ui.label(format!("{:.1}",r.observed_richness));ui.label(format!("{:.1}",r.rarefied_richness));ui.label(format!("{:.3}",r.rarefied_shannon));ui.label(format!("{:.1}%",100.0*r.private_fraction));ui.label(format!("{:.1}%",100.0*r.longitudinal_shared_fraction));ui.label(format!("{:.1}%",100.0*r.public_fraction));ui.end_row(); }
@@ -2388,44 +2734,84 @@ impl MergeApp {
         });
     }
 
-    fn render_corrected_composition(&self, ui:&mut egui::Ui, result:&CorrectedCompositionResult, id:&str) {
+    fn render_corrected_composition(&mut self, ui:&mut egui::Ui, result:&CorrectedCompositionResult, id:&str) {
+        ui.label("Aitchison distance compares complete compositions after CLR transformation; the global PERMANOVA asks whether composition differs between groups before individual features are interpreted.");
         if let Some(ord)=&result.ordination {
             ui.label(format!("Global Aitchison PERMANOVA: F={:.3}, p={:.3e} ({} permutations)",ord.permanova_f,ord.permanova_p,ord.permutations));
             self.render_corrected_ordination(ui,ord,&format!("{id}_ord"));
         }
-        self.render_adjusted_test_table(ui,&format!("{} adjusted CLR tests",result.family),&result.tests,500.0);
+        if let Some(tree)=&result.dendrogram {
+            egui::CollapsingHeader::new("Aitchison hierarchical clustering").default_open(false).show(ui, |ui| {
+                self.render_corrected_dendrogram(ui, tree, &format!("{id}_tree"));
+            });
+        }
+        self.render_adjusted_test_table(ui,&format!("{} adjusted CLR tests",result.family),&result.tests,560.0);
     }
 
-    fn render_corrected_isotype(&self, ui:&mut egui::Ui, result:&CorrectedIsotypeResult, id:&str) {
+    fn render_corrected_isotype(&mut self, ui:&mut egui::Ui, result:&CorrectedIsotypeResult, id:&str) {
         ui.heading("BCR isotype — compositional corrected analysis");
         ui.label(format!("Samples: {} | {}",result.files_used,if result.determined_only{"Undetermined excluded and composition renormalized"}else{"Original composition including Undetermined"}));
+        egui::CollapsingHeader::new("Analysis guide").default_open(false).show(ui, |ui| {
+            ui.label("Isotype fractions form a composition: increasing one component necessarily changes the relative share of others. CLR/Aitchison methods therefore test the composition jointly and individual coefficients are relative rather than independent percentage changes.");
+            ui.label("The PCoA and dendrogram provide unsupervised views of isotype-composition similarity. If Undetermined is excluded, results describe the determined isotype mixture after renormalization.");
+        });
         for warning in &result.warnings { ui.colored_label(egui::Color32::from_rgb(230,170,70),warning); }
         if let Some(ord)=&result.ordination { self.render_corrected_ordination(ui,ord,&format!("{id}_ord")); }
-        self.render_adjusted_test_table(ui,"Isotype CLR tests",&result.tests,480.0);
+        if let Some(tree)=&result.dendrogram {
+            egui::CollapsingHeader::new("Isotype hierarchical clustering").default_open(false).show(ui, |ui| {
+                self.render_corrected_dendrogram(ui, tree, &format!("{id}_tree"));
+            });
+        }
+        self.render_adjusted_test_table(ui,"Isotype CLR tests",&result.tests,540.0);
     }
 
-    fn render_corrected_immune(&self, ui:&mut egui::Ui, result:&CorrectedImmuneResult, id:&str) {
+    fn render_corrected_immune(&mut self, ui:&mut egui::Ui, result:&CorrectedImmuneResult, id:&str) {
         ui.heading("Immune infiltrate — adjusted ssGSEA analysis");
-        ui.label(format!("Samples: {}. Tests use original ssGSEA scores; PCA uses per-cell-type z-scores.",result.files_used));
+        ui.label(format!("Samples: {}. Tests use original ssGSEA scores; PCA and clustering use per-cell-type z-scores.",result.files_used));
+        egui::CollapsingHeader::new("Analysis guide").default_open(false).show(ui, |ui| {
+            ui.label("Each cell type is tested using its original ssGSEA enrichment score after covariate adjustment. Scores are enrichment measures, not literal cell percentages, so comparisons are made for the same cell type across groups.");
+            ui.label("PCA and hierarchical clustering use standardized cell-type scores so one high-scale signature cannot dominate solely because of its numerical range. These plots are useful for identifying coordinated immune patterns and sample outliers.");
+        });
         for warning in &result.warnings { ui.colored_label(egui::Color32::from_rgb(230,170,70),warning); }
         if let Some(ord)=&result.pca { self.render_corrected_ordination(ui,ord,&format!("{id}_pca")); }
-        self.render_adjusted_test_table(ui,"Adjusted immune-cell tests",&result.tests,520.0);
+        if let Some(tree)=&result.dendrogram {
+            egui::CollapsingHeader::new("Immune-profile hierarchical clustering").default_open(false).show(ui, |ui| {
+                self.render_corrected_dendrogram(ui, tree, &format!("{id}_tree"));
+            });
+        }
+        self.render_adjusted_test_table(ui,"Adjusted immune-cell tests",&result.tests,580.0);
     }
 
-    fn render_corrected_pathway(&self, ui:&mut egui::Ui, result:&CorrectedPathwayResult, id:&str) {
+    fn render_corrected_pathway(&mut self, ui:&mut egui::Ui, result:&CorrectedPathwayResult, id:&str) {
         ui.heading("Pathway over-representation analysis");
         ui.label(format!("GMT: {} | tested-gene universe: {} | foreground: {} | criteria: q ≤ {:.3}, |adjusted log2FC| ≥ {:.3}",result.gmt_path.display(),result.universe_size,result.foreground_size,result.q_threshold,result.effect_threshold));
         ui.label(egui::RichText::new(format!("Hypergeometric upper-tail test with BH correction; gene sets retained at {}-{} measured genes.",result.min_set_size,result.max_set_size)).small().weak());
-        let has_points=result.tests.iter().any(|r|r.q_value.is_finite()&&r.q_value>0.0);
-        if has_points{
-            Plot::new(format!("{id}_plot")).height(340.0).x_axis_label("ln odds ratio").y_axis_label("-log10(BH q)").show(ui,|plot_ui|{
-                for r in result.tests.iter().filter(|r|r.q_value.is_finite()&&r.q_value>0.0).take(100){
-                    let label=format!("{}\nOverlap: {}/{}\nOR: {:.3}\np: {:.3e}\nq: {:.3e}\nGenes: {}",r.pathway,r.overlap,r.measured_set_size,r.odds_ratio,r.p_value,r.q_value,r.overlap_genes);
-                    plot_ui.points(Points::new(label,vec![[r.odds_ratio.ln(),-r.q_value.max(1e-300).log10()]]).radius(4.0));
-                }
-            });
+        egui::CollapsingHeader::new("Analysis guide").default_open(false).show(ui, |ui| {
+            ui.label("The foreground contains genes passing the configured corrected-expression q-value and effect thresholds. ORA asks whether a pathway contains more foreground genes than expected from all measured/tested genes.");
+            ui.label("Odds ratio > 1 indicates enrichment. Strong significance with a very large overlap may reflect overlapping or redundant gene sets, so related pathways should be interpreted as biological themes rather than independent discoveries.");
+            ui.label("Hover text intentionally shows only a compact subset of overlap genes; the complete overlap list remains in the table and exported results.");
+        });
+        let rows=result.tests.iter().filter(|r|r.q_value.is_finite()&&r.q_value>0.0).take(250).collect::<Vec<_>>();
+        if !rows.is_empty(){
+            let hover_points=rows.iter().map(|r|{
+                let x=r.odds_ratio.max(1e-12).ln();
+                let y=-r.q_value.max(1e-300).log10();
+                let genes=compact_comma_list(&r.overlap_genes,8,120);
+                let label=format!("{}\nOverlap: {}/{}\nOdds ratio: {:.3}\np: {:.3e}\nBH q: {:.3e}\nOverlap genes: {}",r.pathway,r.overlap,r.measured_set_size,r.odds_ratio,r.p_value,r.q_value,genes);
+                (x,y,label)
+            }).collect::<Vec<_>>();
+            let coords=hover_points.iter().map(|(x,y,_)|[*x,*y]).collect::<Vec<_>>();
+            let formatter_points=hover_points.clone();
+            Plot::new(format!("{id}_plot")).height(390.0).x_axis_label("ln odds ratio").y_axis_label("-log10(BH q)")
+                .label_formatter(move |hover| match hover {
+                    HoverPosition::NearDataPoint{position,..} => nearest_hover_label(position.x, position.y, &formatter_points),
+                    _ => None,
+                })
+                .show(ui,|plot_ui|{
+                    plot_ui.points(Points::new("Pathways",coords).radius(4.0));
+                });
         }
-        egui::ScrollArea::both().max_height(560.0).show(ui,|ui|{
+        fixed_table_viewport(ui, &format!("{id}_table_scroll"), 640.0, 1320.0, |ui| {
             egui::Grid::new(format!("{id}_table")).striped(true).show(ui,|ui|{
                 for h in ["Pathway","Set size","Overlap","Odds ratio","p","BH q","Overlap genes"]{ui.label(egui::RichText::new(h).strong());}ui.end_row();
                 for r in &result.tests{ui.monospace(&r.pathway);ui.label(r.measured_set_size.to_string());ui.label(r.overlap.to_string());ui.label(format!("{:.3}",r.odds_ratio));ui.label(format!("{:.3e}",r.p_value));ui.label(format!("{:.3e}",r.q_value));ui.label(&r.overlap_genes);ui.end_row();}
@@ -2433,28 +2819,104 @@ impl MergeApp {
         });
     }
 
-    fn render_corrected_ordination(&self, ui:&mut egui::Ui, ord:&OrdinationResult, id:&str) {
+    fn render_corrected_ordination(&mut self, ui:&mut egui::Ui, ord:&OrdinationResult, id:&str) {
         ui.label(egui::RichText::new(&ord.name).strong());
         if ord.permanova_p.is_finite() { ui.label(format!("PERMANOVA: pseudo-F {:.3}, p {:.3e}, {} permutations",ord.permanova_f,ord.permanova_p,ord.permutations)); }
-        let case_points=ord.points.iter().filter(|p|p.group=="Case").map(|p|[p.x,p.y]).collect::<Vec<_>>();
-        let ctrl_points=ord.points.iter().filter(|p|p.group=="Control").map(|p|[p.x,p.y]).collect::<Vec<_>>();
-        let accent=ui.visuals().selection.bg_fill;
-        Plot::new(id).height(390.0).x_axis_label(&ord.x_label).y_axis_label(&ord.y_label)
-            .label_formatter(|hover|match hover{HoverPosition::NearDataPoint{plot_name,..}if !plot_name.is_empty()=>Some(plot_name.to_string()),_=>None})
-            .show(ui,|plot_ui|{
-                if !ctrl_points.is_empty(){plot_ui.points(Points::new("Control",ctrl_points).color(egui::Color32::from_rgb(120,170,230)).radius(4.0));}
-                if !case_points.is_empty(){plot_ui.points(Points::new("Case",case_points).color(accent).radius(4.0));}
-                for p in ord.points.iter().take(500) {
-                    let label=format!("{}\n{}\nSubject: {}\n{}: {:.4}\n{}: {:.4}",p.sample_id,p.group,p.subject,ord.x_label,p.x,ord.y_label,p.y);
-                    plot_ui.points(Points::new(label,vec![[p.x,p.y]]).radius(2.0).allow_hover(true));
-                }
+        let meta_map=self.selected_metadata_color_map();
+        let mut grouped:BTreeMap<String,Vec<[f64;2]>>=BTreeMap::new();
+        let mut hover_points=Vec::with_capacity(ord.points.len());
+        for p in &ord.points {
+            let category=self.sample_color_value(&p.sample_id,&p.group,&p.subject,&meta_map);
+            grouped.entry(category.clone()).or_default().push([p.x,p.y]);
+            hover_points.push((p.x,p.y,format!("{}\nAnalysis group: {}\nColor ({}): {}\nSubject: {}\n{}: {:.4}\n{}: {:.4}",p.sample_id,p.group,self.corrected_ordination_color_by,category,p.subject,ord.x_label,p.x,ord.y_label,p.y)));
+        }
+        let formatter_points=hover_points.clone();
+        let mut plot=Plot::new(id).height(430.0).x_axis_label(&ord.x_label).y_axis_label(&ord.y_label)
+            .label_formatter(move |hover|match hover{
+                HoverPosition::NearDataPoint{position,..}=>nearest_hover_label(position.x,position.y,&formatter_points),
+                _=>None,
             });
+        if grouped.len()<=12 { plot=plot.legend(Legend::default()); }
+        let accent=ui.visuals().selection.bg_fill;
+        plot.show(ui,|plot_ui|{
+            for (idx,(category,points)) in grouped.into_iter().enumerate() {
+                let color=category_color(&category,idx,&self.corrected_ordination_color_by,accent);
+                plot_ui.points(Points::new(category,points).color(color).radius(4.5));
+            }
+        });
+        if ord.points.len()>180 {
+            ui.label(egui::RichText::new(format!("{} samples are drawn in grouped point series for responsive interaction; hover labels are resolved from the nearest plotted point.",ord.points.len())).small().weak());
+        }
+    }
+
+    fn render_corrected_dendrogram(&mut self, ui:&mut egui::Ui, tree:&DendrogramResult, id:&str) {
+        ui.label(egui::RichText::new(&tree.name).strong());
+        ui.label(egui::RichText::new(format!("{} using {}. Shorter merge distances indicate more similar samples.",tree.linkage,tree.distance_label)).small().weak());
+        let meta_map=self.selected_metadata_color_map();
+        let mut grouped:BTreeMap<String,Vec<[f64;2]>>=BTreeMap::new();
+        let mut hover_points=Vec::with_capacity(tree.leaves.len());
+        for leaf in &tree.leaves {
+            let category=self.sample_color_value(&leaf.sample_id,&leaf.group,&leaf.subject,&meta_map);
+            grouped.entry(category.clone()).or_default().push([0.0,leaf.position]);
+            hover_points.push((0.0,leaf.position,format!("{}\nAnalysis group: {}\nColor ({}): {}\nSubject: {}\nCluster order: {}",leaf.sample_id,leaf.group,self.corrected_ordination_color_by,category,leaf.subject,leaf.position as usize+1)));
+        }
+        let formatter_points=hover_points.clone();
+        let mut plot=Plot::new(id).height(520.0).x_axis_label(&tree.distance_label).y_axis_label("Cluster leaf order")
+            .label_formatter(move |hover|match hover{
+                HoverPosition::NearDataPoint{position,..}=>nearest_hover_label(position.x,position.y,&formatter_points),
+                _=>None,
+            });
+        if grouped.len()<=12 { plot=plot.legend(Legend::default()); }
+        let accent=ui.visuals().selection.bg_fill;
+        plot.show(ui,|plot_ui|{
+            for (idx,seg) in tree.segments.iter().enumerate() {
+                plot_ui.line(Line::new(format!("branch_{idx}"),vec![[seg.x1,seg.y1],[seg.x2,seg.y2]])
+                    .color(egui::Color32::from_gray(120)).width(1.0).allow_hover(false));
+            }
+            for (idx,(category,points)) in grouped.into_iter().enumerate() {
+                let color=category_color(&category,idx,&self.corrected_ordination_color_by,accent);
+                plot_ui.points(Points::new(category,points).color(color).radius(4.0));
+            }
+        });
+        egui::CollapsingHeader::new(format!("Cluster leaf order ({} samples)",tree.leaves.len())).show(ui,|ui|{
+            fixed_table_viewport(ui, &format!("{id}_leaves_scroll"), 360.0, 760.0, |ui|{
+                egui::Grid::new(format!("{id}_leaves")).striped(true).show(ui,|ui|{
+                    for h in ["Order","Sample","Group","Subject"]{ui.label(egui::RichText::new(h).strong());}ui.end_row();
+                    for (i,leaf) in tree.leaves.iter().enumerate(){ui.label((i+1).to_string());ui.monospace(&leaf.sample_id);ui.label(&leaf.group);ui.monospace(&leaf.subject);ui.end_row();}
+                });
+            });
+        });
+    }
+
+    fn selected_metadata_color_map(&self)->HashMap<String,String>{
+        if self.corrected_ordination_color_by=="Analysis group" || self.corrected_ordination_color_by=="Subject / patient" {return HashMap::new();}
+        let Some(meta)=&self.cohort_metadata else{return HashMap::new();};
+        let Some(id_idx)=meta.column_index(&meta.id_column) else{return HashMap::new();};
+        let Some(value_idx)=meta.column_index(&self.corrected_ordination_color_by) else{return HashMap::new();};
+        let mut tmp:HashMap<String,Vec<String>>=HashMap::new();
+        for row in &meta.rows {
+            let key=normalize_sample_id(row.get(id_idx).map(String::as_str).unwrap_or_default());
+            let value=row.get(value_idx).map(|s|s.trim()).unwrap_or_default();
+            if !key.is_empty() && !value.is_empty(){tmp.entry(key).or_default().push(value.to_string());}
+        }
+        tmp.into_iter().filter_map(|(k,v)|{
+            let mut unique=v; unique.sort(); unique.dedup();
+            if unique.len()==1{Some((k,unique.remove(0)))}else{None}
+        }).collect()
+    }
+
+    fn sample_color_value(&self,sample_id:&str,group:&str,subject:&str,meta_map:&HashMap<String,String>)->String{
+        match self.corrected_ordination_color_by.as_str(){
+            "Analysis group"=>group.to_string(),
+            "Subject / patient"=>subject.to_string(),
+            _=>meta_map.get(&normalize_sample_id(sample_id)).cloned().unwrap_or_else(||"(missing)".to_string()),
+        }
     }
 
     fn render_adjusted_test_table(&self, ui:&mut egui::Ui, title:&str, tests:&[AdjustedFeatureResult], height:f32) {
         ui.label(egui::RichText::new(format!("{title} ({} rows)",tests.len())).strong());
-        ui.label(egui::RichText::new("β is the adjusted case-vs-control coefficient on the modeled scale. q is BH-adjusted for the robust model. Subject p/q comes from averaging repeated samples within each subject and applying a non-parametric sensitivity test.").small().weak());
-        egui::ScrollArea::both().max_height(height).show(ui,|ui|{
+        ui.label(egui::RichText::new("β is the adjusted case-vs-control coefficient on the modeled scale. q is BH-adjusted within this feature family. Subject p/q comes from averaging repeated samples within each subject and applying a non-parametric sensitivity test.").small().weak());
+        fixed_table_viewport(ui, &format!("adjusted_table_scroll_{}",title.replace(' ',"_")), height.max(360.0), 1220.0, |ui|{
             egui::Grid::new(format!("adjusted_table_{}", title.replace(' ', "_"))).striped(true).show(ui,|ui|{
                 for h in ["Feature","ID/family","β group","SE","p","BH q","Subject effect","Subject q","n","subjects","case mean","ctrl mean"] { ui.label(egui::RichText::new(h).strong()); } ui.end_row();
                 for r in tests {
@@ -2635,77 +3097,61 @@ impl MergeApp {
             .weak(),
         );
 
-        let all_points: Vec<[f64; 2]> = result
-            .tests
-            .iter()
+        let valid = result.tests.iter()
             .filter(|r| r.effect.is_finite() && r.q_value.is_finite() && r.q_value > 0.0)
-            .map(|r| [r.effect, -r.q_value.max(1e-300).log10()])
-            .collect();
-        let accent = ui.visuals().selection.bg_fill;
-        Plot::new(volcano_id)
+            .collect::<Vec<_>>();
+        let selected = bounded_plot_indices(valid.len(), 6000, 800);
+        let mut significant = Vec::new();
+        let mut other = Vec::new();
+        let mut hover_points = Vec::with_capacity(selected.len());
+        for idx in selected {
+            let r = valid[idx];
+            let xy = [r.effect, -r.q_value.max(1e-300).log10()];
+            if r.q_value <= 0.05 { significant.push(xy); } else { other.push(xy); }
+            hover_points.push((xy[0], xy[1], format!(
+                "{}{}\nlog2FC: {:.3}\nCliff's δ: {:.3}\np: {:.3e}\nBH q: {:.3e}\nmedian case/control: {:.3} / {:.3}\nmean case/control: {:.3} / {:.3}\nn case/control: {} / {}",
+                r.feature,
+                if r.secondary_id.is_empty() { String::new() } else { format!(" ({})", r.secondary_id) },
+                r.effect, r.cliffs_delta, r.p_value, r.q_value, r.median_case, r.median_control,
+                r.mean_case, r.mean_control, r.n_case, r.n_control,
+            )));
+        }
+        let formatter_points = hover_points.clone();
+        let mut plot = Plot::new(volcano_id)
             .height(360.0)
             .x_axis_label("log2 mean fold change (case / control)")
             .y_axis_label("-log10(BH q)")
-            .label_formatter(|hover| match hover {
-                HoverPosition::NearDataPoint { plot_name, .. } if !plot_name.is_empty() => {
-                    Some(plot_name.to_string())
-                }
+            .label_formatter(move |hover| match hover {
+                HoverPosition::NearDataPoint { position, .. } => nearest_hover_label(position.x, position.y, &formatter_points),
                 _ => None,
-            })
-            .show(ui, |plot_ui| {
-                if !all_points.is_empty() {
-                    plot_ui.points(
-                        Points::new(format!("All tested {feature_plural}"), all_points)
-                            .color(egui::Color32::from_gray(100))
-                            .radius(2.0),
-                    );
-                }
-                for r in result.tests.iter().take(120) {
-                    if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 {
-                        continue;
-                    }
-                    let label = format!(
-                        "{}{}\nlog2FC: {:.3}\nCliff's δ: {:.3}\np: {:.3e}\nq: {:.3e}\nmedian case/control: {:.3} / {:.3}",
-                        r.feature,
-                        if r.secondary_id.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" ({})", r.secondary_id)
-                        },
-                        r.effect,
-                        r.cliffs_delta,
-                        r.p_value,
-                        r.q_value,
-                        r.median_case,
-                        r.median_control
-                    );
-                    let color = if r.q_value <= 0.05 {
-                        egui::Color32::from_rgb(230, 170, 70)
-                    } else {
-                        accent
-                    };
-                    plot_ui.points(
-                        Points::new(label, vec![[r.effect, -r.q_value.max(1e-300).log10()]])
-                            .color(color)
-                            .radius(if r.q_value <= 0.05 { 4.0 } else { 3.0 }),
-                    );
-                }
             });
-        ui.label(
-            egui::RichText::new(
-                format!("Hover the highlighted top-ranked {feature_plural} for effect size and significance. These are discovery candidates, not covariate-adjusted differential-expression results."),
-            )
-            .small()
-            .weak(),
-        );
+        if !significant.is_empty() && !other.is_empty() { plot = plot.legend(Legend::default()); }
+        plot.show(ui, |plot_ui| {
+            if !other.is_empty() {
+                plot_ui.points(Points::new("Other tested features", other).color(egui::Color32::from_gray(100)).radius(2.0));
+            }
+            if !significant.is_empty() {
+                plot_ui.points(Points::new("BH q ≤ 0.05", significant).color(egui::Color32::from_rgb(230, 170, 70)).radius(3.5));
+            }
+        });
+        if valid.len() > hover_points.len() {
+            ui.label(egui::RichText::new(format!(
+                "For responsive interaction, the plot displays {} representative points from {} tested features; all features remain in the ranked table and exports.",
+                hover_points.len(), valid.len()
+            )).small().weak());
+        } else {
+            ui.label(egui::RichText::new(format!(
+                "Hover points for {feature_name} identity, effect size, significance, and group summaries. These are discovery candidates, not covariate-adjusted differential-expression results."
+            )).small().weak());
+        }
         ui.collapsing("Detection shift (case vs control)", |ui| {
             self.render_expression_detection_shift(ui, result, feature_name, feature_plural, detection_id);
         });
-        self.render_feature_test_table(ui, &format!("Top differential {feature_plural}"), &result.tests, 520.0);
+        self.render_feature_test_table(ui, &format!("Top differential {feature_plural}"), &result.tests, 560.0);
         if feature_name == "Gene" {
             ui.label(
                 egui::RichText::new(
-                    "Pathway enrichment is not yet run in this pass. A future gene-analysis extension can accept a versioned GMT library for hit-list ORA and ranked enrichment.",
+                    "Use the Corrected / standard layer for count-based adjusted models and optional GMT pathway analysis."
                 )
                 .small()
                 .weak(),
@@ -2750,7 +3196,7 @@ impl MergeApp {
         });
         ui.label(
             egui::RichText::new(
-                "This first Rust BCR pass mirrors the simple comparison layer: Mann-Whitney U, BH adjustment within each feature family, and Cliff's delta. Public/private clonotypes, convergence, matched-depth richness, PCoA and dendrograms are intentionally left for the next repertoire-analysis iteration.",
+                "This exploratory BCR view uses Mann-Whitney U, BH adjustment within each feature family, and Cliff's delta. Use the Corrected / standard layer for matched-depth diversity, clonotype sharing, multivariate repertoire distances, compositional analysis, PCoA/PERMANOVA, and hierarchical clustering.",
             )
             .small()
             .weak(),
@@ -2892,7 +3338,7 @@ impl MergeApp {
         });
         ui.label(
             egui::RichText::new(
-                "This initial TCR pass is an exploratory, depth-dependent comparison of repertoire summaries and V/J composition. Matched-depth rarefaction, Morisita-Horn similarity/PCoA, public/private clonotypes and amino-acid convergence remain separate advanced repertoire analyses for a later iteration.",
+                "This exploratory TCR view summarizes depth-dependent repertoire metrics and V/J composition. Use the Corrected / standard layer for matched-depth rarefaction, Morisita-Horn and Jaccard distances, PCoA/PERMANOVA, clonotype sharing, convergence, compositional testing, and hierarchical clustering.",
             )
             .small()
             .weak(),
@@ -3005,69 +3451,55 @@ impl MergeApp {
         feature_plural: &str,
         plot_id: &'static str,
     ) {
-        let points: Vec<_> = result
-            .tests
-            .iter()
+        let valid = result.tests.iter()
             .filter_map(|r| Some((r, r.detection_case?, r.detection_control?)))
             .filter(|(_, case, ctrl)| case.is_finite() && ctrl.is_finite())
-            .collect();
-        if points.is_empty() {
+            .collect::<Vec<_>>();
+        if valid.is_empty() {
             ui.label(format!("Detection fractions are not available for this {} result.", feature_name.to_ascii_lowercase()));
             return;
         }
-        let all_points: Vec<[f64; 2]> = points
-            .iter()
-            .map(|(_, case, ctrl)| [100.0 * *ctrl, 100.0 * *case])
-            .collect();
-        let accent = ui.visuals().selection.bg_fill;
-        Plot::new(plot_id)
-            .height(330.0)
+        let selected = bounded_plot_indices(valid.len(), 6000, 800);
+        let mut significant = Vec::new();
+        let mut other = Vec::new();
+        let mut hover_points = Vec::with_capacity(selected.len());
+        for idx in selected {
+            let (r, case, ctrl) = valid[idx];
+            let xy = [100.0 * ctrl, 100.0 * case];
+            if r.q_value.is_finite() && r.q_value <= 0.05 { significant.push(xy); } else { other.push(xy); }
+            hover_points.push((xy[0], xy[1], format!(
+                "{}{}\ncase detection: {:.1}%\ncontrol detection: {:.1}%\nΔ detection: {:+.1} pp\np: {:.3e}\nBH q: {:.3e}",
+                r.feature,
+                if r.secondary_id.is_empty() { String::new() } else { format!(" ({})", r.secondary_id) },
+                100.0 * case, 100.0 * ctrl, 100.0 * (case - ctrl), r.p_value, r.q_value,
+            )));
+        }
+        let formatter_points = hover_points.clone();
+        let mut plot = Plot::new(plot_id)
+            .height(350.0)
             .x_axis_label("Control detection (%)")
             .y_axis_label("Case detection (%)")
-            .label_formatter(|hover| match hover {
-                HoverPosition::NearDataPoint { plot_name, .. } if !plot_name.is_empty() => {
-                    Some(plot_name.to_string())
-                }
+            .label_formatter(move |hover| match hover {
+                HoverPosition::NearDataPoint { position, .. } => nearest_hover_label(position.x, position.y, &formatter_points),
                 _ => None,
-            })
-            .show(ui, |plot_ui| {
-                plot_ui.line(
-                    Line::new("Equal detection", vec![[0.0, 0.0], [100.0, 100.0]])
-                        .color(egui::Color32::from_gray(120)),
-                );
-                plot_ui.points(
-                    Points::new(format!("All {feature_plural}"), all_points)
-                        .color(egui::Color32::from_gray(95))
-                        .radius(2.0),
-                );
-                for (r, case, ctrl) in points.iter().take(120) {
-                    let label = format!(
-                        "{}\ncase detection: {:.1}%\ncontrol detection: {:.1}%\nΔ detection: {:+.1} pp\nq: {:.3e}",
-                        r.feature,
-                        100.0 * *case,
-                        100.0 * *ctrl,
-                        100.0 * (*case - *ctrl),
-                        r.q_value,
-                    );
-                    let color = if r.q_value.is_finite() && r.q_value <= 0.05 {
-                        egui::Color32::from_rgb(230, 170, 70)
-                    } else {
-                        accent
-                    };
-                    plot_ui.points(
-                        Points::new(label, vec![[100.0 * *ctrl, 100.0 * *case]])
-                            .color(color)
-                            .radius(if r.q_value <= 0.05 { 4.0 } else { 3.0 }),
-                    );
-                }
             });
-        ui.label(
-            egui::RichText::new(
-                format!("{feature_name}s above the diagonal are detected in a larger fraction of case samples; {feature_plural} below it are detected more often in controls."),
-            )
-            .small()
-            .weak(),
-        );
+        if !significant.is_empty() && !other.is_empty() { plot = plot.legend(Legend::default()); }
+        plot.show(ui, |plot_ui| {
+            plot_ui.line(Line::new("Equal detection", vec![[0.0, 0.0], [100.0, 100.0]])
+                .color(egui::Color32::from_gray(120)).allow_hover(false));
+            if !other.is_empty() {
+                plot_ui.points(Points::new(format!("Other {feature_plural}"), other).color(egui::Color32::from_gray(95)).radius(2.0));
+            }
+            if !significant.is_empty() {
+                plot_ui.points(Points::new("BH q ≤ 0.05", significant).color(egui::Color32::from_rgb(230, 170, 70)).radius(3.5));
+            }
+        });
+        if valid.len() > hover_points.len() {
+            ui.label(egui::RichText::new(format!(
+                "Displaying {} representative points from {} features for responsive interaction; the full result table is unchanged.",
+                hover_points.len(), valid.len()
+            )).small().weak());
+        }
     }
 
     fn render_bcr_metric_distribution(&mut self, ui: &mut egui::Ui, result: &BcrComparisonResult) {
@@ -3297,60 +3729,30 @@ impl MergeApp {
             return;
         }
 
-        // Reserve a real viewport for larger result families. Without this, nested
-        // scroll areas can collapse to only a few visible rows near the bottom of
-        // the outer Cohort Analysis page even when the table contains many tests.
         let row_height = 24.0_f32;
         let content_height = row_height * (tests.len().saturating_add(1) as f32) + 10.0;
-        let desired_height = if tests.len() > 8 {
-            max_height
-        } else {
-            content_height.min(max_height)
-        };
-
-        ui.allocate_ui(egui::vec2(ui.available_width(), desired_height), |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt(format!("feature_test_scroll_{title}"))
-                .max_height(desired_height)
-                .show_rows(ui, row_height, tests.len(), |ui, range| {
-                    egui::Grid::new(format!("feature_test_grid_{title}"))
-                        .striped(true)
-                        .num_columns(9)
-                        .show(ui, |ui| {
-                            if range.start == 0 {
-                                for heading in [
-                                    "Feature",
-                                    "Effect",
-                                    "Cliff δ",
-                                    "p",
-                                    "BH q",
-                                    "Median case",
-                                    "Median ctrl",
-                                    "n case",
-                                    "n ctrl",
-                                ] {
-                                    ui.label(egui::RichText::new(heading).strong());
-                                }
-                                ui.end_row();
-                            }
-                            for idx in range {
-                                let r = &tests[idx];
-                                ui.monospace(&r.feature);
-                                ui.label(format!("{:.4}", r.effect));
-                                ui.label(format!("{:.3}", r.cliffs_delta));
-                                ui.label(format!("{:.3e}", r.p_value));
-                                ui.label(if r.q_value.is_finite() {
-                                    format!("{:.3e}", r.q_value)
-                                } else {
-                                    "NA".to_string()
-                                });
-                                ui.label(format!("{:.4}", r.median_case));
-                                ui.label(format!("{:.4}", r.median_control));
-                                ui.label(r.n_case.to_string());
-                                ui.label(r.n_control.to_string());
-                                ui.end_row();
-                            }
-                        });
+        let desired_height = if tests.len() > 8 { max_height.max(360.0) } else { content_height.max(120.0).min(max_height.max(360.0)) };
+        fixed_table_viewport(ui, &format!("feature_test_scroll_{title}"), desired_height, 1040.0, |ui| {
+            egui::Grid::new(format!("feature_test_grid_{title}"))
+                .striped(true)
+                .num_columns(9)
+                .show(ui, |ui| {
+                    for heading in [
+                        "Feature", "Effect", "Cliff δ", "p", "BH q", "Median case", "Median ctrl", "n case", "n ctrl",
+                    ] { ui.label(egui::RichText::new(heading).strong()); }
+                    ui.end_row();
+                    for r in tests {
+                        ui.monospace(&r.feature);
+                        ui.label(format!("{:.4}", r.effect));
+                        ui.label(format!("{:.3}", r.cliffs_delta));
+                        ui.label(format!("{:.3e}", r.p_value));
+                        ui.label(if r.q_value.is_finite() { format!("{:.3e}", r.q_value) } else { "NA".to_string() });
+                        ui.label(format!("{:.4}", r.median_case));
+                        ui.label(format!("{:.4}", r.median_control));
+                        ui.label(r.n_case.to_string());
+                        ui.label(r.n_control.to_string());
+                        ui.end_row();
+                    }
                 });
         });
     }
@@ -3452,10 +3854,11 @@ impl MergeApp {
         let outdir = parent.join(format!("4c_corrected_analysis_{safe_name}"));
         fs::create_dir_all(&outdir)?;
         if let Some(mapping)=&self.cohort_mapping { write_mapping_audit(&outdir.join("sample_mapping_audit.tsv"),mapping)?; write_mapping_audit_csv(&outdir.join("sample_mapping_audit.csv"),mapping)?; }
-        if let Some(r)=&bundle.gene { write_adjusted_tests(&outdir.join("gene_adjusted_tests.tsv"),&r.tests)?; if let Some(o)=&r.pca{write_ordination(&outdir.join("gene_pca.tsv"),o)?;} }
+        if let Some(r)=&bundle.gene { write_adjusted_tests(&outdir.join("gene_adjusted_tests.tsv"),&r.tests)?; if let Some(o)=&r.pca{write_ordination(&outdir.join("gene_pca.tsv"),o)?;} if let Some(t)=&r.dendrogram{write_dendrogram(&outdir.join("gene_dendrogram_leaf_order.tsv"),t)?;} }
         if let Some(r)=&bundle.transcript {
             write_adjusted_tests(&outdir.join("transcript_adjusted_tests.tsv"),&r.tests)?;
             if let Some(o)=&r.pca{write_ordination(&outdir.join("transcript_pca.tsv"),o)?;}
+            if let Some(t)=&r.dendrogram{write_dendrogram(&outdir.join("transcript_dendrogram_leaf_order.tsv"),t)?;}
             if let Some(dtu)=&r.dtu {
                 write_adjusted_tests(&outdir.join("transcript_dtu_transcript_tests.tsv"),&dtu.transcript_tests)?;
                 write_dtu_gene_tests(&outdir.join("transcript_dtu_gene_tests.tsv"),&dtu.gene_tests)?;
@@ -3467,18 +3870,20 @@ impl MergeApp {
                 write_adjusted_tests(&outdir.join(format!("{prefix}_adjusted_metric_tests.tsv")),&r.metric_tests)?;
                 if let Some(o)=&r.morisita_horn{write_ordination(&outdir.join(format!("{prefix}_morisita_horn_pcoa.tsv")),o)?;}
                 if let Some(o)=&r.jaccard{write_ordination(&outdir.join(format!("{prefix}_jaccard_pcoa.tsv")),o)?;}
+                if let Some(t)=&r.dendrogram{write_dendrogram(&outdir.join(format!("{prefix}_morisita_horn_dendrogram_leaf_order.tsv")),t)?;}
                 for comp in &r.compositions {
                     let fam:String=comp.family.chars().map(|c|if c.is_ascii_alphanumeric(){c.to_ascii_lowercase()}else{'_'}).collect();
                     write_adjusted_tests(&outdir.join(format!("{prefix}_{fam}_clr_tests.tsv")),&comp.tests)?;
                     if let Some(o)=&comp.ordination{write_ordination(&outdir.join(format!("{prefix}_{fam}_aitchison_pcoa.tsv")),o)?;}
+                    if let Some(t)=&comp.dendrogram{write_dendrogram(&outdir.join(format!("{prefix}_{fam}_aitchison_dendrogram_leaf_order.tsv")),t)?;}
                 }
                 if !r.warnings.is_empty(){fs::write(outdir.join(format!("{prefix}_warnings.txt")),r.warnings.join("\n"))?;}
             }
         }
-        if let Some(r)=&bundle.bcr_isotype { write_adjusted_tests(&outdir.join("bcr_isotype_clr_tests.tsv"),&r.tests)?; if let Some(o)=&r.ordination{write_ordination(&outdir.join("bcr_isotype_aitchison_pcoa.tsv"),o)?;} if !r.warnings.is_empty(){fs::write(outdir.join("bcr_isotype_warnings.txt"),r.warnings.join("\n"))?;} }
-        if let Some(r)=&bundle.immune { write_adjusted_tests(&outdir.join("immune_adjusted_tests.tsv"),&r.tests)?; if let Some(o)=&r.pca{write_ordination(&outdir.join("immune_pca.tsv"),o)?;} if !r.warnings.is_empty(){fs::write(outdir.join("immune_warnings.txt"),r.warnings.join("\n"))?;} }
+        if let Some(r)=&bundle.bcr_isotype { write_adjusted_tests(&outdir.join("bcr_isotype_clr_tests.tsv"),&r.tests)?; if let Some(o)=&r.ordination{write_ordination(&outdir.join("bcr_isotype_aitchison_pcoa.tsv"),o)?;} if let Some(t)=&r.dendrogram{write_dendrogram(&outdir.join("bcr_isotype_aitchison_dendrogram_leaf_order.tsv"),t)?;} if !r.warnings.is_empty(){fs::write(outdir.join("bcr_isotype_warnings.txt"),r.warnings.join("\n"))?;} }
+        if let Some(r)=&bundle.immune { write_adjusted_tests(&outdir.join("immune_adjusted_tests.tsv"),&r.tests)?; if let Some(o)=&r.pca{write_ordination(&outdir.join("immune_pca.tsv"),o)?;} if let Some(t)=&r.dendrogram{write_dendrogram(&outdir.join("immune_dendrogram_leaf_order.tsv"),t)?;} if !r.warnings.is_empty(){fs::write(outdir.join("immune_warnings.txt"),r.warnings.join("\n"))?;} }
         if let Some(r)=&bundle.pathway { write_pathway_ora(&outdir.join("pathway_ora.tsv"),r)?; }
-        let notes=format!("4C Cohort Explorer corrected/standard analysis\nComparison: {}\nCase: {}\nControl: {}\nSubject column: {}\nCovariates: {}\n\nExpression uses positive-count median-ratio normalization followed by a native NB2 GLM with a log(size-factor) offset and per-feature unshrunk dispersion. Subject-clustered sandwich SEs are used when a subject column is configured, and a subject-collapsed non-parametric sensitivity result is also reported. This is intentionally not labeled DESeq2/edgeR/limma-voom because their cross-feature empirical-Bayes/dispersion-shrinkage machinery is not reproduced.\n\nRepertoire analyses use matched-depth exact-without-replacement Monte-Carlo rarefaction, subject-aware public/private sharing, Morisita-Horn and Jaccard distances, PCoA/PERMANOVA, and CLR/Aitchison composition analysis.\n",
+        let notes=format!("4C Cohort Explorer corrected/standard analysis\nComparison: {}\nCase: {}\nControl: {}\nSubject column: {}\nCovariates: {}\n\nExpression uses positive-count median-ratio normalization with a negative-binomial log-link count model, optional covariates, subject-clustered inference when repeated samples are configured, and a subject-collapsed non-parametric sensitivity analysis.\n\nRepertoire analyses use matched-depth exact-without-replacement Monte-Carlo rarefaction, subject-aware public/private sharing, Morisita-Horn and Jaccard distances, PCoA/PERMANOVA, average-linkage hierarchical clustering, and CLR/Aitchison composition analysis.\n",
             bundle.comparison.name,bundle.comparison.case_label,bundle.comparison.control_label,bundle.spec.subject_column.as_deref().unwrap_or("none"),if bundle.spec.covariates.is_empty(){"none".to_string()}else{bundle.spec.covariates.join(", ")});
         fs::write(outdir.join("README.txt"),notes)?;
         Ok(outdir)
@@ -3550,6 +3955,7 @@ impl MergeApp {
                 self.cohort_scan = Some(scan);
                 self.cohort_results = None;
                 self.corrected_results = None;
+                self.focused_results = None;
                 if let Some(path) = auto_meta {
                     self.load_cohort_metadata_path(path);
                 } else {
@@ -3557,6 +3963,7 @@ impl MergeApp {
                     self.cohort_metadata_path = None;
                     self.cohort_mapping = None;
                 }
+                self.rebuild_focused_mapping();
             }
             Err(e) => {
                 self.cohort_status = format!("Project scan failed: {e:#}");
@@ -3590,6 +3997,98 @@ impl MergeApp {
             (Some(scan), Some(meta)) => Some(build_mapping(scan, meta)),
             _ => None,
         };
+    }
+
+    fn load_focused_metadata_path(&mut self, path: PathBuf) {
+        match load_metadata(&path) {
+            Ok(meta) => {
+                let rows=meta.rows.len();
+                let id_column=meta.id_column.clone();
+                self.focused_metadata_path=Some(path);
+                self.focused_metadata=Some(meta);
+                self.focused_results=None;
+                self.rebuild_focused_mapping();
+                self.cohort_status=format!("Focused metadata loaded: {rows} rows; matching on '{id_column}'.");
+            }
+            Err(e)=>self.cohort_status=format!("Focused metadata load failed: {e:#}"),
+        }
+    }
+
+    fn rebuild_focused_mapping(&mut self) {
+        self.focused_mapping=match(&self.cohort_scan,&self.focused_metadata){
+            (Some(scan),Some(meta))=>Some(build_mapping(scan,meta)),
+            _=>None,
+        };
+    }
+
+    fn start_focused_analysis(&mut self) {
+        let (Some(scan),Some(metadata),Some(metadata_path))=(self.cohort_scan.clone(),self.focused_metadata.clone(),self.focused_metadata_path.clone()) else {
+            self.cohort_status="Load a project and a focused metadata file first.".to_string();return;
+        };
+        let comparison=match build_comparison(&metadata,self.cohort_preset){Ok(c)=>c,Err(e)=>{self.cohort_status=format!("Could not build focused comparison: {e:#}");return;}};
+        let spec=CorrectedModelSpec{
+            subject_column:None,
+            covariates:Vec::new(),
+            permutations:self.corrected_permutations,
+            rarefaction_reps:self.corrected_rarefaction_reps,
+            rarefaction_cap:self.corrected_rarefaction_cap,
+            ambiguous_policy:self.corrected_ambiguous_policy,
+            exclude_undetermined_isotype:self.corrected_exclude_undetermined,
+            ..CorrectedModelSpec::default()
+        };
+        let run_pathway=self.corrected_run_pathway;
+        let run_gene=self.cohort_run_gene||run_pathway;
+        let run_transcript=self.cohort_run_transcript;
+        let run_bcr=self.cohort_run_bcr;
+        let run_iso=self.cohort_run_bcr_isotype;
+        let run_tcra=self.cohort_run_tcr_alpha;
+        let run_tcrb=self.cohort_run_tcr_beta;
+        let run_immune=self.cohort_run_immune;
+        let run_concordance=self.focused_run_exploratory_concordance;
+        let gmt_path=self.corrected_gmt_path.clone();
+        let pathway_q=self.corrected_pathway_q;
+        let pathway_effect=self.corrected_pathway_effect;
+        let settings=self.focused_settings.clone();
+        let stage_count=[run_gene,run_transcript,run_bcr,run_iso,run_tcra,run_tcrb,run_immune,run_pathway,run_concordance&&run_gene,run_concordance&&run_transcript].into_iter().filter(|x|*x).count().max(1)as f32;
+        let(tx,rx)=mpsc::channel();self.cohort_receiver=Some(rx);self.cohort_running=true;self.cohort_progress=0.0;self.cohort_status=format!("Running focused {}…",comparison.name);self.focused_results=None;
+        std::thread::spawn(move||{
+            let mut stage=0usize;let weight=1.0/stage_count;
+            let(mut gene,mut gene_error,mut transcript,mut transcript_error,mut bcr,mut bcr_error,mut iso,mut iso_error,mut tcra,mut tcra_error,mut tcrb,mut tcrb_error,mut immune,mut immune_error,mut pathway,mut pathway_error)=(None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None);
+            let(mut exploratory_gene,mut exploratory_transcript)=(None,None);
+            macro_rules! prog {($base:expr,$prefix:expr)=>{|done,total,msg|{let frac=if total==0{0.0}else{done as f32/total as f32};let _=tx.send(CohortWorkerMessage::Progress($base+weight*frac,format!("{} — {}",$prefix,msg)));}}}
+            if run_gene {let base=stage as f32*weight;if let Some(path)=scan.merged_gene_tsv.clone(){match run_corrected_expression(&path,&metadata,&comparison,"Raw Count","Gene",&spec,prog!(base,"Focused gene counts")){Ok(r)=>gene=Some(r),Err(e)=>gene_error=Some(format!("{e:#}"))}}else{gene_error=Some("No merged gene-expression TSV detected.".to_string());}stage+=1;}
+            if run_transcript {let base=stage as f32*weight;if let Some(path)=scan.merged_transcript_tsv.clone(){match run_corrected_expression(&path,&metadata,&comparison,"Total Reads","Transcript",&spec,prog!(base,"Focused transcript counts")){Ok(r)=>transcript=Some(r),Err(e)=>transcript_error=Some(format!("{e:#}"))}}else{transcript_error=Some("No merged transcript-expression TSV detected.".to_string());}stage+=1;}
+            if run_bcr {let base=stage as f32*weight;match run_corrected_repertoire(&scan.files,&metadata,&comparison,CohortModality::Bcr,&spec,prog!(base,"Focused BCR")){Ok(r)=>bcr=Some(r),Err(e)=>bcr_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_iso {let base=stage as f32*weight;match run_corrected_isotype(&scan.files,&metadata,&comparison,&spec,prog!(base,"Focused BCR isotype")){Ok(r)=>iso=Some(r),Err(e)=>iso_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_tcra {let base=stage as f32*weight;match run_corrected_repertoire(&scan.files,&metadata,&comparison,CohortModality::TcrAlpha,&spec,prog!(base,"Focused TCR alpha")){Ok(r)=>tcra=Some(r),Err(e)=>tcra_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_tcrb {let base=stage as f32*weight;match run_corrected_repertoire(&scan.files,&metadata,&comparison,CohortModality::TcrBeta,&spec,prog!(base,"Focused TCR beta")){Ok(r)=>tcrb=Some(r),Err(e)=>tcrb_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_immune {let base=stage as f32*weight;match run_corrected_immune(&scan.files,&metadata,&comparison,&spec,prog!(base,"Focused immune")){Ok(r)=>immune=Some(r),Err(e)=>immune_error=Some(format!("{e:#}"))}stage+=1;}
+            if run_pathway {
+                let _=tx.send(CohortWorkerMessage::Progress(stage as f32*weight,"Focused pathway ORA".to_string()));
+                match(gene.as_ref(),gmt_path.as_ref()){
+                    (Some(g),Some(path))=>match run_pathway_ora(path,g,pathway_q,pathway_effect){Ok(r)=>pathway=Some(r),Err(e)=>pathway_error=Some(format!("{e:#}"))},
+                    (None,_)=>pathway_error=Some("Focused pathway ORA requires a successful gene-count analysis.".to_string()),
+                    (_,None)=>pathway_error=Some("Choose a GMT gene-set file before running focused pathway ORA.".to_string()),
+                }
+                stage+=1;
+            }
+            if run_concordance&&run_gene {
+                let base=stage as f32*weight;
+                if let Some(path)=scan.merged_gene_tsv.clone(){let _=tx.send(CohortWorkerMessage::Progress(base,"Focused gene TPM direction check".to_string()));if let Ok(r)=run_gene_comparison(&path,&comparison,"TPM",|_,_,_|{}){exploratory_gene=Some(r);}}
+                stage+=1;
+            }
+            if run_concordance&&run_transcript {
+                let base=stage as f32*weight;
+                if let Some(path)=scan.merged_transcript_tsv.clone(){let _=tx.send(CohortWorkerMessage::Progress(base,"Focused transcript TPM direction check".to_string()));if let Ok(r)=run_transcript_comparison(&path,&comparison,"TPM",|_,_,_|{}){exploratory_transcript=Some(r);}}
+            }
+            let corrected=CorrectedAnalysisBundle{comparison:comparison.clone(),spec,gene,gene_error,transcript,transcript_error,bcr,bcr_error,bcr_isotype:iso,bcr_isotype_error:iso_error,tcr_alpha:tcra,tcr_alpha_error:tcra_error,tcr_beta:tcrb,tcr_beta_error:tcrb_error,immune,immune_error,pathway,pathway_error};
+            let candidates=build_focused_candidate_summary(
+                &metadata_path,&comparison.case_label,&comparison.control_label,comparison.case_metadata_rows,comparison.control_metadata_rows,settings,
+                corrected.gene.as_ref(),exploratory_gene.as_ref(),corrected.transcript.as_ref(),exploratory_transcript.as_ref(),
+                corrected.bcr.as_ref(),corrected.bcr_isotype.as_ref(),corrected.tcr_alpha.as_ref(),corrected.tcr_beta.as_ref(),corrected.immune.as_ref(),corrected.pathway.as_ref(),
+            );
+            let _=tx.send(CohortWorkerMessage::FocusedDone(FocusedAnalysisBundle{corrected,candidates}));
+        });
     }
 
     fn start_cohort_analysis(&mut self) {
@@ -3770,6 +4269,7 @@ impl MergeApp {
     fn poll_cohort_worker(&mut self) {
         let mut exploratory_done = None;
         let mut corrected_done = None;
+        let mut focused_done = None;
         if let Some(rx) = &self.cohort_receiver {
             while let Ok(message) = rx.try_recv() {
                 match message {
@@ -3779,6 +4279,7 @@ impl MergeApp {
                     }
                     CohortWorkerMessage::Done(bundle) => exploratory_done = Some(bundle),
                     CohortWorkerMessage::CorrectedDone(bundle) => corrected_done = Some(bundle),
+                    CohortWorkerMessage::FocusedDone(bundle) => focused_done = Some(bundle),
                 }
             }
         }
@@ -3817,6 +4318,15 @@ impl MergeApp {
             if !current {self.corrected_result_view=if bundle.gene.is_some(){CorrectedResultView::Gene}else if bundle.transcript.is_some(){CorrectedResultView::Transcript}else if bundle.bcr.is_some(){CorrectedResultView::Bcr}else if bundle.bcr_isotype.is_some(){CorrectedResultView::BcrIsotype}else if bundle.tcr_alpha.is_some(){CorrectedResultView::TcrAlpha}else if bundle.tcr_beta.is_some(){CorrectedResultView::TcrBeta}else if bundle.immune.is_some(){CorrectedResultView::Immune}else{CorrectedResultView::Pathway};}
             self.corrected_results=Some(bundle);self.cohort_running=false;self.cohort_progress=1.0;self.cohort_receiver=None;
             self.cohort_status=if messages.is_empty(){"Corrected / standard analysis complete.".to_string()}else{format!("Corrected analysis completed with {} modality warning(s): {}",messages.len(),messages.join(" | "))};
+        }
+        if let Some(bundle)=focused_done {
+            let gene_count=bundle.candidates.genes.len();
+            let pathway_count=bundle.candidates.pathways.len();
+            self.corrected_results=Some(bundle.corrected);
+            self.focused_results=Some(bundle.candidates);
+            self.focused_result_view=FocusedResultView::Overview;
+            self.cohort_running=false;self.cohort_progress=1.0;self.cohort_receiver=None;
+            self.cohort_status=format!("Focused candidate workflow complete: {gene_count} gene candidate(s), {pathway_count} pathway candidate(s).");
         }
     }
 

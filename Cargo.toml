@@ -1,8 +1,8 @@
 [package]
 name = "cfs-expression-merger"
-version = "0.7.0"
+version = "0.9.0"
 edition = "2024"
-description = "Native cohort explorer for RNA expression merging and metadata-driven multi-modal analysis"
+description = "Cohort explorer for RNA expression merging and metadata-driven multi-modal analysis"
 license = "MIT"
 
 [lib]

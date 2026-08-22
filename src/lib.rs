@@ -1,5 +1,6 @@
 pub mod cohort;
 pub mod corrected;
+pub mod focused;
 pub mod report;
 
 use anyhow::{anyhow, bail, Context, Result};

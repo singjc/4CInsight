@@ -133,6 +133,31 @@ pub struct OrdinationResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct DendrogramLeaf {
+    pub sample_id: String,
+    pub group: String,
+    pub subject: String,
+    pub position: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DendrogramSegment {
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DendrogramResult {
+    pub name: String,
+    pub distance_label: String,
+    pub linkage: String,
+    pub leaves: Vec<DendrogramLeaf>,
+    pub segments: Vec<DendrogramSegment>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DtuGeneResult {
     pub gene_id: String,
     pub n_transcripts: usize,
@@ -164,6 +189,7 @@ pub struct CorrectedExpressionResult {
     pub filtered_features: usize,
     pub tests: Vec<AdjustedFeatureResult>,
     pub pca: Option<OrdinationResult>,
+    pub dendrogram: Option<DendrogramResult>,
     pub dtu: Option<CorrectedDtuResult>,
     pub warnings: Vec<String>,
 }
@@ -217,6 +243,7 @@ pub struct CorrectedCompositionResult {
     pub retained_features: usize,
     pub tests: Vec<AdjustedFeatureResult>,
     pub ordination: Option<OrdinationResult>,
+    pub dendrogram: Option<DendrogramResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +258,7 @@ pub struct CorrectedRepertoireResult {
     pub compositions: Vec<CorrectedCompositionResult>,
     pub morisita_horn: Option<OrdinationResult>,
     pub jaccard: Option<OrdinationResult>,
+    pub dendrogram: Option<DendrogramResult>,
     pub warnings: Vec<String>,
 }
 
@@ -240,6 +268,7 @@ pub struct CorrectedIsotypeResult {
     pub determined_only: bool,
     pub tests: Vec<AdjustedFeatureResult>,
     pub ordination: Option<OrdinationResult>,
+    pub dendrogram: Option<DendrogramResult>,
     pub warnings: Vec<String>,
 }
 
@@ -248,6 +277,7 @@ pub struct CorrectedImmuneResult {
     pub files_used: usize,
     pub tests: Vec<AdjustedFeatureResult>,
     pub pca: Option<OrdinationResult>,
+    pub dendrogram: Option<DendrogramResult>,
     pub warnings: Vec<String>,
 }
 
@@ -883,12 +913,24 @@ where
     apply_bh_adjusted(&mut tests);
     top_variable.sort_by(|a, b| b.variance.total_cmp(&a.variance));
     top_variable.truncate(300);
+    let ordination_rows = top_variable.iter().map(|r| r.values.clone()).collect::<Vec<_>>();
     let pca = pca_from_rows(
-        &top_variable.iter().map(|r| r.values.clone()).collect::<Vec<_>>(),
+        &ordination_rows,
         &design,
         &format!("{feature_label} PCA — top variable normalized features"),
         0,
     );
+    let dendrogram = if ordination_rows.is_empty() {
+        None
+    } else {
+        let distances = euclidean_distance_from_rows(&ordination_rows);
+        average_linkage_dendrogram(
+            &distances,
+            &design,
+            &format!("{feature_label} hierarchical clustering — top variable normalized features"),
+            "Euclidean distance",
+        )
+    };
     let dtu = if feature_label.eq_ignore_ascii_case("Transcript") {
         match run_dtu_screen(merged_tsv, &design_cols, &design, spec) {
             Ok(result) => Some(result),
@@ -910,11 +952,11 @@ where
         input: merged_tsv.to_path_buf(),
         feature_label: feature_label.to_string(),
         source_metric: source_metric.to_string(),
-        normalization: "Positive-count median-ratio size factors with a per-feature NB2 log-link model and log(size-factor) offset".to_string(),
+        normalization: "Positive-count median-ratio size factors; count models include a log(size-factor) offset".to_string(),
         model_description: if spec.subject_column.is_some() {
-            format!("Native NB2 GLM: group + {} covariate(s), unshrunk per-feature dispersion, subject-clustered sandwich SE; subject-collapsed log2-normalized Mann-Whitney sensitivity", spec.covariates.len())
+            format!("Negative-binomial log-link model: group + {} covariate(s), per-feature dispersion, subject-clustered sandwich SE; subject-collapsed log2-normalized Mann-Whitney sensitivity", spec.covariates.len())
         } else {
-            format!("Native NB2 GLM: group + {} covariate(s), unshrunk per-feature dispersion, model-based Wald SE; sample-level log2-normalized sensitivity", spec.covariates.len())
+            format!("Negative-binomial log-link model: group + {} covariate(s), per-feature dispersion, model-based Wald SE; sample-level log2-normalized sensitivity", spec.covariates.len())
         },
         n_input_samples: candidate_ids.len(),
         n_model_samples: design.x.len(),
@@ -923,6 +965,7 @@ where
         filtered_features: filtered,
         tests,
         pca,
+        dendrogram,
         dtu,
         warnings,
     })
@@ -1222,6 +1265,15 @@ where
         spec.permutations,
         &format!("{label} Jaccard PCoA"),
     );
+    let dendrogram = {
+        let distances = repertoire_distance_matrix(&model_samples, SimilarityMetric::MorisitaHorn);
+        average_linkage_dendrogram(
+            &distances,
+            &design,
+            &format!("{label} hierarchical clustering — Morisita-Horn distance"),
+            "1 - Morisita-Horn similarity",
+        )
+    };
     if spec.subject_column.is_none() {
         warnings.push("No subject ID column was selected: public/private sharing is sample-based and PERMANOVA permutations are unrestricted. Select a patient/subject column for longitudinally aware results.".to_string());
     }
@@ -1236,6 +1288,7 @@ where
         compositions,
         morisita_horn: morisita,
         jaccard,
+        dendrogram,
         warnings,
     })
 }
@@ -1294,6 +1347,7 @@ where
         determined_only: spec.exclude_undetermined_isotype,
         tests: comp.tests,
         ordination: comp.ordination,
+        dendrogram: comp.dendrogram,
         warnings,
     })
 }
@@ -1347,15 +1401,21 @@ where
         }
     }
     apply_bh_adjusted(&mut tests);
+    let distances = euclidean_distance_from_rows(&rows_for_pca);
     let mut pca = pca_from_rows(&rows_for_pca, &design, "Immune-infiltrate PCA (cell-type z-scores)", spec.permutations);
     if let Some(ord) = &mut pca {
-        let distances = euclidean_distance_from_rows(&rows_for_pca);
         let (f, p) = permanova(&distances, &design.group_case, &design.subjects, spec.permutations, 0xBADC0FFE);
         ord.permanova_f = f;
         ord.permanova_p = p;
         ord.permutations = spec.permutations;
     }
-    Ok(CorrectedImmuneResult { files_used: aligned.len(), tests, pca, warnings })
+    let dendrogram = average_linkage_dendrogram(
+        &distances,
+        &design,
+        "Immune-infiltrate hierarchical clustering — cell-type z-scores",
+        "Euclidean distance",
+    );
+    Ok(CorrectedImmuneResult { files_used: aligned.len(), tests, pca, dendrogram, warnings })
 }
 
 fn composition_analysis(
@@ -1397,21 +1457,21 @@ fn composition_analysis(
     apply_bh_adjusted(&mut tests);
     let distances = euclidean_distance_from_sample_rows(&clr_by_sample);
     let ord = pcoa_from_distance(&distances, design, &format!("{family} Aitchison PCoA"), spec.permutations, stable_seed(family));
-    Some(CorrectedCompositionResult { family: family.to_string(), retained_features: retained.len(), tests, ordination: ord })
+    let dendrogram = average_linkage_dendrogram(
+        &distances,
+        design,
+        &format!("{family} hierarchical clustering — Aitchison distance"),
+        "Aitchison distance",
+    );
+    Some(CorrectedCompositionResult { family: family.to_string(), retained_features: retained.len(), tests, ordination: ord, dendrogram })
 }
 
 #[derive(Debug, Clone, Copy)]
 enum SimilarityMetric { MorisitaHorn, Jaccard }
 
-fn repertoire_ordination(
-    samples: &[ParsedRepertoire],
-    design: &DesignMatrix,
-    metric: SimilarityMetric,
-    permutations: usize,
-    title: &str,
-) -> Option<OrdinationResult> {
+fn repertoire_distance_matrix(samples: &[ParsedRepertoire], metric: SimilarityMetric) -> Vec<Vec<f64>> {
     let n = samples.len();
-    if n < 3 { return None; }
+    if n == 0 { return Vec::new(); }
     let mut inverted: HashMap<String, Vec<(usize, f64)>> = HashMap::new();
     let mut sums_sq = vec![0.0; n];
     let mut richness = vec![0usize; n];
@@ -1455,6 +1515,18 @@ fn repertoire_ordination(
             dist[i][j] = (1.0 - sim).max(0.0);
         }
     }
+    dist
+}
+
+fn repertoire_ordination(
+    samples: &[ParsedRepertoire],
+    design: &DesignMatrix,
+    metric: SimilarityMetric,
+    permutations: usize,
+    title: &str,
+) -> Option<OrdinationResult> {
+    let dist = repertoire_distance_matrix(samples, metric);
+    if dist.len() < 3 { return None; }
     pcoa_from_distance(&dist, design, title, permutations, stable_seed(title))
 }
 
@@ -1802,11 +1874,122 @@ fn euclidean_distance_from_rows(feature_rows:&[Vec<f64>])->Vec<Vec<f64>>{
 }
 fn euclidean_distance_from_sample_rows(rows:&[Vec<f64>])->Vec<Vec<f64>>{let n=rows.len();let mut d=vec![vec![0.0;n];n];for i in 0..n{for j in(i+1)..n{let s=rows[i].iter().zip(rows[j].iter()).map(|(a,b)|(a-b).powi(2)).sum::<f64>().sqrt();d[i][j]=s;d[j][i]=s;}}d}
 
+fn average_linkage_dendrogram(
+    dist: &[Vec<f64>],
+    design: &DesignMatrix,
+    title: &str,
+    distance_label: &str,
+) -> Option<DendrogramResult> {
+    let n = dist.len();
+    if n < 2 || design.sample_ids.len() != n || dist.iter().any(|row| row.len() != n) {
+        return None;
+    }
+    let max_nodes = n * 2 - 1;
+    let mut matrix = vec![vec![f64::INFINITY; max_nodes]; max_nodes];
+    for i in 0..n {
+        matrix[i][i] = 0.0;
+        for j in (i + 1)..n {
+            let d = dist[i][j];
+            if !d.is_finite() { return None; }
+            matrix[i][j] = d;
+            matrix[j][i] = d;
+        }
+    }
+    let mut active = vec![false; max_nodes];
+    let mut sizes = vec![0usize; max_nodes];
+    let mut heights = vec![0.0; max_nodes];
+    let mut children: Vec<Option<(usize, usize)>> = vec![None; max_nodes];
+    for i in 0..n { active[i] = true; sizes[i] = 1; }
+
+    let mut active_count = n;
+    let mut next = n;
+    while active_count > 1 {
+        let mut best = None::<(usize, usize, f64)>;
+        for i in 0..next {
+            if !active[i] { continue; }
+            for j in (i + 1)..next {
+                if !active[j] { continue; }
+                let d = matrix[i][j];
+                if !d.is_finite() { continue; }
+                if best.as_ref().is_none_or(|(_, _, bd)| d < *bd) {
+                    best = Some((i, j, d));
+                }
+            }
+        }
+        let (a, b, height) = best?;
+        let new_id = next;
+        next += 1;
+        children[new_id] = Some((a, b));
+        heights[new_id] = height.max(heights[a]).max(heights[b]);
+        sizes[new_id] = sizes[a] + sizes[b];
+        for k in 0..new_id {
+            if !active[k] || k == a || k == b { continue; }
+            let d = (sizes[a] as f64 * matrix[a][k] + sizes[b] as f64 * matrix[b][k])
+                / sizes[new_id] as f64;
+            matrix[new_id][k] = d;
+            matrix[k][new_id] = d;
+        }
+        active[a] = false;
+        active[b] = false;
+        active[new_id] = true;
+        active_count -= 1;
+    }
+    let root = (0..next).find(|&i| active[i])?;
+
+    fn leaf_order(node: usize, n: usize, children: &[Option<(usize, usize)>], out: &mut Vec<usize>) {
+        if node < n { out.push(node); return; }
+        if let Some((a, b)) = children[node] {
+            leaf_order(a, n, children, out);
+            leaf_order(b, n, children, out);
+        }
+    }
+    let mut order = Vec::with_capacity(n);
+    leaf_order(root, n, &children, &mut order);
+    if order.len() != n { return None; }
+    let mut y = vec![0.0; next];
+    for (pos, leaf) in order.iter().copied().enumerate() { y[leaf] = pos as f64; }
+    let mut segments = Vec::with_capacity((n - 1) * 3);
+    fn layout_node(
+        node: usize,
+        n: usize,
+        children: &[Option<(usize, usize)>],
+        heights: &[f64],
+        y: &mut [f64],
+        segments: &mut Vec<DendrogramSegment>,
+    ) -> f64 {
+        if node < n { return y[node]; }
+        let Some((a, b)) = children[node] else { return y[node]; };
+        let ya = layout_node(a, n, children, heights, y, segments);
+        let yb = layout_node(b, n, children, heights, y, segments);
+        let yp = (ya + yb) * 0.5;
+        y[node] = yp;
+        let xp = heights[node];
+        segments.push(DendrogramSegment { x1: heights[a], y1: ya, x2: xp, y2: ya });
+        segments.push(DendrogramSegment { x1: heights[b], y1: yb, x2: xp, y2: yb });
+        segments.push(DendrogramSegment { x1: xp, y1: ya, x2: xp, y2: yb });
+        yp
+    }
+    layout_node(root, n, &children, &heights, &mut y, &mut segments);
+    let leaves = order.into_iter().enumerate().map(|(pos, i)| DendrogramLeaf {
+        sample_id: design.sample_ids[i].clone(),
+        group: if design.group_case[i] { "Case" } else { "Control" }.to_string(),
+        subject: design.subjects[i].clone(),
+        position: pos as f64,
+    }).collect::<Vec<_>>();
+    Some(DendrogramResult {
+        name: title.to_string(),
+        distance_label: distance_label.to_string(),
+        linkage: "Average linkage".to_string(),
+        leaves,
+        segments,
+    })
+}
+
 #[derive(Clone)]
 struct P2Median { initial: Vec<f64>, q:[f64;5], n:[f64;5], np:[f64;5], ready:bool }
 impl P2Median {
     fn new()->Self{Self{initial:Vec::new(),q:[0.0;5],n:[0.0;5],np:[0.0;5],ready:false}}
-    fn push(&mut self,x:f64){if !x.is_finite(){return;} if !self.ready{self.initial.push(x);if self.initial.len()==5{self.initial.sort_by(|a,b|a.total_cmp(b));for i in 0..5{self.q[i]=self.initial[i];self.n[i]=(i+1)as f64;}self.np=[1.0,2.0,3.0,4.0,5.0];self.ready=true;}return;} let k=if x<self.q[0]{self.q[0]=x;0}else if x<self.q[1]{0}else if x<self.q[2]{1}else if x<self.q[3]{2}else if x<=self.q[4]{3}else{self.q[4]=x;3};for i in(k+1)..5{self.n[i]+=1.0;}let dn=[0.0,0.25,0.5,0.75,1.0];for i in 0..5{self.np[i]+=dn[i];}for i in 1..4{let d=self.np[i]-self.n[i];if(d>=1.0&&self.n[i+1]-self.n[i]>1.0)||(d<=-1.0&&self.n[i-1]-self.n[i] < -1.0){let ds=d.signum();let ni=self.n[i];let qp=self.q[i]+ds/(self.n[i+1]-self.n[i-1])*((ni-self.n[i-1]+ds)*(self.q[i+1]-self.q[i])/(self.n[i+1]-ni)+(self.n[i+1]-ni-ds)*(self.q[i]-self.q[i-1])/(ni-self.n[i-1]));if self.q[i-1]<qp&&qp<self.q[i+1]{self.q[i]=qp;}else{let j=if ds>0.0{i+1}else{i-1};self.q[i]+=ds*(self.q[j]-self.q[i])/(self.n[j]-self.n[i]);}self.n[i]+=ds;}}}
+    fn push(&mut self,x:f64){if !x.is_finite(){return;} if !self.ready{self.initial.push(x);if self.initial.len()==5{self.initial.sort_by(|a,b|a.total_cmp(b));for i in 0..5{self.q[i]=self.initial[i];self.n[i]=(i+1)as f64;}self.np=[1.0,2.0,3.0,4.0,5.0];self.ready=true;}return;} let k=if x<self.q[0]{self.q[0]=x;0}else if x<self.q[1]{0}else if x<self.q[2]{1}else if x<self.q[3]{2}else if x<=self.q[4]{3}else{self.q[4]=x;3};for i in(k+1)..5{self.n[i]+=1.0;}let dn=[0.0,0.25,0.5,0.75,1.0];for i in 0..5{self.np[i]+=dn[i];}for i in 1..4{let d=self.np[i]-self.n[i];if(d>=1.0&&self.n[i+1]-self.n[i]>1.0)||(d<=-1.0&&self.n[i-1]-self.n[i]< -1.0){let ds=d.signum();let ni=self.n[i];let qp=self.q[i]+ds/(self.n[i+1]-self.n[i-1])*((ni-self.n[i-1]+ds)*(self.q[i+1]-self.q[i])/(self.n[i+1]-ni)+(self.n[i+1]-ni-ds)*(self.q[i]-self.q[i-1])/(ni-self.n[i-1]));if self.q[i-1]<qp&&qp<self.q[i+1]{self.q[i]=qp;}else{let j=if ds>0.0{i+1}else{i-1};self.q[i]+=ds*(self.q[j]-self.q[i])/(self.n[j]-self.n[i]);}self.n[i]+=ds;}}}
     fn value(&self)->Option<f64>{if self.ready{Some(self.q[2])}else if self.initial.is_empty(){None}else{let mut v=self.initial.clone();v.sort_by(|a,b|a.total_cmp(b));Some(v[v.len()/2])}}
 }
 
@@ -1897,6 +2080,28 @@ mod tests {
         assert!(rich>=1.0 && rich<=4.0);
         assert!(sh>=0.0);
     }
+
+    #[test]
+    fn average_linkage_dendrogram_contains_every_sample() {
+        let design = DesignMatrix {
+            sample_ids: vec!["A".into(),"B".into(),"C".into(),"D".into()],
+            group_case: vec![false,false,true,true],
+            subjects: vec!["A".into(),"B".into(),"C".into(),"D".into()],
+            x: vec![vec![1.0,0.0],vec![1.0,0.0],vec![1.0,1.0],vec![1.0,1.0]],
+            column_names: vec!["Intercept".into(),"Group".into()], group_col:1, dropped_missing_covariates:0,
+        };
+        let dist=vec![
+            vec![0.0,0.1,0.9,1.0],
+            vec![0.1,0.0,0.8,0.9],
+            vec![0.9,0.8,0.0,0.2],
+            vec![1.0,0.9,0.2,0.0],
+        ];
+        let tree=average_linkage_dendrogram(&dist,&design,"test","distance").unwrap();
+        assert_eq!(tree.leaves.len(),4);
+        assert_eq!(tree.segments.len(),9);
+        let ids=tree.leaves.iter().map(|l|l.sample_id.as_str()).collect::<HashSet<_>>();
+        assert_eq!(ids.len(),4);
+    }
 }
 
 pub fn write_adjusted_tests(path: &Path, tests: &[AdjustedFeatureResult]) -> Result<()> {
@@ -1936,6 +2141,23 @@ pub fn write_ordination(path: &Path, ord: &OrdinationResult) -> Result<()> {
     w.write_record(["sample_id","group","subject","axis1","axis2"])?;
     for p in &ord.points {
         w.write_record(vec![p.sample_id.clone(),p.group.clone(),p.subject.clone(),p.x.to_string(),p.y.to_string()])?;
+    }
+    w.flush()?;
+    Ok(())
+}
+
+pub fn write_dendrogram(path: &Path, tree: &DendrogramResult) -> Result<()> {
+    let mut w = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    w.write_record(["leaf_order","sample_id","group","subject","linkage","distance_label"])?;
+    for (i, leaf) in tree.leaves.iter().enumerate() {
+        w.write_record([
+            (i + 1).to_string(),
+            leaf.sample_id.clone(),
+            leaf.group.clone(),
+            leaf.subject.clone(),
+            tree.linkage.clone(),
+            tree.distance_label.clone(),
+        ])?;
     }
     w.flush()?;
     Ok(())

@@ -3,15 +3,16 @@ use crate::cohort::{
     CohortMapping, CohortModality, FeatureTestResult, GeneComparisonResult, ImmuneComparisonResult,
     MappingStatus, TcrComparisonResult, TcrSampleSummary,
 };
+use crate::focused::{FocusedCandidateSummary, FocusedGeneCandidate, FocusedOtherCandidate, FocusedPathwayCandidate};
 use crate::corrected::{
     AdjustedFeatureResult, CorrectedExpressionResult, CorrectedImmuneResult,
-    CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult, DtuGeneResult, OrdinationResult,
+    CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult, DendrogramResult, DtuGeneResult, OrdinationResult,
 };
 use anyhow::{Context, Result};
 use maud::{html, Markup};
 use report_builder::plots::plot_boxplot;
 use report_builder::{Report, ReportSection};
-use plotly::common::{Mode, Title};
+use plotly::common::{HoverInfo, Mode, Title};
 use plotly::layout::Axis;
 use plotly::{Layout, Plot, Scatter};
 use std::collections::{BTreeMap, BTreeSet};
@@ -431,7 +432,7 @@ fn build_tcr_section(
     };
     section.add_content(html! {
         p { (result.chain) " files used: " (result.files_used) "; samples summarized: " (result.sample_summaries.len()) "." }
-        p { "This initial TCR comparison reports depth-dependent repertoire summaries plus V-gene, J-gene and V–J-pair composition. Matched-depth rarefaction, Morisita–Horn/PCoA, public/private clonotypes and convergence are planned repertoire extensions." }
+        p { "This exploratory TCR section reports depth-dependent repertoire summaries plus V-gene, J-gene and V–J-pair composition. The corrected/standard section should be used for matched-depth diversity, repertoire distances, clonotype sharing, convergence, and composition-aware inference." }
         @if !result.file_errors.is_empty() {
             details {
                 summary { "File warnings (" (result.file_errors.len()) ")" }
@@ -885,9 +886,8 @@ pub fn generate_corrected_html_report(path: &Path, inputs: CorrectedReportInputs
         p { strong { "Case: " } (inputs.comparison.case_label) " | " strong { "Control: " } (inputs.comparison.control_label) }
         p { strong { "Subject / repeated-measure column: " } (subject) }
         p { strong { "Covariates: " } (covariates) }
-        p { "Expression uses positive-count median-ratio normalization followed by a native per-feature NB2 GLM with a log(size-factor) offset. Dispersions are estimated per feature without empirical-Bayes shrinkage. Subject-clustered sandwich SEs are used when a subject column is configured; a subject-collapsed non-parametric sensitivity test is reported in parallel." }
-        p { em { "The native expression model is intentionally not labeled DESeq2/edgeR/limma-voom because their empirical-Bayes and dispersion/precision-weight machinery is not reproduced." } }
-        p { "Repertoire analyses use matched-depth rarefaction, subject-aware clonotype sharing, Morisita-Horn and Jaccard PCoA/PERMANOVA, and CLR/Aitchison composition analysis. Immune-infiltrate tests use original ssGSEA scores with adjusted robust models." }
+        p { "Expression uses positive-count median-ratio normalization with a negative-binomial log-link count model, optional covariates, subject-clustered standard errors when repeated samples are configured, and a subject-collapsed sensitivity analysis." }
+        p { "Repertoire analyses use matched-depth rarefaction, subject-aware clonotype sharing, Morisita-Horn and Jaccard distances with PCoA/PERMANOVA, average-linkage hierarchical clustering, and CLR/Aitchison composition analysis. Immune-infiltrate tests use original ssGSEA scores with adjusted models and standardized scores for unsupervised sample structure." }
     });
     report.add_section(overview);
     if let Some(mapping)=inputs.mapping { report.add_section(build_mapping_section(mapping)); }
@@ -921,10 +921,14 @@ fn build_corrected_expression_section(title:&str,r:&CorrectedExpressionResult)->
         p { (r.normalization) }
         p { (r.model_description) }
         p { "Model samples: " (r.n_model_samples) ", subjects: " (r.n_subjects) ", tested features: " (r.tested_features) ", low-count filtered: " (r.filtered_features) "." }
+        h3 { "How to read this analysis" }
+        p { "The adjusted case/control coefficient tests whether each feature differs after the selected covariates are included. Positive coefficients indicate higher modeled abundance in cases; negative coefficients indicate lower modeled abundance. BH q-values control the false-discovery rate across this feature family." }
+        p { "PCA and hierarchical clustering are unsupervised sample-level views. Separation by case/control can support a broad phenotype signal, while other clustering may reflect subject, batch, timepoint, or other metadata. These plots are descriptive and should be read alongside the feature-level tests." }
         @for w in &r.warnings { p { em { "Warning: " (w) } } }
     });
     if let Some(p)=adjusted_volcano_plot(&r.tests,&format!("{title}: adjusted feature screen")){s.add_plot(p);}
     if let Some(ord)=&r.pca { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    if let Some(tree)=&r.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
     s.add_content(adjusted_table("Adjusted feature tests",&r.tests,150));
     if let Some(dtu)=&r.dtu {
         s.add_content(html!{
@@ -943,14 +947,19 @@ fn build_corrected_repertoire_section(title:&str,r:&CorrectedRepertoireResult)->
     s.add_content(html!{
         p { "Samples: " (r.files_used) ", matched depth: " (r.matched_depth) ", rarefaction repeats: " (r.rarefaction_reps) "." }
         p { "Ambiguous V/D/J calls: " (r.ambiguous_policy.display_name()) }
+        h3 { "How to read this analysis" }
+        p { "Matched-depth richness and Shannon diversity compare repertoires at the same read depth. Morisita-Horn emphasizes abundance-weighted clonotype similarity, whereas Jaccard uses clonotype presence/absence. PCoA visualizes those distances and PERMANOVA tests whether the two groups differ globally." }
+        p { "The dendrogram is an unsupervised average-linkage clustering of Morisita-Horn distance. CLR/Aitchison analyses address V/D/J/V-J or isotype compositions as relative compositions rather than independent percentages." }
         @for w in &r.warnings { p { em { "Warning: " (w) } } }
     });
     s.add_content(adjusted_table("Adjusted matched-depth / repertoire metrics",&r.metric_tests,100));
     if let Some(ord)=&r.morisita_horn { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    if let Some(tree)=&r.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
     if let Some(ord)=&r.jaccard { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
     for comp in &r.compositions {
         s.add_content(html!{h3{(comp.family) " — CLR/Aitchison"} p{"Retained features: "(comp.retained_features)}});
         if let Some(ord)=&comp.ordination { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+        if let Some(tree)=&comp.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
         s.add_content(adjusted_table(&format!("{} adjusted CLR tests",comp.family),&comp.tests,80));
     }
     s
@@ -958,15 +967,17 @@ fn build_corrected_repertoire_section(title:&str,r:&CorrectedRepertoireResult)->
 
 fn build_corrected_isotype_section(r:&CorrectedIsotypeResult)->ReportSection {
     let mut s=ReportSection::new("BCR isotype");
-    s.add_content(html!{p{"Files/samples: "(r.files_used) ". " @if r.determined_only {"Undetermined was excluded and the determined isotypes were renormalized."} @else {"Undetermined was retained in the composition."}} @for w in &r.warnings{p{em{"Warning: "(w)}}}});
+    s.add_content(html!{p{"Files/samples: "(r.files_used) ". " @if r.determined_only {"Undetermined was excluded and the determined isotypes were renormalized."} @else {"Undetermined was retained in the composition."}} h3{"How to read this analysis"} p{"Isotype fractions are compositional: individual components are interpreted relative to the remaining isotype mixture. PCoA/PERMANOVA and hierarchical clustering summarize whole-composition differences, while the CLR tests identify components contributing to those differences."} @for w in &r.warnings{p{em{"Warning: "(w)}}}});
     if let Some(ord)=&r.ordination { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    if let Some(tree)=&r.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
     s.add_content(adjusted_table("Isotype CLR tests",&r.tests,50)); s
 }
 
 fn build_corrected_immune_section(r:&CorrectedImmuneResult)->ReportSection {
     let mut s=ReportSection::new("Immune infiltrate");
-    s.add_content(html!{p{"Samples: "(r.files_used) ". Original ssGSEA scores are used for adjusted tests; PCA uses cell-type z-scores."} @for w in &r.warnings{p{em{"Warning: "(w)}}}});
+    s.add_content(html!{p{"Samples: "(r.files_used) ". Original ssGSEA scores are used for adjusted tests; PCA and clustering use cell-type z-scores."} h3{"How to read this analysis"} p{"Each immune-cell signature is compared across groups on its original ssGSEA scale after adjustment. ssGSEA values are enrichment scores rather than literal cell percentages. PCA and hierarchical clustering use standardized cell-type scores to summarize coordinated immune-profile structure."} @for w in &r.warnings{p{em{"Warning: "(w)}}}});
     if let Some(ord)=&r.pca { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    if let Some(tree)=&r.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
     s.add_content(adjusted_table("Adjusted immune-cell tests",&r.tests,80)); s
 }
 
@@ -976,12 +987,15 @@ fn build_corrected_pathway_section(r:&CorrectedPathwayResult)->ReportSection {
         p { "GMT: " code { (r.gmt_path.to_string_lossy()) } }
         p { "Tested-gene universe: " (r.universe_size) "; foreground: " (r.foreground_size) "; foreground definition: BH q ≤ " (fmt(r.q_threshold)) " and |adjusted log2FC| ≥ " (fmt(r.effect_threshold)) "." }
         p { "Over-representation uses the one-sided hypergeometric upper tail and BH correction across retained gene sets. Gene sets with " (r.min_set_size) "–" (r.max_set_size) " measured genes are tested." }
+        h3 { "How to read this analysis" }
+        p { "Odds ratio > 1 indicates that a pathway contains more foreground genes than expected from the measured-gene universe. BH q-values control the false-discovery rate across the retained pathways. Closely related gene sets can share many genes, so clusters of significant pathways are often best interpreted as a broader biological theme." }
+        p { "Plot hover labels show a compact subset of overlap genes to remain readable; the complete overlap list is preserved in the table and exported result files." }
     });
     let rows=r.tests.iter().filter(|x|x.q_value.is_finite()&&x.q_value>0.0).take(120).collect::<Vec<_>>();
     if !rows.is_empty(){
         let x=rows.iter().map(|x|x.odds_ratio.max(1e-12).ln()).collect();
         let y=rows.iter().map(|x|-x.q_value.max(1e-300).log10()).collect();
-        let h=rows.iter().map(|x|format!("<b>{}</b><br>Overlap: {}/{}<br>Odds ratio: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Genes: {}",escape_hover_text(&x.pathway),x.overlap,x.measured_set_size,x.odds_ratio,x.p_value,x.q_value,escape_hover_text(&x.overlap_genes))).collect();
+        let h=rows.iter().map(|x|format!("<b>{}</b><br>Overlap: {}/{}<br>Odds ratio: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Overlap genes: {}",escape_hover_text(&x.pathway),x.overlap,x.measured_set_size,x.odds_ratio,x.p_value,x.q_value,compact_hover_gene_list(&x.overlap_genes,6,110))).collect();
         if let Some(p)=labeled_scatter_plot(vec![("Pathways".to_string(),x,y,h)],"Pathway over-representation","ln odds ratio","-log10(BH q)"){s.add_plot(p);}
     }
     s.add_content(pathway_table(r,150));
@@ -1015,10 +1029,152 @@ fn corrected_ordination_plot(ord:&OrdinationResult)->Option<Plot>{
     labeled_scatter_plot(traces,&title,&ord.x_label,&ord.y_label)
 }
 
+fn corrected_dendrogram_plot(tree:&DendrogramResult)->Option<Plot>{
+    if tree.leaves.is_empty() || tree.segments.is_empty(){return None;}
+    let mut plot=Plot::new();
+    let mut xs:Vec<Option<f64>>=Vec::with_capacity(tree.segments.len()*3);
+    let mut ys:Vec<Option<f64>>=Vec::with_capacity(tree.segments.len()*3);
+    for seg in &tree.segments{
+        xs.push(Some(seg.x1));ys.push(Some(seg.y1));
+        xs.push(Some(seg.x2));ys.push(Some(seg.y2));
+        xs.push(None);ys.push(None);
+    }
+    plot.add_trace(Scatter::new(xs,ys).mode(Mode::Lines).name("Average-linkage tree").hover_info(HoverInfo::Skip));
+    for group in ["Control","Case"]{
+        let leaves=tree.leaves.iter().filter(|l|l.group==group).collect::<Vec<_>>();
+        if leaves.is_empty(){continue;}
+        let x=vec![0.0;leaves.len()];
+        let y=leaves.iter().map(|l|l.position).collect::<Vec<_>>();
+        let h=leaves.iter().map(|l|format!("<b>{}</b><br>Group: {}<br>Subject: {}<br>Cluster order: {}",escape_hover_text(&l.sample_id),l.group,escape_hover_text(&l.subject),l.position as usize+1)).collect::<Vec<_>>();
+        plot.add_trace(Scatter::new(x,y).mode(Mode::Markers).name(group).hover_text_array(h).hover_template("%{hovertext}<extra>%{fullData.name}</extra>"));
+    }
+    plot.set_layout(Layout::new().title(Title::with_text(&tree.name)).x_axis(Axis::new().title(Title::with_text(&tree.distance_label))).y_axis(Axis::new().title(Title::with_text("Cluster leaf order"))));
+    Some(plot)
+}
+
+fn compact_hover_gene_list(value:&str,max_items:usize,max_chars:usize)->String{
+    let items=value.split(',').map(str::trim).filter(|x|!x.is_empty()).collect::<Vec<_>>();
+    if items.is_empty(){return "none".to_string();}
+    let mut shown=Vec::new();let mut chars=0usize;
+    for item in items.iter().take(max_items){
+        let extra=if shown.is_empty(){item.len()}else{item.len()+2};
+        if !shown.is_empty() && chars+extra>max_chars{break;}
+        shown.push(*item);chars+=extra;
+    }
+    let remaining=items.len().saturating_sub(shown.len());
+    let display=if remaining>0{format!("{} … (+{} more)",shown.join(", "),remaining)}else{shown.join(", ")};
+    escape_hover_text(&display)
+}
+
 fn dtu_gene_table(tests:&[DtuGeneResult],limit:usize)->Markup {
     html!{h4{"Gene-level DTU screen ("(tests.len())" rows; showing up to "(limit.min(tests.len()))")"} div class="table-container"{table{thead{tr{th{"NCBI Gene ID"}th{"Transcripts"}th{"Simes p"}th{"BH q"}th{"Max |CLR effect|"}}}tbody{@for r in tests.iter().take(limit){tr{td{(r.gene_id)}td{(r.n_transcripts)}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.max_abs_clr_effect))}}}}}}}
 }
 
 fn adjusted_table(title:&str,tests:&[AdjustedFeatureResult],limit:usize)->Markup{
     html!{h3{(title)" ("(tests.len())" rows; showing up to "(limit.min(tests.len()))")"} div class="table-container"{table{thead{tr{th{"Feature"}th{"ID/family"}th{"β group"}th{"SE"}th{"p"}th{"BH q"}th{"Subject effect"}th{"Subject BH q"}th{"n"}th{"subjects"}th{"Case mean"}th{"Control mean"}}} tbody{@for r in tests.iter().take(limit){tr{td{(r.feature)}td{(r.secondary_id)}td{(fmt(r.beta_group))}td{(fmt(r.robust_se))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.subject_effect))}td{(fmt_sci(r.subject_q_value))}td{(r.n_samples)}td{(r.n_subjects)}td{(fmt(r.mean_case))}td{(fmt(r.mean_control))}}}}}}}
+}
+
+pub fn generate_focused_candidate_html_report(path:&Path, summary:&FocusedCandidateSummary)->Result<()> {
+    let title=format!("4C focused candidate signals — {} vs {}",summary.case_label,summary.control_label);
+    let mut report=Report::new("4C Cohort Explorer",env!("CARGO_PKG_VERSION"),None,&title);
+
+    let mut overview=ReportSection::new("Overview");
+    overview.add_content(html!{
+        h2{"Focused candidate-signal summary"}
+        p{strong{"Comparison: "}(summary.case_label)" vs "(summary.control_label)}
+        p{strong{"Focused metadata: "}code{(summary.metadata_path.to_string_lossy())}}
+        p{strong{"Samples: "}(summary.n_case)" case / "(summary.n_control)" control"}
+        p{strong{"Purpose: "}"Prioritize a small number of preliminary genes, pathways, and other molecular signals for follow-up. These are candidate signals, not validated biomarkers."}
+        p{"Corrected/standard statistics are the primary evidence. If an exploratory expression screen was also run, it is used only to show whether the direction of change agrees across two analysis views of the same samples; it is not independent replication."}
+        p{"The focused sample list is expected to contain one sample per individual. This removes the repeated-sampling issue from the direct comparison, although related family members can still introduce dependence that should be addressed in later validation."}
+    });
+    report.add_section(overview);
+
+    let mut genes=ReportSection::new("Candidate genes");
+    genes.add_content(html!{
+        p{"Genes are ranked primarily by corrected BH q-value, then nominal p-value and absolute adjusted log2 fold change. The shortlist requires |adjusted log2FC| ≥ "(fmt(summary.settings.min_gene_abs_log2fc))". Pathway support counts how many q≤0.10 enriched pathways contain the gene."}
+        (focused_gene_table(&summary.genes))
+    });
+    if let Some(plot)=focused_gene_plot(&summary.genes){genes.add_plot(plot);}
+    report.add_section(genes);
+
+    if !summary.pathways.is_empty(){
+        let mut pathways=ReportSection::new("Candidate pathways");
+        pathways.add_content(html!{
+            p{"Pathways are ranked by BH q-value and enrichment strength. Odds ratio >1 indicates over-representation among the corrected gene foreground. Related pathways often share genes, so multiple significant sets can reflect one broader biological theme."}
+            (focused_pathway_table(&summary.pathways))
+        });
+        if let Some(plot)=focused_pathway_plot(&summary.pathways){pathways.add_plot(plot);}
+        report.add_section(pathways);
+    }
+
+    if !summary.other.is_empty(){
+        let mut other=ReportSection::new("Other candidate signals");
+        other.add_content(html!{
+            p{"This table collects the strongest corrected signals from BCR/TCR repertoire metrics and compositions, BCR isotypes, and immune-infiltrate scores. Effects are on each model's analysis scale and should be interpreted within the named modality/family rather than compared numerically across modalities."}
+            (focused_other_table(&summary.other))
+        });
+        report.add_section(other);
+    }
+
+    if !summary.transcripts.is_empty(){
+        let mut transcripts=ReportSection::new("Candidate transcripts");
+        transcripts.add_content(html!{
+            p{"Transcript-level abundance signals are shown separately from gene-level candidates. They can motivate isoform follow-up but should not be interpreted as differential transcript usage unless supported by the dedicated DTU analysis."}
+            (focused_gene_table(&summary.transcripts))
+        });
+        report.add_section(transcripts);
+    }
+
+    let mut interpretation=ReportSection::new("Interpretation & next steps");
+    interpretation.add_content(html!{
+        h3{"How to present these results"}
+        ul{
+            li{"Use terms such as “preliminary signal”, “candidate gene”, or “candidate pathway”, rather than “validated biomarker”."}
+            li{"Prioritize signals that combine a low corrected q-value, a meaningful effect size, plausible pathway context, and consistent direction across analysis views."}
+            li{"A non-significant but highly ranked result can still be useful for follow-up in a small focused cohort, but its uncertainty should be stated explicitly."}
+            li{"The strongest next validation is replication in an independent cohort or a pre-specified follow-up analysis, not another re-ranking of the same samples."}
+        }
+        h3{"Analysis notes"}
+        @for note in &summary.notes{p{(note)}}
+    });
+    report.add_section(interpretation);
+
+    let output=path.to_string_lossy().to_string();
+    report.save_to_file(&output).with_context(||format!("Could not write focused HTML report to {}",path.display()))?;
+    make_report_self_contained(path)?;
+    Ok(())
+}
+
+fn focused_gene_plot(rows:&[FocusedGeneCandidate])->Option<Plot>{
+    let rows=rows.iter().filter(|r|r.q_value.is_finite()&&r.q_value>0.0&&r.adjusted_log2fc.is_finite()).collect::<Vec<_>>();
+    if rows.is_empty(){return None;}
+    let x=rows.iter().map(|r|r.adjusted_log2fc).collect();
+    let y=rows.iter().map(|r|-r.q_value.max(1e-300).log10()).collect();
+    let hover=rows.iter().map(|r|{
+        let concordance=match r.direction_concordant{Some(true)=>"same direction",Some(false)=>"opposite direction",None=>"not available"};
+        format!("<b>{}</b><br>Gene ID: {}<br>Adjusted log2FC: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Case/control mean: {:.3} / {:.3}<br>Exploratory concordance: {}<br>Pathway support: {}<br>{}",escape_hover_text(&r.gene),escape_hover_text(&r.gene_id),r.adjusted_log2fc,r.p_value,r.q_value,r.case_mean,r.control_mean,concordance,r.pathway_support_count,escape_hover_text(&r.evidence))
+    }).collect();
+    labeled_scatter_plot(vec![("Candidate genes".to_string(),x,y,hover)],"Focused candidate genes","Adjusted log2 fold change","-log10(BH q)")
+}
+
+fn focused_pathway_plot(rows:&[FocusedPathwayCandidate])->Option<Plot>{
+    let rows=rows.iter().filter(|r|r.q_value.is_finite()&&r.q_value>0.0&&r.odds_ratio.is_finite()&&r.odds_ratio>0.0).collect::<Vec<_>>();
+    if rows.is_empty(){return None;}
+    let x=rows.iter().map(|r|r.odds_ratio.ln()).collect();
+    let y=rows.iter().map(|r|-r.q_value.max(1e-300).log10()).collect();
+    let hover=rows.iter().map(|r|format!("<b>{}</b><br>Overlap: {}/{}<br>Odds ratio: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Overlap genes: {}",escape_hover_text(&r.pathway),r.overlap,r.measured_set_size,r.odds_ratio,r.p_value,r.q_value,compact_hover_gene_list(&r.overlap_genes,6,110))).collect();
+    labeled_scatter_plot(vec![("Candidate pathways".to_string(),x,y,hover)],"Focused candidate pathways","ln odds ratio","-log10(BH q)")
+}
+
+fn focused_gene_table(rows:&[FocusedGeneCandidate])->Markup{
+    html!{div class="table-container"{table{thead{tr{th{"Rank"}th{"Gene / transcript"}th{"ID"}th{"Adjusted log2FC"}th{"p"}th{"BH q"}th{"Case mean"}th{"Control mean"}th{"Exploratory direction"}th{"Pathway support"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.gene)}td{(r.gene_id)}td{(fmt(r.adjusted_log2fc))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.case_mean))}td{(fmt(r.control_mean))}td{(match r.direction_concordant{Some(true)=>"same",Some(false)=>"opposite",None=>"—"})}td{(r.pathway_support_count) @if !r.pathway_support.is_empty(){br; small{(r.pathway_support)}}}td{(r.evidence)}}}}}}}
+}
+
+fn focused_pathway_table(rows:&[FocusedPathwayCandidate])->Markup{
+    html!{div class="table-container"{table{thead{tr{th{"Rank"}th{"Pathway"}th{"Description"}th{"Odds ratio"}th{"Overlap"}th{"Set size"}th{"p"}th{"BH q"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.pathway)}td{(r.description)}td{(fmt(r.odds_ratio))}td{(r.overlap)}td{(r.measured_set_size)}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(r.evidence)}}}}}}}
+}
+
+fn focused_other_table(rows:&[FocusedOtherCandidate])->Markup{
+    html!{div class="table-container"{table{thead{tr{th{"Rank"}th{"Modality"}th{"Family"}th{"Feature"}th{"ID"}th{"Effect"}th{"p"}th{"BH q"}th{"Case mean"}th{"Control mean"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.modality)}td{(r.family)}td{(r.feature)}td{(r.secondary_id)}td{(fmt(r.effect))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.case_mean))}td{(fmt(r.control_mean))}td{(r.evidence)}}}}}}}
 }

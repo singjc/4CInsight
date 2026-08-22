@@ -1,8 +1,19 @@
 # 4C Cohort Explorer
 
-A native Rust application for memory-bounded RNA expression merging plus metadata-driven multi-modal cohort exploration across gene/transcript expression, BCR, BCR isotypes, TCR alpha/beta, and immune-infiltrate data.
+A Rust application for memory-bounded RNA expression merging plus metadata-driven multi-modal cohort exploration across gene/transcript expression, BCR, BCR isotypes, TCR alpha/beta, and immune-infiltrate data.
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
+
+## What v0.8 adds
+
+- Adds **average-linkage hierarchical clustering / dendrograms** throughout the corrected layer: gene/transcript expression on top-variable normalized features, BCR/TCR on Morisita-Horn distance, V/D/J/V-J and isotype compositions on Aitchison distance, and immune infiltrate on standardized cell-type profiles.
+- Adds a **PCA / PCoA / dendrogram color selector** in the app. Samples can be colored by analysis group, subject/patient, or any loaded metadata column to inspect phenotype, batch, sex, timepoint, or other structure.
+- Fixes **pathway point hover in the desktop app** and keeps pathway hover concise in HTML reports. Full overlap-gene lists remain available in the result tables and exports.
+- Improves **scatter responsiveness** by drawing ordinations/pathways as grouped point series and resolving hover labels from the nearest point. Large exploratory gene/transcript scatter plots use a bounded representative display while preserving every result in tables/exports.
+- Expands **table viewports** and enables horizontal as well as vertical scrolling for large cohort/QC tables so wide or long results do not collapse to only a few visible rows.
+- Adds modality-specific **analysis guides and interpretation notes** to both the corrected desktop results and corrected HTML reports. These explain what is being tested, what the unsupervised plots mean, and important cautions such as compositionality, sequencing depth, ssGSEA scale, and pathway redundancy.
+- Removes implementation-oriented wording from the user-facing analysis descriptions so reports focus on methods, assumptions, interpretation, and limitations.
+- Corrected result exports now include **dendrogram leaf-order TSVs** for reproducible sample-clustering review.
 
 ## What v0.6 adds
 
@@ -282,7 +293,7 @@ For cohort analysis in particular, useful next modules are:
 - Repertoire similarity heatmaps / dendrograms and richer public/longitudinal clonotype browsers on top of the corrected Morisita-Horn/Jaccard and matched-depth analyses.
 - Immune-infiltrate cell-type heatmaps and cross-modal correlation with expression/repertoire features.
 - Ranked pathway enrichment in addition to the corrected GMT-based ORA now available.
-- A more specialized DTU model (e.g. Dirichlet-multinomial/DEXSeq-like) if we decide to reproduce that machinery natively; the current corrected layer provides a transparent CLR/Simes DTU screen.
+- A more specialized DTU model (e.g. Dirichlet-multinomial/DEXSeq-like); the current corrected layer provides a CLR/Simes DTU screen with its assumptions stated explicitly.
 - Gene-expression PCA/correlation heatmaps and selected top-gene heatmaps.
 - Cross-modal candidate-biomarker summaries that combine gene, immune-infiltrate, BCR, BCR-isotype, and later TCR evidence.
 - A later rigorous-analysis mode for longitudinal/repeated measures and covariate adjustment.
@@ -303,14 +314,15 @@ General merge/QC additions:
 
 ## v0.7 corrected / standard analysis layer
 
-Cohort Analysis now has two explicit layers:
+Cohort Analysis has three complementary layers:
 
 - **Exploratory discovery** preserves the original all-sample first-pass screens requested for hypothesis generation.
-- **Corrected / standard** adds subject-aware and covariate-adjusted analyses implemented directly in Rust with no new numerical/statistical runtime dependencies.
+- **Corrected / standard** adds subject-aware and covariate-adjusted analyses, matched-depth repertoire analysis, and multivariate/compositional views.
+- **Focused candidate signals** accepts a separately filtered metadata list for a direct one-sample-per-individual comparison and turns the corrected results into a concise preliminary candidate shortlist.
 
 The corrected layer supports:
 
-- Gene raw counts and transcript Total Reads: positive-count median-ratio normalization, a native NB2 GLM with log(size-factor) offset and per-feature unshrunk dispersion, metadata covariates, subject-clustered sandwich SEs for repeated sampling, BH FDR, subject-collapsed log2-normalized sensitivity tests, and PCA of variable normalized features. Transcript data additionally gets a within-gene CLR/Simes/BH differential-transcript-usage screen (explicitly labeled as a dependency-light alternative, not DEXSeq/DRIMSeq).
+- Gene raw counts and transcript Total Reads: positive-count median-ratio normalization, a negative-binomial log-link count model with log(size-factor) offset and per-feature dispersion, metadata covariates, subject-clustered sandwich SEs for repeated sampling, BH FDR, subject-collapsed log2-normalized sensitivity tests, PCA of variable normalized features, and hierarchical clustering. Transcript data additionally gets a within-gene CLR/Simes/BH differential-transcript-usage screen that is clearly distinguished from specialized DEXSeq/DRIMSeq models.
 - BCR/TCR: exact without-replacement matched-depth rarefaction, adjusted repertoire metrics, subject-aware private/longitudinal/public clonotype fractions, Morisita-Horn and Jaccard PCoA, subject-blocked permutation PERMANOVA, and CLR/Aitchison composition analysis.
 - TCR: AA-convergence read fraction when nucleotide clonal sequences are available.
 - BCR/TCR V/D/J/V-J ambiguity handling: exclude tied calls (default), split weight, legacy first-hit, or gene-family collapse.
@@ -319,4 +331,12 @@ The corrected layer supports:
 - Optional pathway analysis from corrected gene-count results using a user-supplied/versioned GMT: hypergeometric over-representation testing against the tested-gene universe, odds ratios, explicit overlap genes, and BH FDR.
 - Corrected TSV exports and a separate self-contained corrected HTML report.
 
-The native expression model deliberately does **not** claim to reproduce DESeq2, edgeR, or limma-voom empirical-Bayes/dispersion machinery. It provides a transparent dependency-light NB model with unshrunk feature-wise dispersion while keeping the exploratory layer available for comparison.
+The expression count model does **not** claim to reproduce DESeq2, edgeR, or limma-voom empirical-Bayes/dispersion machinery. Feature-wise dispersion is not shrunk across genes, so final publication-level RNA-seq findings can still be cross-checked with a specialized RNA-seq package while the exploratory layer remains available for comparison.
+
+## Focused candidate-signal workflow (v0.9)
+
+The Cohort Analysis screen now includes a **Focused candidate signals** layer for collaborator-curated direct comparisons. Load a filtered metadata file (for example one sample per individual with unwanted cohorts removed), choose the same comparison preset, and run the selected modalities.
+
+The focused workflow uses the corrected/standard results as the primary evidence and can optionally run TPM-based exploratory gene/transcript screens only to flag direction concordance. It then produces concise ranked tables for candidate genes, candidate pathways, candidate transcripts, and other corrected BCR/TCR/isotype/immune signals. The ranking is intentionally transparent: corrected BH q-value first, then nominal p-value and effect magnitude. Signals are labeled as FDR-supported, promising, suggestive, or ranked exploratory signals rather than being called validated biomarkers.
+
+The focused results can be exported as CSV files and as a standalone HTML report intended for a less technical audience. The report emphasizes a short candidate list, interpretation, and limitations, and explicitly recommends independent replication before biomarker claims.
