@@ -9,6 +9,7 @@ use cfs_expression_merger::cohort::{
 };
 use cfs_expression_merger::report::{generate_cohort_html_report, generate_corrected_html_report, generate_focused_candidate_html_report, CohortReportInputs, CorrectedReportInputs};
 use cfs_expression_merger::focused::{build_focused_candidate_summary, write_focused_candidate_tables, FocusedCandidateSettings, FocusedCandidateSummary};
+use cfs_expression_merger::gmt_catalog::{download_public_gmt, cache_path as gmt_cache_path, GMT_CATALOG, MSIGDB_LICENSE_URL, MSIGDB_RELEASE_URL, MSIGDB_VERSION};
 use cfs_expression_merger::corrected::{
     run_corrected_expression, run_corrected_immune, run_corrected_isotype, run_corrected_repertoire, run_pathway_ora,
     write_adjusted_tests, write_corrected_repertoire_samples, write_dendrogram, write_dtu_gene_tests, write_ordination, write_pathway_ora, AdjustedFeatureResult,
@@ -225,6 +226,10 @@ enum CohortWorkerMessage {
     FocusedDone(FocusedAnalysisBundle),
 }
 
+enum GmtDownloadMessage {
+    Done(Result<PathBuf, String>),
+}
+
 struct MergeApp {
     active_tab: AppTab,
     files: Vec<PathBuf>,
@@ -286,6 +291,9 @@ struct MergeApp {
     corrected_rarefaction_cap: usize,
     corrected_run_pathway: bool,
     corrected_gmt_path: Option<PathBuf>,
+    gmt_catalog_index: usize,
+    gmt_download_status: String,
+    gmt_download_receiver: Option<Receiver<GmtDownloadMessage>>,
     corrected_pathway_q: f64,
     corrected_pathway_effect: f64,
     corrected_ordination_color_by: String,
@@ -449,6 +457,9 @@ impl MergeApp {
             corrected_rarefaction_cap: 50_000,
             corrected_run_pathway: false,
             corrected_gmt_path: None,
+            gmt_catalog_index: 0,
+            gmt_download_status: "Select a public collection to download, or choose a custom GMT file.".to_string(),
+            gmt_download_receiver: None,
             corrected_pathway_q: 0.05,
             corrected_pathway_effect: 0.5,
             corrected_ordination_color_by: "Analysis group".to_string(),
@@ -478,6 +489,7 @@ impl eframe::App for MergeApp {
         self.poll_merge_worker();
         self.poll_analysis_worker();
         self.poll_cohort_worker();
+        self.poll_gmt_download_worker();
         let ctx = ui.ctx().clone();
         self.handle_dropped_paths(&ctx);
 
@@ -496,13 +508,116 @@ impl eframe::App for MergeApp {
                 });
         });
 
-        if self.running || self.analysis_running || self.cohort_running {
+        if self.running || self.analysis_running || self.cohort_running || self.gmt_download_receiver.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }
 
 impl MergeApp {
+    fn start_gmt_download(&mut self) {
+        if self.gmt_download_receiver.is_some() { return; }
+        let Some(root)=self.cohort_root.clone() else {
+            self.gmt_download_status="Choose the cohort project root before downloading a pathway collection.".to_string();
+            return;
+        };
+        let entry=GMT_CATALOG[self.gmt_catalog_index.min(GMT_CATALOG.len().saturating_sub(1))];
+        let destination=gmt_cache_path(&root,entry);
+        if destination.exists() {
+            self.corrected_gmt_path=Some(destination.clone());
+            self.gmt_download_status=format!("Using cached {} collection: {}",entry.short_label,destination.display());
+            return;
+        }
+        let (tx,rx)=mpsc::channel();
+        self.gmt_download_receiver=Some(rx);
+        self.gmt_download_status=format!("Downloading {} (MSigDB v{})…",entry.short_label,MSIGDB_VERSION);
+        std::thread::spawn(move||{
+            let result=download_public_gmt(&root,entry).map_err(|e|format!("{e:#}"));
+            let _=tx.send(GmtDownloadMessage::Done(result));
+        });
+    }
+
+    fn poll_gmt_download_worker(&mut self) {
+        let mut done=None;
+        if let Some(rx)=&self.gmt_download_receiver {
+            while let Ok(message)=rx.try_recv() {
+                match message { GmtDownloadMessage::Done(result)=>done=Some(result) }
+            }
+        }
+        if let Some(result)=done {
+            self.gmt_download_receiver=None;
+            match result {
+                Ok(path)=>{
+                    self.corrected_gmt_path=Some(path.clone());
+                    self.gmt_download_status=format!("Downloaded and selected: {}",path.display());
+                }
+                Err(err)=>{
+                    self.gmt_download_status=format!("Automatic download failed: {err}");
+                }
+            }
+        }
+    }
+
+    fn render_gmt_source_selector(&mut self, ui:&mut egui::Ui, id:&str) {
+        let old_index=self.gmt_catalog_index;
+        let selected=GMT_CATALOG[self.gmt_catalog_index.min(GMT_CATALOG.len().saturating_sub(1))];
+        ui.horizontal_wrapped(|ui|{
+            ui.label("Public gene-set library:");
+            egui::ComboBox::from_id_salt(format!("gmt_catalog_{id}"))
+                .selected_text(selected.label)
+                .width(390.0)
+                .show_ui(ui,|ui|{
+                    for (idx,entry) in GMT_CATALOG.iter().enumerate(){
+                        ui.selectable_value(&mut self.gmt_catalog_index,idx,entry.label)
+                            .on_hover_text(format!("{}\n\n{}",entry.description,entry.relevance));
+                    }
+                });
+            let downloading=self.gmt_download_receiver.is_some();
+            if ui.add_enabled(!downloading,egui::Button::new(if downloading{"Downloading…"}else{"Download & use"}))
+                .on_hover_text("Download the selected public MSigDB gene-symbol GMT into this project's gene_sets cache and select it for pathway analysis. Cached copies are reused.")
+                .clicked(){self.start_gmt_download();}
+            if ui.button("Choose custom GMT…")
+                .on_hover_text("Use any local GMT file instead of the built-in public collection catalog.")
+                .clicked(){
+                    let mut dialog=FileDialog::new().add_filter("GMT gene sets", &["gmt"]);
+                    if let Some(root)=&self.cohort_root {dialog=dialog.set_directory(root);}
+                    if let Some(path)=dialog.pick_file(){
+                        self.corrected_gmt_path=Some(path.clone());
+                        self.gmt_download_status=format!("Using custom GMT: {}",path.display());
+                    }
+                }
+            if ui.button("Clear")
+                .on_hover_text("Clear the currently selected pathway collection without deleting any cached files.")
+                .clicked(){self.corrected_gmt_path=None;self.gmt_download_status="No GMT selected.".to_string();}
+        });
+        if self.gmt_catalog_index!=old_index {
+            let entry=GMT_CATALOG[self.gmt_catalog_index];
+            if let Some(root)=&self.cohort_root {
+                let cached=gmt_cache_path(root,entry);
+                if cached.exists(){
+                    self.corrected_gmt_path=Some(cached.clone());
+                    self.gmt_download_status=format!("Selected cached {} collection: {}",entry.short_label,cached.display());
+                } else {
+                    self.gmt_download_status=format!("{} selected. Click Download & use to retrieve it.",entry.short_label);
+                }
+            }
+        }
+        let entry=GMT_CATALOG[self.gmt_catalog_index.min(GMT_CATALOG.len().saturating_sub(1))];
+        ui.label(egui::RichText::new(format!("{} {}",entry.description,entry.relevance)).small().weak());
+        ui.horizontal_wrapped(|ui|{
+            ui.label(egui::RichText::new(format!("Source: MSigDB v{} • human gene symbols • downloaded from the public Broad release directory.",MSIGDB_VERSION)).small().weak());
+            ui.hyperlink_to("Browse release",MSIGDB_RELEASE_URL);
+            ui.hyperlink_to("License / attribution",MSIGDB_LICENSE_URL);
+        });
+        ui.label(egui::RichText::new("MSigDB v2026.1.Hs is distributed under CC BY 4.0, with collection-specific terms where applicable. Keep the collection name/version in exported reports for provenance.").small().weak());
+        if let Some(path)=&self.corrected_gmt_path {
+            ui.horizontal_wrapped(|ui|{ui.label("Selected GMT:");ui.monospace(path.display().to_string());});
+        }
+        if !self.gmt_download_status.is_empty(){
+            ui.label(egui::RichText::new(&self.gmt_download_status).small().weak());
+        }
+    }
+
     fn render_header(&mut self, ui: &mut egui::Ui) {
         let accent = ui.visuals().selection.bg_fill;
         egui::Frame::new()
@@ -2293,16 +2408,11 @@ impl MergeApp {
             ui.checkbox(&mut this.focused_run_exploratory_concordance, "Run exploratory expression direction check")
                 .on_hover_text("Runs TPM-based exploratory gene/transcript screens on the same focused samples. These results do not increase statistical evidence; they only flag whether the direction agrees with the corrected count analysis.");
 
-            ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut this.corrected_run_pathway, "Pathway ORA")
-                    .on_hover_text("Use the corrected focused gene results with a GMT collection to prioritize pathway-level signals.");
-                if ui.button("Choose GMT…").on_hover_text("Select the GMT collection used for focused pathway prioritization.").clicked() {
-                    let mut dialog=FileDialog::new().add_filter("GMT gene sets", &["gmt"]);
-                    if let Some(root)=&this.cohort_root { dialog=dialog.set_directory(root); }
-                    if let Some(path)=dialog.pick_file(){ this.corrected_gmt_path=Some(path); }
-                }
-                if let Some(path)=&this.corrected_gmt_path { ui.monospace(path.file_name().and_then(|x|x.to_str()).unwrap_or("GMT")); }
-            });
+            ui.checkbox(&mut this.corrected_run_pathway, "Pathway ORA")
+                .on_hover_text("Use the corrected focused gene results with a selected public or custom GMT collection to prioritize pathway-level signals.");
+            if this.corrected_run_pathway {
+                this.render_gmt_source_selector(ui,"focused");
+            }
 
             egui::CollapsingHeader::new("Candidate shortlist settings")
                 .default_open(true)
@@ -2499,17 +2609,10 @@ impl MergeApp {
                 ui.checkbox(&mut this.cohort_run_immune, "Immune infiltrate")
                     .on_hover_text("Adjusted linear models of each ssGSEA score plus PCA of cell-type z-scores; ssGSEA values are treated as enrichment scores, not cell percentages.");
             });
-            ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut this.corrected_run_pathway, "Pathway ORA")
-                    .on_hover_text("Optional gene-set over-representation analysis using a user-supplied versioned GMT collection. It uses the corrected gene-count results, the tested-gene universe, a hypergeometric upper-tail test, odds ratio, and BH FDR.");
-                if ui.button("Choose GMT…").on_hover_text("Select a GMT pathway/gene-set collection. Keeping the GMT external makes the pathway database/version explicit and reproducible.").clicked() {
-                    let mut dialog=FileDialog::new().add_filter("GMT gene sets", &["gmt"]);
-                    if let Some(root)=&this.cohort_root {dialog=dialog.set_directory(root);}
-                    if let Some(path)=dialog.pick_file(){this.corrected_gmt_path=Some(path);}
-                }
-                if let Some(path)=&this.corrected_gmt_path {ui.monospace(path.file_name().and_then(|x|x.to_str()).unwrap_or("GMT"));}
-            });
+            ui.checkbox(&mut this.corrected_run_pathway, "Pathway ORA")
+                .on_hover_text("Optional gene-set over-representation analysis using either a built-in public collection or a custom GMT. It uses the corrected gene-count results, the tested-gene universe, a hypergeometric upper-tail test, odds ratio, and BH FDR.");
             if this.corrected_run_pathway {
+                this.render_gmt_source_selector(ui,"corrected");
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Pathway foreground:");
                     ui.label("BH q ≤"); ui.add(egui::DragValue::new(&mut this.corrected_pathway_q).range(0.001..=0.25).speed(0.005));

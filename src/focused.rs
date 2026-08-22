@@ -202,7 +202,7 @@ fn shortlist_pathways(pathway: Option<&CorrectedPathwayResult>, top_n: usize) ->
     let mut rows = pathway
         .tests
         .iter()
-        .filter(|r| r.p_value.is_finite() && r.odds_ratio.is_finite() && r.odds_ratio > 1.0)
+        .filter(|r| r.overlap > 0 && r.p_value.is_finite() && r.p_value < 1.0 && r.odds_ratio.is_finite() && r.odds_ratio > 1.0)
         .collect::<Vec<_>>();
     rows.sort_by(|a, b| {
         finite_or_inf(a.q_value)
@@ -428,4 +428,18 @@ mod tests {
         assert_eq!(out[1].gene,"B");
         assert_eq!(out[2].gene,"C");
     }
+    #[test]
+    fn focused_pathways_require_real_foreground_overlap(){
+        let pathway=CorrectedPathwayResult{
+            gmt_path:PathBuf::new(),universe_size:1000,foreground_size:25,q_threshold:0.05,effect_threshold:0.5,min_set_size:10,max_set_size:500,
+            tests:vec![
+                crate::corrected::PathwayOraResult{pathway:"ZERO".to_string(),description:String::new(),measured_set_size:20,overlap:0,odds_ratio:99.0,p_value:1.0,q_value:1.0,overlap_genes:String::new()},
+                crate::corrected::PathwayOraResult{pathway:"REAL".to_string(),description:String::new(),measured_set_size:20,overlap:3,odds_ratio:2.0,p_value:0.01,q_value:0.04,overlap_genes:"A,B,C".to_string()},
+            ],
+        };
+        let out=shortlist_pathways(Some(&pathway),10);
+        assert_eq!(out.len(),1);
+        assert_eq!(out[0].pathway,"REAL");
+    }
+
 }

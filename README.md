@@ -4,6 +4,15 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.10 adds
+
+- Adds a **built-in public GMT collection browser** to both the Corrected / standard and Focused candidate workflows. The catalog includes Reactome, Hallmark, GO Biological Process, ImmuneSigDB, HPO, Cell Type Signatures (C8), and WikiPathways from the human MSigDB v2026.1.Hs release.
+- Adds **Download & use** for public collections. Downloads are cached under `<project>/gene_sets/msigdb_v2026.1.Hs/` and reused on later runs; selecting an already cached collection activates it immediately.
+- Keeps **Choose custom GMT…** as a first-class option for local/private/custom pathway libraries.
+- Shows collection-specific guidance in the GUI (for example, Reactome as the recommended mechanistic collection, Hallmark as the compact overview, and HPO as phenotype relevance rather than a literal pathway ontology), together with source/version/license links for provenance.
+- Uses the operating system HTTPS client (`curl`, then `wget`, with PowerShell fallback on Windows) so the feature adds **no new Cargo dependency**. Downloaded files are validated as GMT before they are selected.
+- Tightens the focused pathway shortlist so gene sets with **zero foreground overlap or p=1** cannot be promoted as candidate pathways.
+
 ## What v0.8 adds
 
 - Adds **average-linkage hierarchical clustering / dendrograms** throughout the corrected layer: gene/transcript expression on top-variable normalized features, BCR/TCR on Morisita-Horn distance, V/D/J/V-J and isotype compositions on Aitchison distance, and immune infiltrate on standardized cell-type profiles.
