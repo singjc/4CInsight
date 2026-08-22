@@ -4,6 +4,14 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.11 adds
+
+- Adds a dedicated **Docs** workspace to the desktop app, plus a **Docs** analysis layer inside Cohort Analysis. These pages explain the exploratory, corrected / standard, and focused workflows in plain language.
+- Adds a lay-friendly **analysis guide** covering what each workflow is for, how to read the main plots, what conclusions are reasonable, and what important limitations to keep in mind.
+- Adds simple **workflow schematics** in the app so non-technical collaborators can understand how the pieces fit together: merge & map → exploratory → corrected / standard → focused candidates.
+- Adds a new repository document at **`docs/analysis_guide.md`** so the same explanation can be shared outside the app or quoted in methods/supporting notes.
+- Adds **key literature links** for false-discovery-rate control, count-based expression modelling, compositional analysis, PERMANOVA, pathway analysis, Reactome, Hallmark/MSigDB, and ssGSEA.
+
 ## What v0.10 adds
 
 - Adds a **built-in public GMT collection browser** to both the Corrected / standard and Focused candidate workflows. The catalog includes Reactome, Hallmark, GO Biological Process, ImmuneSigDB, HPO, Cell Type Signatures (C8), and WikiPathways from the human MSigDB v2026.1.Hs release.

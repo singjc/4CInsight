@@ -51,6 +51,7 @@ enum AppTab {
     Merge,
     Explore,
     Cohort,
+    Docs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +95,7 @@ enum CohortAnalysisMode {
     Exploratory,
     Corrected,
     Focused,
+    Docs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -505,6 +507,7 @@ impl eframe::App for MergeApp {
                     AppTab::Merge => self.render_merge_tab(ui),
                     AppTab::Explore => self.render_explore_tab(ui),
                     AppTab::Cohort => self.render_cohort_tab(ui),
+                    AppTab::Docs => self.render_docs_tab(ui),
                 });
         });
 
@@ -662,6 +665,10 @@ impl MergeApp {
                                 "Cohort project",
                                 self.cohort_scan.as_ref().map(|scan| scan.unique_samples()).unwrap_or(0),
                             ),
+                            AppTab::Docs => (
+                                "Analysis guide",
+                                self.cohort_scan.as_ref().map(|scan| scan.unique_samples()).unwrap_or(0),
+                            ),
                         };
                         ui.label(egui::RichText::new(kind_text).strong());
                         ui.separator();
@@ -690,11 +697,21 @@ impl MergeApp {
             }
             let cohort = ui
                 .selectable_label(self.active_tab == AppTab::Cohort, "Cohort Analysis")
-                .on_hover_text("Scan a complete cohort dataset, join sample metadata, audit unmatched samples, and run exploratory gene/BCR/BCR-isotype comparisons.");
+                .on_hover_text("Scan a complete cohort dataset, join sample metadata, audit unmatched samples, and run exploratory, corrected, and focused analyses across the available modalities.");
             if cohort.clicked() {
                 self.active_tab = AppTab::Cohort;
             }
+            let docs = ui
+                .selectable_label(self.active_tab == AppTab::Docs, "Docs")
+                .on_hover_text("Plain-language documentation of the workflows, methods, interpretation, and key references.");
+            if docs.clicked() {
+                self.active_tab = AppTab::Docs;
+            }
         });
+    }
+
+    fn render_docs_tab(&mut self, ui: &mut egui::Ui) {
+        self.render_analysis_docs_card(ui);
     }
 
     fn render_merge_tab(&mut self, ui: &mut egui::Ui) {
@@ -2022,6 +2039,12 @@ impl MergeApp {
                 "Focused candidate signals",
             )
             .on_hover_text("Use a collaborator-supplied filtered metadata list, run the corrected analysis on that direct one-sample-per-individual comparison, and produce a short ranked set of preliminary genes, pathways, and other candidate signals. Optional exploratory expression screening is used only as a direction-concordance check.");
+            ui.selectable_value(
+                &mut self.cohort_analysis_mode,
+                CohortAnalysisMode::Docs,
+                "Docs",
+            )
+            .on_hover_text("Shows a lay-friendly description of the exploratory, corrected / standard, and focused workflows, together with interpretation notes and references.");
         });
         ui.add_space(8.0);
         match self.cohort_analysis_mode {
@@ -2045,6 +2068,9 @@ impl MergeApp {
                     ui.add_space(10.0);
                     self.render_focused_results_card(ui);
                 }
+            }
+            CohortAnalysisMode::Docs => {
+                self.render_analysis_docs_card(ui);
             }
         }
     }
@@ -4431,6 +4457,226 @@ impl MergeApp {
             self.cohort_running=false;self.cohort_progress=1.0;self.cohort_receiver=None;
             self.cohort_status=format!("Focused candidate workflow complete: {gene_count} gene candidate(s), {pathway_count} pathway candidate(s).");
         }
+    }
+
+    fn render_analysis_docs_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "Analysis guide", |this, ui| {
+            ui.label(
+                egui::RichText::new(
+                    "This guide explains, in plain language, what each analysis layer does, when to use it, how to interpret the results, and where to read more. It is meant for collaborators and readers who want the main ideas without needing to read the code or methods section first.",
+                )
+                .weak(),
+            );
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Tip:").strong());
+                ui.label("Use the top-level Docs tab for a standalone guide, or open the Docs layer inside Cohort Analysis to keep the guide beside your results.");
+            });
+            ui.add_space(10.0);
+            this.render_docs_workflow_overview(ui);
+            ui.add_space(10.0);
+            this.docs_section_overview(ui);
+            ui.add_space(8.0);
+            this.docs_section_exploratory(ui);
+            ui.add_space(8.0);
+            this.docs_section_corrected(ui);
+            ui.add_space(8.0);
+            this.docs_section_focused(ui);
+            ui.add_space(8.0);
+            this.docs_section_plots(ui);
+            ui.add_space(8.0);
+            this.docs_section_references(ui);
+        });
+    }
+
+    fn render_docs_workflow_overview(&self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Workflow schematic").strong());
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            self.docs_flow_step(
+                ui,
+                "1. Merge & map",
+                "Bring together the expression and repertoire files, then match them to the sample metadata.",
+            );
+            ui.label(egui::RichText::new("→").size(20.0));
+            self.docs_flow_step(
+                ui,
+                "2. Exploratory",
+                "Fast first-pass screens that look for noticeable differences and help you spot patterns worth checking more carefully.",
+            );
+            ui.label(egui::RichText::new("→").size(20.0));
+            self.docs_flow_step(
+                ui,
+                "3. Corrected / standard",
+                "More rigorous analyses that account for repeated samples, covariates, compositional data, sequencing depth, and multi-sample structure.",
+            );
+            ui.label(egui::RichText::new("→").size(20.0));
+            self.docs_flow_step(
+                ui,
+                "4. Focused candidates",
+                "A simplified one-sample-per-person comparison that produces a short, presentation-friendly list of preliminary candidate genes, pathways, and other signals.",
+            );
+        });
+    }
+
+    fn docs_flow_step(&self, ui: &mut egui::Ui, title: &str, body: &str) {
+        egui::Frame::group(ui.style())
+            .fill(ui.visuals().extreme_bg_color)
+            .inner_margin(10)
+            .corner_radius(6)
+            .show(ui, |ui| {
+                ui.set_min_width(170.0);
+                ui.label(egui::RichText::new(title).strong());
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(body).small().weak());
+            });
+    }
+
+    fn docs_section_overview(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("What the three analysis layers are for")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("The app has three main analysis layers because they answer slightly different questions.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Exploratory discovery").strong());
+                ui.label("Use this when you want a quick first look. It is useful for asking: 'Do any genes, repertoire summaries, or immune features look different between the groups?' It aims to be easy to run and easy to interpret, but it is deliberately conservative about claiming too much.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Corrected / standard").strong());
+                ui.label("Use this when you want the more routine, study-style analysis. It keeps the same biological questions, but applies methods that are better aligned with repeated sampling, compositional repertoire data, sequencing-depth differences, and optional covariates.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Focused candidate signals").strong());
+                ui.label("Use this when the audience wants a shorter and more direct story. A filtered metadata table is used to define a simpler comparison, and the app builds a shortlist of preliminary candidates that are easier to present and discuss.");
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Important principle").strong());
+                ui.label("None of these layers claim that a feature is a validated biomarker on their own. The goal is to identify signals that are descriptive, statistically supported, biologically interpretable, and worth further validation.");
+            });
+    }
+
+    fn docs_section_exploratory(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Exploratory discovery: what it does and how to read it")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("Plain-language summary: exploratory analysis is the app's screening step. It asks whether the case and control groups look different enough to deserve follow-up.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("What is analysed").strong());
+                ui.label("• Gene expression and transcript expression: abundance measurements such as TPM or Total Reads/Raw Counts, depending on the selected workflow.");
+                ui.label("• BCR / TCR / immune features: descriptive summaries such as diversity, clonality, top-clone fraction, repertoire composition, and inferred immune-cell signatures.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Core idea").strong());
+                ui.label("Each feature is compared between the groups independently. The main outputs are an effect estimate, a p value, and a Benjamini–Hochberg false-discovery-rate adjusted q value. For expression, the app also shows a volcano-style view and a detection-shift plot.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Why this layer is useful").strong());
+                ui.label("• Fast first pass across many features.");
+                ui.label("• Helps spot large differences, obvious outliers, and broad biological themes.");
+                ui.label("• Useful when discussing data quality and whether a planned comparison is promising before moving into more formal modelling.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("What to be careful about").strong());
+                ui.label("• Repeated samples from the same person are still treated as separate observations in this layer.");
+                ui.label("• Covariates such as age, sex, batch, or family structure are not adjusted here.");
+                ui.label("• For repertoire data, sequencing depth and compositional constraints can strongly influence naive summaries.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("What a reader should conclude").strong());
+                ui.label("Treat exploratory hits as 'signals to investigate next', not as final proof.");
+            });
+    }
+
+    fn docs_section_corrected(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Corrected / standard: what it adds")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("Plain-language summary: this is the more rigorous analysis layer. It uses methods that are closer to what readers expect in a standard cohort study.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Gene and transcript expression").strong());
+                ui.label("Counts are analysed using a count-aware framework. The app normalizes samples, fits a feature-by-feature model, reports the estimated case-versus-control effect, and adjusts for multiple testing. When a subject column is supplied, it also produces a subject-collapsed sensitivity result so repeated samples do not dominate the conclusion.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("BCR and TCR repertoires").strong());
+                ui.label("The corrected layer distinguishes between two different kinds of repertoire questions.");
+                ui.label("• Diversity / richness questions are handled with matched-depth rarefaction so samples are compared more fairly.");
+                ui.label("• Composition questions (for example isotype, V-gene, J-gene, or V–J usage) are handled with compositional analyses based on CLR/Aitchison ideas, plus multivariate tests such as PERMANOVA and ordination/clustering plots.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Immune-infiltrate signatures").strong());
+                ui.label("Immune cell-type scores are analysed as a standardized feature matrix, so you can inspect group shifts, ordination, clustering, and ranked effects in a way that is consistent with the other modalities.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Pathway analysis").strong());
+                ui.label("After the corrected expression analysis, the app can test whether certain pathways are over-represented among the differentially expressed genes. This helps move from long gene lists to broader biological themes.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Why this layer is usually the main results layer").strong());
+                ui.label("• Better aligned with repeated sampling and optional covariate adjustment.");
+                ui.label("• Uses depth-aware or composition-aware methods where those issues matter.");
+                ui.label("• Adds ordination and dendrogram views that are useful for seeing whether samples cluster by biology or by some other factor.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("What a reader should conclude").strong());
+                ui.label("This is the strongest statistical layer in the app, but it still supports discovery rather than final clinical validation. Results should be interpreted together with sample size, cohort design, and external biological plausibility.");
+            });
+    }
+
+    fn docs_section_focused(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Focused candidate signals: how it is different")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("Plain-language summary: the focused workflow is designed for a simpler, presentation-friendly comparison. It is especially useful when a collaborator supplies a filtered metadata table with one sample per person or another deliberately narrowed subset.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("How the focused workflow works").strong());
+                ui.label("1. Start from the filtered metadata table that defines the direct comparison.");
+                ui.label("2. Re-run the corrected analysis on that simpler cohort definition.");
+                ui.label("3. Summarize a short list of candidate genes, pathways, transcripts, and other signals.");
+                ui.label("4. Optionally check whether the simpler shortlist is directionally consistent with the broader exploratory screen.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Why it helps").strong());
+                ui.label("• Easier for a general audience to follow.");
+                ui.label("• Reduces the visual and statistical complexity that comes from many longitudinal samples or mixed subcohorts.");
+                ui.label("• Highlights the best-supported preliminary candidates for discussion and follow-up.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("What a reader should conclude").strong());
+                ui.label("Focused candidates are not 'approved biomarkers'. They are a pragmatic shortlist of promising preliminary signals that look both biologically interesting and statistically supported in the simplified comparison.");
+            });
+    }
+
+    fn docs_section_plots(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("How to read the main plots")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Volcano / effect-significance scatter").strong());
+                ui.label("Points farther to the left or right have larger negative or positive effects. Points higher on the plot have smaller q values. Features in the upper corners are often the most interesting because they combine effect size with statistical support.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Detection-shift plot").strong());
+                ui.label("This shows whether a gene tends to be detected in a larger fraction of one group than the other. It can help identify group-specific or sparsely detected signals that a mean-based plot alone may hide.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("PCA / PCoA").strong());
+                ui.label("These are low-dimensional maps of the samples. Samples plotted close together are more similar by the chosen distance or feature space. Coloring by status, subject, or another metadata column can reveal whether the main structure follows biology, time, family, or some possible confounder.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Dendrogram").strong());
+                ui.label("A dendrogram shows hierarchical clustering. It answers a similar question to PCA/PCoA but as a tree rather than a map. If cases tend to branch together and controls tend to branch together, that supports group separation; if branches instead follow subject or batch, that may indicate another source of structure.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Pathway ORA plot").strong());
+                ui.label("Each point is a pathway. Stronger enrichment appears higher on the plot and, depending on the chart, may also have a larger odds ratio or overlap. Closely related pathways often share many genes, so several significant pathways can reflect one broader biological program.");
+            });
+    }
+
+    fn docs_section_references(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Key references and further reading")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label("These references are included so collaborators can connect each analysis layer to the broader literature.");
+                ui.add_space(6.0);
+                self.docs_reference(ui, "False discovery rate", "Benjamini Y, Hochberg Y. Controlling the false discovery rate: a practical and powerful approach to multiple testing. Journal of the Royal Statistical Society Series B (1995).", "https://doi.org/10.1111/j.2517-6161.1995.tb02031.x");
+                self.docs_reference(ui, "Count-based RNA-seq modelling", "Love MI, Huber W, Anders S. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biology (2014).", "https://doi.org/10.1186/s13059-014-0550-8");
+                self.docs_reference(ui, "Alternative count-based RNA-seq framework", "Robinson MD, McCarthy DJ, Smyth GK. edgeR: a Bioconductor package for differential expression analysis of digital gene expression data. Bioinformatics (2010).", "https://doi.org/10.1093/bioinformatics/btp616");
+                self.docs_reference(ui, "Compositional data analysis", "Aitchison J. The statistical analysis of compositional data. Journal of the Royal Statistical Society Series B (1982).", "https://doi.org/10.1111/j.2517-6161.1982.tb01195.x");
+                self.docs_reference(ui, "PERMANOVA", "Anderson MJ. A new method for non-parametric multivariate analysis of variance. Austral Ecology (2001).", "https://onlinelibrary.wiley.com/doi/10.1111/j.1442-9993.2001.01070.pp.x");
+                self.docs_reference(ui, "Gene set enrichment / pathways", "Subramanian A et al. Gene set enrichment analysis: a knowledge-based approach for interpreting genome-wide expression profiles. PNAS (2005).", "https://doi.org/10.1073/pnas.0506580102");
+                self.docs_reference(ui, "MSigDB Hallmark collection", "Liberzon A et al. The Molecular Signatures Database Hallmark Gene Set Collection. Cell Systems (2015).", "https://doi.org/10.1016/j.cels.2015.12.004");
+                self.docs_reference(ui, "Reactome", "Jassal B et al. The Reactome pathway knowledgebase. Nucleic Acids Research (2020).", "https://doi.org/10.1093/nar/gkz1031");
+                self.docs_reference(ui, "ssGSEA", "Barbie DA et al. Systematic RNA interference reveals that oncogenic KRAS-driven cancers require TBK1. Nature (2009).", "https://doi.org/10.1038/nature08460");
+            });
+    }
+
+    fn docs_reference(&self, ui: &mut egui::Ui, label: &str, citation: &str, url: &str) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(format!("{label}: ")).strong());
+            ui.label(citation);
+            ui.hyperlink_to("Link", url);
+        });
     }
 
     fn card(
