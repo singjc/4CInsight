@@ -4492,31 +4492,43 @@ impl MergeApp {
     fn render_docs_workflow_overview(&self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Workflow schematic").strong());
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            self.docs_flow_step(
-                ui,
+        ui.label(
+            egui::RichText::new(
+                "The workflow is shown as a simple vertical sequence so it stays readable on smaller windows and avoids clipped text.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+        let steps = [
+            (
                 "1. Merge & map",
                 "Bring together the expression and repertoire files, then match them to the sample metadata.",
-            );
-            ui.label(egui::RichText::new("→").size(20.0));
-            self.docs_flow_step(
-                ui,
+            ),
+            (
                 "2. Exploratory",
                 "Fast first-pass screens that look for noticeable differences and help you spot patterns worth checking more carefully.",
-            );
-            ui.label(egui::RichText::new("→").size(20.0));
-            self.docs_flow_step(
-                ui,
+            ),
+            (
                 "3. Corrected / standard",
                 "More rigorous analyses that account for repeated samples, covariates, compositional data, sequencing depth, and multi-sample structure.",
-            );
-            ui.label(egui::RichText::new("→").size(20.0));
-            self.docs_flow_step(
-                ui,
+            ),
+            (
                 "4. Focused candidates",
                 "A simplified one-sample-per-person comparison that produces a short, presentation-friendly list of preliminary candidate genes, pathways, and other signals.",
-            );
-        });
+            ),
+        ];
+        for (idx, (title, body)) in steps.iter().enumerate() {
+            self.docs_flow_step(ui, title, body);
+            if idx + 1 != steps.len() {
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    ui.label(egui::RichText::new("↓").size(18.0));
+                    ui.label(egui::RichText::new("Next step").small().weak());
+                });
+                ui.add_space(4.0);
+            }
+        }
     }
 
     fn docs_flow_step(&self, ui: &mut egui::Ui, title: &str, body: &str) {
@@ -4525,10 +4537,12 @@ impl MergeApp {
             .inner_margin(10)
             .corner_radius(6)
             .show(ui, |ui| {
-                ui.set_min_width(170.0);
-                ui.label(egui::RichText::new(title).strong());
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(body).small().weak());
+                ui.set_width(ui.available_width());
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(title).strong());
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(body).small().weak());
+                });
             });
     }
 
