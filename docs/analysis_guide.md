@@ -20,6 +20,8 @@ Focused candidate signals
 
 This step brings together the different files (gene expression, transcript expression, BCR, BCR isotype, TCR alpha, TCR beta, immune infiltrate) and matches them to the metadata table.
 
+The **Merge & Export** workspace can also use an optional metadata file to decide which gene/transcript workbooks should be included in a merged matrix. Choose the metadata sample-ID column, then enable metadata filtering to use the metadata rows themselves as the inclusion list. If needed, add a second value filter such as phenotype/cohort/status and check only the values to retain. Filtering is off by default, and unmatched/ambiguous files are shown rather than causing the merge to fail.
+
 Why it matters:
 
 - it checks whether the sample IDs line up,
@@ -110,6 +112,50 @@ Interpretation:
 
 - these are **not validated biomarkers**,
 - they are **preliminary candidates** that are easier to present and prioritize for follow-up.
+
+
+## PBMC / confounding diagnostics
+
+Use this layer when a striking disease-associated gene program may actually reflect sample source, cell composition, processing history, family/batch concentration, or only a few extreme samples.
+
+The diagnostics intentionally **do not replace the disease model**. They ask whether the leading signals are stable when the data are examined from a QC/provenance perspective.
+
+### Sample-level checks
+
+- whole-transcriptome PCA using top-variable `log2(TPM+1)` genes,
+- robust PC1/PC2 outlier scores,
+- library raw-count and gene-detection summaries,
+- immune-signature PCA when immune-infiltrate files are available,
+- a descriptive myeloid-high / lymphoid-low signature imbalance score,
+- metadata context such as subject, batch/collection period, and family.
+
+An outlier flag is a **reason to investigate**, not proof that a sample should be removed. Known tissue/source information and longitudinal consistency should carry more weight than an automated PCA threshold alone.
+
+### Suspect-vs-ordinary screen
+
+You can paste a list of unusual samples and compare them directly against the remaining ordinary expression samples **without using disease status**. If the same genes dominate both the disease analysis and this source-effect screen, the disease result may be strongly entangled with source/composition.
+
+### Candidate robustness checks
+
+For leading corrected genes the app reports:
+
+- raw-count and TPM medians in each group,
+- percent detected,
+- fraction of samples with counts at least 5 and 10,
+- how much of the group signal comes from the top two samples,
+- leave-one-sample-out effect range,
+- optional leave-batch/family/year-out effect range,
+- a regularized-effect diagnostic,
+- the original corrected effect,
+- the QC-restricted effect after sensitivity-only exclusions,
+- the immune-PC-adjusted effect,
+- and the effect in the suspect-vs-ordinary screen.
+
+A strong preliminary disease candidate should ideally retain direction and a similar effect across these views rather than disappearing after one problematic sample, one historical batch, or the major immune-composition axes are accounted for.
+
+### Longitudinal QC
+
+When a subject/patient column is available, repeated samples from the same person are summarized by their maximum whole-transcriptome PCA distance. A historical sample that sits far away from later samples from the same individual can be an especially useful clue about collection/processing or major composition differences.
 
 ## How to read the main plots
 

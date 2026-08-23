@@ -4,6 +4,29 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.13 adds
+
+- Adds an optional **sample-metadata filter directly to Merge & Export**. Load XLSX/CSV/TSV/TXT metadata without changing the selected workbook set.
+- Lets the user choose the **metadata sample-ID column** used to match expression-report filenames, using the same punctuation-insensitive sample-ID normalization used by Cohort Analysis.
+- The metadata table can act directly as an **inclusion list**: enable metadata filtering and every uniquely matched workbook represented by a metadata row is eligible. This is useful for collaborator-supplied pre-filtered metadata tables.
+- Adds an optional **value-filter column** (for example `Phenotype`, `Healthy`, `HYP`, cohort, batch, or any other metadata field) plus checkboxes when an additional subset is desired.
+- Filtering is **off by default**. When enabled, only uniquely matched workbooks represented in the metadata are merged; if an optional value-filter column is selected, the workbook must also have a checked value. Unmatched and ambiguous files are reported and excluded rather than aborting the merge.
+- Expands the sample preview with **metadata match status, filter value, and include/exclude status**, and updates the output-column preview and merge button to reflect the filtered sample set.
+- Metadata-only rows never manufacture missing expression files: the filter only selects among workbooks that actually exist.
+
+## What v0.12 adds
+
+- Adds a dedicated **PBMC / confounding diagnostics** analysis layer for investigating sample-source, composition, historical batch/family, low-count, and single-sample-driven expression signals before promoting them as disease-associated candidates.
+- Adds **whole-transcriptome QC PCA** from top-variable `log2(TPM+1)` genes across the merged gene matrix, with robust sample-outlier scores and metadata-aware coloring.
+- Adds per-sample **library/detection summaries** (total raw counts, detected genes, genes with counts ≥5/≥10) and integrates immune-infiltrate signatures when available.
+- Adds an immune-signature PCA plus a descriptive **myeloid-high / lymphoid-low signature imbalance** score. These remain enrichment-score diagnostics rather than cell-percentage estimates.
+- Adds user-editable lists for **known non-PBMC/wrong-source samples** and **suspect/unusual samples**. Suspect samples can be compared directly against ordinary samples without using disease status, making it easier to identify a source/processing expression program.
+- Adds a **QC-restricted corrected gene sensitivity model** after sensitivity-only exclusions, plus an **immune-PC-adjusted corrected model** using the first two immune-signature PCs as covariates when enough immune profiles are available.
+- Adds candidate-gene robustness diagnostics: raw-count and TPM medians, detection rates, count ≥5/≥10 fractions, top-two-sample contribution, leave-one-sample-out effect range, optional leave-batch/family/year-out effect range, a simple regularized-effect diagnostic, and comparison with the QC-restricted, immune-adjusted, and suspect-vs-ordinary effects.
+- Adds a per-candidate **sample-level TPM plot** that highlights suspect or sensitivity-excluded samples, with raw-count/TPM/subject/batch/family information on hover.
+- Adds **within-subject longitudinal QC** using maximum pairwise whole-transcriptome PCA distance across repeated samples.
+- Adds one-click export of the sample QC audit, candidate robustness table, per-sample candidate values, longitudinal QC, suspect-vs-ordinary expression screen, and corrected sensitivity-model tables.
+
 ## What v0.11 adds
 
 - Adds a dedicated **Docs** workspace to the desktop app, plus a **Docs** analysis layer inside Cohort Analysis. These pages explain the exploratory, corrected / standard, and focused workflows in plain language.
