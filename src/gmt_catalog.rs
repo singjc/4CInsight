@@ -1,10 +1,11 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const MSIGDB_VERSION: &str = "2026.1.Hs";
-pub const MSIGDB_RELEASE_URL: &str = "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2026.1.Hs/";
+pub const MSIGDB_RELEASE_URL: &str =
+    "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2026.1.Hs/";
 pub const MSIGDB_LICENSE_URL: &str = "https://www.gsea-msigdb.org/gsea/msigdb_license_terms.jsp";
 
 #[derive(Debug, Clone, Copy)]
@@ -82,18 +83,29 @@ pub fn cache_path(project_root: &Path, entry: GmtCatalogEntry) -> PathBuf {
 }
 
 pub fn validate_gmt(path: &Path) -> Result<()> {
-    let meta = fs::metadata(path).with_context(|| format!("Cannot inspect downloaded GMT: {}", path.display()))?;
+    let meta = fs::metadata(path)
+        .with_context(|| format!("Cannot inspect downloaded GMT: {}", path.display()))?;
     if meta.len() < 32 {
-        bail!("Downloaded file is unexpectedly small ({} bytes).", meta.len());
+        bail!(
+            "Downloaded file is unexpectedly small ({} bytes).",
+            meta.len()
+        );
     }
-    let text = fs::read_to_string(path).with_context(|| format!("Cannot read downloaded GMT: {}", path.display()))?;
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("Cannot read downloaded GMT: {}", path.display()))?;
     let mut valid_lines = 0usize;
     for line in text.lines().take(20) {
-        if line.trim().is_empty() { continue; }
-        if line.split('\t').count() >= 3 { valid_lines += 1; }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.split('\t').count() >= 3 {
+            valid_lines += 1;
+        }
     }
     if valid_lines == 0 {
-        bail!("Downloaded file does not look like a GMT gene-set file. The server may have returned an HTML/error page instead.");
+        bail!(
+            "Downloaded file does not look like a GMT gene-set file. The server may have returned an HTML/error page instead."
+        );
     }
     Ok(())
 }
@@ -113,7 +125,9 @@ fn try_curl(url: &str, output: &Path) -> Result<()> {
         .arg(url)
         .status()
         .context("Could not start curl")?;
-    if !status.success() { bail!("curl exited with status {status}"); }
+    if !status.success() {
+        bail!("curl exited with status {status}");
+    }
     Ok(())
 }
 
@@ -125,7 +139,9 @@ fn try_wget(url: &str, output: &Path) -> Result<()> {
         .arg(url)
         .status()
         .context("Could not start wget")?;
-    if !status.success() { bail!("wget exited with status {status}"); }
+    if !status.success() {
+        bail!("wget exited with status {status}");
+    }
     Ok(())
 }
 
@@ -133,12 +149,20 @@ fn try_wget(url: &str, output: &Path) -> Result<()> {
 fn try_powershell(url: &str, output: &Path) -> Result<()> {
     let script = "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri $args[0] -OutFile $args[1]";
     let status = Command::new("powershell.exe")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
         .arg(url)
         .arg(output)
         .status()
         .context("Could not start PowerShell")?;
-    if !status.success() { bail!("PowerShell download exited with status {status}"); }
+    if !status.success() {
+        bail!("PowerShell download exited with status {status}");
+    }
     Ok(())
 }
 
@@ -148,8 +172,11 @@ pub fn download_public_gmt(project_root: &Path, entry: GmtCatalogEntry) -> Resul
         validate_gmt(&destination)?;
         return Ok(destination);
     }
-    let parent = destination.parent().ok_or_else(|| anyhow!("Invalid GMT cache path"))?;
-    fs::create_dir_all(parent).with_context(|| format!("Cannot create GMT cache directory: {}", parent.display()))?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("Invalid GMT cache path"))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Cannot create GMT cache directory: {}", parent.display()))?;
     let partial = destination.with_extension("gmt.part");
     let _ = fs::remove_file(&partial);
     let url = entry.url();
@@ -157,17 +184,27 @@ pub fn download_public_gmt(project_root: &Path, entry: GmtCatalogEntry) -> Resul
     let mut errors = Vec::new();
     let downloaded = match try_curl(&url, &partial) {
         Ok(()) => true,
-        Err(e) => { errors.push(format!("curl: {e}")); false }
+        Err(e) => {
+            errors.push(format!("curl: {e}"));
+            false
+        }
     } || match try_wget(&url, &partial) {
         Ok(()) => true,
-        Err(e) => { errors.push(format!("wget: {e}")); false }
+        Err(e) => {
+            errors.push(format!("wget: {e}"));
+            false
+        }
     };
 
     #[cfg(target_os = "windows")]
-    let downloaded = downloaded || match try_powershell(&url, &partial) {
-        Ok(()) => true,
-        Err(e) => { errors.push(format!("PowerShell: {e}")); false }
-    };
+    let downloaded = downloaded
+        || match try_powershell(&url, &partial) {
+            Ok(()) => true,
+            Err(e) => {
+                errors.push(format!("PowerShell: {e}"));
+                false
+            }
+        };
 
     if !downloaded {
         let _ = fs::remove_file(&partial);
@@ -181,8 +218,12 @@ pub fn download_public_gmt(project_root: &Path, entry: GmtCatalogEntry) -> Resul
         let _ = fs::remove_file(&partial);
         return Err(e).context("Downloaded GMT failed validation");
     }
-    fs::rename(&partial, &destination)
-        .with_context(|| format!("Cannot move downloaded GMT into cache: {}", destination.display()))?;
+    fs::rename(&partial, &destination).with_context(|| {
+        format!(
+            "Cannot move downloaded GMT into cache: {}",
+            destination.display()
+        )
+    })?;
     Ok(destination)
 }
 

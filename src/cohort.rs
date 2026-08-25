@@ -1,5 +1,5 @@
-use anyhow::{anyhow, bail, Context, Result};
-use calamine::{open_workbook, Data, Reader, Xlsx};
+use anyhow::{Context, Result, anyhow, bail};
+use calamine::{Data, Reader, Xlsx, open_workbook};
 use csv::ReaderBuilder;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -302,7 +302,9 @@ pub fn scan_project(root: &Path) -> Result<ProjectScan> {
                     modality,
                     sample_id,
                 });
-            } else if lower.contains("sample") && (lower.contains("submission") || lower.contains("metadata")) {
+            } else if lower.contains("sample")
+                && (lower.contains("submission") || lower.contains("metadata"))
+            {
                 metadata_candidates.push(path);
             }
             continue;
@@ -342,8 +344,14 @@ fn classify_workbook_name(name: &str) -> Option<(CohortModality, String)> {
     let canonical_name = strip_copy_suffix(name);
     let lower = canonical_name.to_ascii_lowercase();
     let suffixes = [
-        ("_tumor_rna_gene_expression_report.xlsx", CohortModality::GeneExpression),
-        ("_tumor_rna_transcript_expression_report.xlsx", CohortModality::TranscriptExpression),
+        (
+            "_tumor_rna_gene_expression_report.xlsx",
+            CohortModality::GeneExpression,
+        ),
+        (
+            "_tumor_rna_transcript_expression_report.xlsx",
+            CohortModality::TranscriptExpression,
+        ),
         ("_bcr_heavy_chain_report.xlsx", CohortModality::Bcr),
         ("_bcr_isotype_composition.xlsx", CohortModality::BcrIsotype),
         ("_tcr_alpha_clone_report.xlsx", CohortModality::TcrAlpha),
@@ -416,7 +424,9 @@ fn read_metadata_xlsx(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>)> {
         .worksheet_range(&sheet_name)
         .with_context(|| format!("Could not read worksheet '{sheet_name}'"))?;
     let mut iter = range.rows();
-    let header = iter.next().ok_or_else(|| anyhow!("Metadata worksheet is empty"))?;
+    let header = iter
+        .next()
+        .ok_or_else(|| anyhow!("Metadata worksheet is empty"))?;
     let columns: Vec<String> = header.iter().map(cell_text).collect();
     let rows = iter
         .map(|row| {
@@ -434,7 +444,11 @@ fn read_metadata_delimited(path: &Path, delimiter: u8) -> Result<(Vec<String>, V
         .delimiter(delimiter)
         .from_path(path)
         .with_context(|| format!("Could not open metadata table {}", path.display()))?;
-    let columns = reader.headers()?.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let columns = reader
+        .headers()?
+        .iter()
+        .map(|x| x.to_string())
+        .collect::<Vec<_>>();
     let mut rows = Vec::new();
     for record in reader.records() {
         let record = record?;
@@ -514,8 +528,14 @@ pub fn build_mapping(scan: &ProjectScan, metadata: &MetadataTable) -> CohortMapp
             .and_then(|row| row.get(id_col))
             .cloned()
             .unwrap_or_default();
-        let phenotype = metadata.value(row_idx, "Phenotype").unwrap_or_default().to_string();
-        let hyp = metadata.value(row_idx, "HYP").unwrap_or_default().to_string();
+        let phenotype = metadata
+            .value(row_idx, "Phenotype")
+            .unwrap_or_default()
+            .to_string();
+        let hyp = metadata
+            .value(row_idx, "HYP")
+            .unwrap_or_default()
+            .to_string();
         rows.push(SampleCoverageRow {
             sample_id,
             metadata_row: Some(row_idx),
@@ -537,13 +557,16 @@ pub fn build_mapping(scan: &ProjectScan, metadata: &MetadataTable) -> CohortMapp
     }
 }
 
-pub fn build_comparison(metadata: &MetadataTable, preset: ComparisonPreset) -> Result<CohortComparison> {
+pub fn build_comparison(
+    metadata: &MetadataTable,
+    preset: ComparisonPreset,
+) -> Result<CohortComparison> {
     let id_col = metadata
         .column_index(&metadata.id_column)
         .ok_or_else(|| anyhow!("Metadata ID column '{}' is missing", metadata.id_column))?;
-    let phenotype_col = metadata
-        .column_index("Phenotype")
-        .ok_or_else(|| anyhow!("Metadata must contain a Phenotype column for the built-in comparisons"))?;
+    let phenotype_col = metadata.column_index("Phenotype").ok_or_else(|| {
+        anyhow!("Metadata must contain a Phenotype column for the built-in comparisons")
+    })?;
     let hyp_col = metadata.column_index("HYP");
 
     let mut id_counts: HashMap<String, usize> = HashMap::new();
@@ -575,7 +598,9 @@ pub fn build_comparison(metadata: &MetadataTable, preset: ComparisonPreset) -> R
             .unwrap_or_default();
 
         let (is_case, is_control) = match preset {
-            ComparisonPreset::HypVsTrueHc => (is_yes(hyp), phenotype.eq_ignore_ascii_case("True_HC")),
+            ComparisonPreset::HypVsTrueHc => {
+                (is_yes(hyp), phenotype.eq_ignore_ascii_case("True_HC"))
+            }
             ComparisonPreset::HypMecfsVsMecfsOnly => (
                 phenotype.eq_ignore_ascii_case("HYP+ME/CFS"),
                 phenotype.eq_ignore_ascii_case("ME/CFS") && !is_yes(hyp),
@@ -682,16 +707,28 @@ where
             cliffs_delta: cliffs_delta(&case_log, &ctrl_log),
             p_value,
             q_value: f64::NAN,
-            detection_case: Some(case_raw.iter().filter(|x| **x > 0.0).count() as f64 / case_raw.len() as f64),
-            detection_control: Some(ctrl_raw.iter().filter(|x| **x > 0.0).count() as f64 / ctrl_raw.len() as f64),
+            detection_case: Some(
+                case_raw.iter().filter(|x| **x > 0.0).count() as f64 / case_raw.len() as f64,
+            ),
+            detection_control: Some(
+                ctrl_raw.iter().filter(|x| **x > 0.0).count() as f64 / ctrl_raw.len() as f64,
+            ),
         });
         if row_idx % 250 == 0 {
-            progress(row_idx + 1, total_rows.max(1), &format!("Testing {metric} expression"));
+            progress(
+                row_idx + 1,
+                total_rows.max(1),
+                &format!("Testing {metric} expression"),
+            );
         }
     }
     apply_bh(&mut tests);
     tests.sort_by(feature_result_order);
-    progress(total_rows.max(1), total_rows.max(1), "Gene comparison complete");
+    progress(
+        total_rows.max(1),
+        total_rows.max(1),
+        "Gene comparison complete",
+    );
     Ok(GeneComparisonResult {
         input: merged_tsv.to_path_buf(),
         metric: metric.to_string(),
@@ -722,7 +759,10 @@ pub fn run_bcr_comparison<F>(
 where
     F: FnMut(usize, usize, &str),
 {
-    let all_bcr_files: Vec<_> = files.iter().filter(|f| f.modality == CohortModality::Bcr).collect();
+    let all_bcr_files: Vec<_> = files
+        .iter()
+        .filter(|f| f.modality == CohortModality::Bcr)
+        .collect();
     if all_bcr_files.is_empty() {
         bail!("No BCR heavy-chain report files were detected");
     }
@@ -746,7 +786,8 @@ where
     let mut files_used = 0usize;
     let mut skipped_not_in_groups = 0usize;
     let mut summaries = Vec::new();
-    let mut feature_maps: HashMap<&'static str, Vec<(String, String, HashMap<String, f64>)>> = HashMap::new();
+    let mut feature_maps: HashMap<&'static str, Vec<(String, String, HashMap<String, f64>)>> =
+        HashMap::new();
     feature_maps.insert("isotype", Vec::new());
     feature_maps.insert("v", Vec::new());
     feature_maps.insert("d", Vec::new());
@@ -826,7 +867,10 @@ pub fn run_bcr_isotype_comparison<F>(
 where
     F: FnMut(usize, usize, &str),
 {
-    let all_iso_files: Vec<_> = files.iter().filter(|f| f.modality == CohortModality::BcrIsotype).collect();
+    let all_iso_files: Vec<_> = files
+        .iter()
+        .filter(|f| f.modality == CohortModality::BcrIsotype)
+        .collect();
     if all_iso_files.is_empty() {
         bail!("No BCR isotype-composition files were detected");
     }
@@ -861,7 +905,11 @@ where
             skipped_not_in_groups += 1;
             continue;
         };
-        progress(i + 1, total.max(1), &format!("BCR isotype: {}", file.sample_id));
+        progress(
+            i + 1,
+            total.max(1),
+            &format!("BCR isotype: {}", file.sample_id),
+        );
         let map = match parse_bcr_isotype_file(&file.path) {
             Ok(map) => map,
             Err(e) => {
@@ -1037,7 +1085,11 @@ where
             skipped_not_in_groups += 1;
             continue;
         };
-        progress(i + 1, total.max(1), &format!("Immune infiltrate: {}", file.sample_id));
+        progress(
+            i + 1,
+            total.max(1),
+            &format!("Immune infiltrate: {}", file.sample_id),
+        );
         let rows = match parse_immune_infiltrate_file(&file.path) {
             Ok(rows) => rows,
             Err(e) => {
@@ -1047,7 +1099,9 @@ where
         };
         let mut map = HashMap::new();
         for (cell_type, lineage, score) in rows {
-            lineage_by_feature.entry(cell_type.clone()).or_insert_with(|| lineage.clone());
+            lineage_by_feature
+                .entry(cell_type.clone())
+                .or_insert_with(|| lineage.clone());
             map.insert(cell_type.clone(), score);
             values.push(ImmuneSampleValue {
                 sample_id: file.sample_id.clone(),
@@ -1062,7 +1116,10 @@ where
     }
     let mut tests = compare_continuous_feature_maps(sample_maps, comparison);
     for test in &mut tests {
-        test.secondary_id = lineage_by_feature.get(&test.feature).cloned().unwrap_or_default();
+        test.secondary_id = lineage_by_feature
+            .get(&test.feature)
+            .cloned()
+            .unwrap_or_default();
     }
     Ok(ImmuneComparisonResult {
         files_used,
@@ -1106,7 +1163,9 @@ fn parse_tcr_file(path: &Path) -> Result<ParsedTcr> {
     let mut vj = HashMap::<String, f64>::new();
     for row in rows {
         let count = row.get(count_idx).and_then(cell_f64).unwrap_or(0.0);
-        if count <= 0.0 { continue; }
+        if count <= 0.0 {
+            continue;
+        }
         counts.push(count);
         total += count;
         top = top.max(count);
@@ -1117,23 +1176,49 @@ fn parse_tcr_file(path: &Path) -> Result<ParsedTcr> {
                 weighted_len_den += count;
             }
         }
-        let v_call = v_idx.and_then(|idx| row.get(idx)).map(cell_text).unwrap_or_default();
-        let j_call = j_idx.and_then(|idx| row.get(idx)).map(cell_text).unwrap_or_default();
-        let v_first = v_call.split(',').next().unwrap_or_default().trim().to_string();
-        let j_first = j_call.split(',').next().unwrap_or_default().trim().to_string();
-        if !v_first.is_empty() { *v.entry(v_first.clone()).or_insert(0.0) += count; }
-        if !j_first.is_empty() { *j.entry(j_first.clone()).or_insert(0.0) += count; }
+        let v_call = v_idx
+            .and_then(|idx| row.get(idx))
+            .map(cell_text)
+            .unwrap_or_default();
+        let j_call = j_idx
+            .and_then(|idx| row.get(idx))
+            .map(cell_text)
+            .unwrap_or_default();
+        let v_first = v_call
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let j_first = j_call
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !v_first.is_empty() {
+            *v.entry(v_first.clone()).or_insert(0.0) += count;
+        }
+        if !j_first.is_empty() {
+            *j.entry(j_first.clone()).or_insert(0.0) += count;
+        }
         if !v_first.is_empty() && !j_first.is_empty() {
             *vj.entry(format!("{v_first} | {j_first}")).or_insert(0.0) += count;
         }
     }
-    if total <= 0.0 { bail!("No positive clone counts"); }
+    if total <= 0.0 {
+        bail!("No positive clone counts");
+    }
     normalize_feature_map(&mut v, total);
     normalize_feature_map(&mut j, total);
     normalize_feature_map(&mut vj, total);
     let shannon = shannon_entropy(&counts);
     let simpson = simpson_diversity(&counts);
-    let clonality = if counts.len() > 1 { 1.0 - shannon / (counts.len() as f64).ln() } else { f64::NAN };
+    let clonality = if counts.len() > 1 {
+        1.0 - shannon / (counts.len() as f64).ln()
+    } else {
+        f64::NAN
+    };
     Ok(ParsedTcr {
         total_clone_count: total,
         unique_clones: counts.len(),
@@ -1142,7 +1227,11 @@ fn parse_tcr_file(path: &Path) -> Result<ParsedTcr> {
         clonality,
         effective_n: shannon.exp(),
         top_clone_fraction: top / total,
-        weighted_mean_cdr3_aa_length: if weighted_len_den > 0.0 { weighted_len_sum / weighted_len_den } else { f64::NAN },
+        weighted_mean_cdr3_aa_length: if weighted_len_den > 0.0 {
+            weighted_len_sum / weighted_len_den
+        } else {
+            f64::NAN
+        },
         v_fraction: v,
         j_fraction: j,
         vj_fraction: vj,
@@ -1160,11 +1249,18 @@ fn parse_immune_infiltrate_file(path: &Path) -> Result<Vec<(String, String, f64)
     let mut out = Vec::new();
     for row in rows {
         let cell_type = row.get(type_idx).map(cell_text).unwrap_or_default();
-        let lineage = lineage_idx.and_then(|idx| row.get(idx)).map(cell_text).unwrap_or_default();
+        let lineage = lineage_idx
+            .and_then(|idx| row.get(idx))
+            .map(cell_text)
+            .unwrap_or_default();
         let score = row.get(score_idx).and_then(cell_f64).unwrap_or(f64::NAN);
-        if !cell_type.is_empty() && score.is_finite() { out.push((cell_type, lineage, score)); }
+        if !cell_type.is_empty() && score.is_finite() {
+            out.push((cell_type, lineage, score));
+        }
     }
-    if out.is_empty() { bail!("No usable immune-cell ssGSEA rows"); }
+    if out.is_empty() {
+        bail!("No usable immune-cell ssGSEA rows");
+    }
     Ok(out)
 }
 
@@ -1219,7 +1315,12 @@ fn parse_bcr_file(path: &Path) -> Result<ParsedBcr> {
                 weighted_len_den += count;
             }
         }
-        accumulate_feature(&mut iso, row.get(isotype_idx.unwrap_or(usize::MAX)), count, false);
+        accumulate_feature(
+            &mut iso,
+            row.get(isotype_idx.unwrap_or(usize::MAX)),
+            count,
+            false,
+        );
         accumulate_feature(&mut v, row.get(v_idx.unwrap_or(usize::MAX)), count, true);
         accumulate_feature(&mut d, row.get(d_idx.unwrap_or(usize::MAX)), count, true);
         accumulate_feature(&mut j, row.get(j_idx.unwrap_or(usize::MAX)), count, true);
@@ -1276,7 +1377,10 @@ fn parse_bcr_isotype_file(path: &Path) -> Result<HashMap<String, f64>> {
     Ok(out)
 }
 
-fn compare_bcr_metrics(rows: &[BcrSampleSummary], comparison: &CohortComparison) -> Vec<FeatureTestResult> {
+fn compare_bcr_metrics(
+    rows: &[BcrSampleSummary],
+    comparison: &CohortComparison,
+) -> Vec<FeatureTestResult> {
     let specs: [(&str, fn(&BcrSampleSummary) -> f64); 8] = [
         ("Total clone count", |r| r.total_clone_count),
         ("Unique clones", |r| r.unique_clones),
@@ -1285,7 +1389,9 @@ fn compare_bcr_metrics(rows: &[BcrSampleSummary], comparison: &CohortComparison)
         ("Clonality", |r| r.clonality),
         ("Effective clonotypes", |r| r.effective_n),
         ("Top clone fraction", |r| r.top_clone_fraction),
-        ("Weighted mean CDR3 AA length", |r| r.weighted_mean_cdr3_aa_length),
+        ("Weighted mean CDR3 AA length", |r| {
+            r.weighted_mean_cdr3_aa_length
+        }),
     ];
     let mut out = Vec::new();
     for (name, getter) in specs {
@@ -1304,14 +1410,23 @@ fn compare_bcr_metrics(rows: &[BcrSampleSummary], comparison: &CohortComparison)
         if case.len() < 2 || ctrl.len() < 2 {
             continue;
         }
-        out.push(make_feature_test(name.to_string(), String::new(), &case, &ctrl, false));
+        out.push(make_feature_test(
+            name.to_string(),
+            String::new(),
+            &case,
+            &ctrl,
+            false,
+        ));
     }
     apply_bh(&mut out);
     out.sort_by(feature_result_order);
     out
 }
 
-fn compare_tcr_metrics(rows: &[TcrSampleSummary], comparison: &CohortComparison) -> Vec<FeatureTestResult> {
+fn compare_tcr_metrics(
+    rows: &[TcrSampleSummary],
+    comparison: &CohortComparison,
+) -> Vec<FeatureTestResult> {
     let specs: [(&str, fn(&TcrSampleSummary) -> f64); 8] = [
         ("Total clone count", |r| r.total_clone_count),
         ("Unique clones", |r| r.unique_clones),
@@ -1320,14 +1435,34 @@ fn compare_tcr_metrics(rows: &[TcrSampleSummary], comparison: &CohortComparison)
         ("Clonality", |r| r.clonality),
         ("Effective clonotypes", |r| r.effective_n),
         ("Top clone fraction", |r| r.top_clone_fraction),
-        ("Weighted mean CDR3 AA length", |r| r.weighted_mean_cdr3_aa_length),
+        ("Weighted mean CDR3 AA length", |r| {
+            r.weighted_mean_cdr3_aa_length
+        }),
     ];
     let mut out = Vec::new();
     for (name, getter) in specs {
-        let case = rows.iter().filter(|r| r.group == comparison.case_label).map(getter).filter(|x| x.is_finite()).collect::<Vec<_>>();
-        let ctrl = rows.iter().filter(|r| r.group == comparison.control_label).map(getter).filter(|x| x.is_finite()).collect::<Vec<_>>();
-        if case.len() < 2 || ctrl.len() < 2 { continue; }
-        out.push(make_feature_test(name.to_string(), String::new(), &case, &ctrl, false));
+        let case = rows
+            .iter()
+            .filter(|r| r.group == comparison.case_label)
+            .map(getter)
+            .filter(|x| x.is_finite())
+            .collect::<Vec<_>>();
+        let ctrl = rows
+            .iter()
+            .filter(|r| r.group == comparison.control_label)
+            .map(getter)
+            .filter(|x| x.is_finite())
+            .collect::<Vec<_>>();
+        if case.len() < 2 || ctrl.len() < 2 {
+            continue;
+        }
+        out.push(make_feature_test(
+            name.to_string(),
+            String::new(),
+            &case,
+            &ctrl,
+            false,
+        ));
     }
     apply_bh(&mut out);
     out.sort_by(feature_result_order);
@@ -1338,21 +1473,34 @@ fn compare_continuous_feature_maps(
     sample_maps: Vec<(String, String, HashMap<String, f64>)>,
     comparison: &CohortComparison,
 ) -> Vec<FeatureTestResult> {
-    let features: BTreeSet<String> = sample_maps.iter().flat_map(|(_, _, map)| map.keys().cloned()).collect();
+    let features: BTreeSet<String> = sample_maps
+        .iter()
+        .flat_map(|(_, _, map)| map.keys().cloned())
+        .collect();
     let mut out = Vec::new();
     for feature in features {
-        let case = sample_maps.iter()
+        let case = sample_maps
+            .iter()
             .filter(|(_, group, _)| group == &comparison.case_label)
             .filter_map(|(_, _, map)| map.get(&feature).copied())
             .filter(|v| v.is_finite())
             .collect::<Vec<_>>();
-        let ctrl = sample_maps.iter()
+        let ctrl = sample_maps
+            .iter()
             .filter(|(_, group, _)| group == &comparison.control_label)
             .filter_map(|(_, _, map)| map.get(&feature).copied())
             .filter(|v| v.is_finite())
             .collect::<Vec<_>>();
-        if case.len() < 2 || ctrl.len() < 2 { continue; }
-        out.push(make_feature_test(feature, String::new(), &case, &ctrl, false));
+        if case.len() < 2 || ctrl.len() < 2 {
+            continue;
+        }
+        out.push(make_feature_test(
+            feature,
+            String::new(),
+            &case,
+            &ctrl,
+            false,
+        ));
     }
     apply_bh(&mut out);
     out.sort_by(feature_result_order);
@@ -1382,7 +1530,13 @@ fn compare_feature_maps(
         if case.len() < 2 || ctrl.len() < 2 {
             continue;
         }
-        out.push(make_feature_test(feature, String::new(), &case, &ctrl, true));
+        out.push(make_feature_test(
+            feature,
+            String::new(),
+            &case,
+            &ctrl,
+            true,
+        ));
     }
     apply_bh(&mut out);
     out.sort_by(feature_result_order);
@@ -1452,11 +1606,23 @@ fn find_header(columns: &HashMap<String, usize>, candidates: &[&str]) -> Option<
         .find_map(|name| columns.get(&name.to_ascii_lowercase()).copied())
 }
 
-fn accumulate_feature(map: &mut HashMap<String, f64>, cell: Option<&Data>, count: f64, first_only: bool) {
-    let Some(cell) = cell else { return; };
+fn accumulate_feature(
+    map: &mut HashMap<String, f64>,
+    cell: Option<&Data>,
+    count: f64,
+    first_only: bool,
+) {
+    let Some(cell) = cell else {
+        return;
+    };
     let mut feature = cell_text(cell);
     if first_only {
-        feature = feature.split(',').next().unwrap_or_default().trim().to_string();
+        feature = feature
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
     }
     if feature.is_empty() {
         return;
@@ -1651,8 +1817,7 @@ fn normal_cdf(x: f64) -> f64 {
     let a3 = 1.421413741;
     let a4 = -1.453152027;
     let a5 = 1.061405429;
-    let erf = 1.0
-        - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
+    let erf = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
     0.5 * (1.0 + sign * erf)
 }
 
@@ -1676,8 +1841,16 @@ fn apply_bh(results: &mut [FeatureTestResult]) {
 }
 
 fn feature_result_order(a: &FeatureTestResult, b: &FeatureTestResult) -> Ordering {
-    let aq = if a.q_value.is_finite() { a.q_value } else { 2.0 };
-    let bq = if b.q_value.is_finite() { b.q_value } else { 2.0 };
+    let aq = if a.q_value.is_finite() {
+        a.q_value
+    } else {
+        2.0
+    };
+    let bq = if b.q_value.is_finite() {
+        b.q_value
+    } else {
+        2.0
+    };
     aq.partial_cmp(&bq)
         .unwrap_or(Ordering::Equal)
         .then_with(|| {
@@ -1722,7 +1895,9 @@ pub fn write_feature_tests(path: &Path, tests: &[FeatureTestResult]) -> Result<(
             r.p_value.to_string(),
             r.q_value.to_string(),
             r.detection_case.map(|x| x.to_string()).unwrap_or_default(),
-            r.detection_control.map(|x| x.to_string()).unwrap_or_default(),
+            r.detection_control
+                .map(|x| x.to_string())
+                .unwrap_or_default(),
         ])?;
     }
     writer.flush()?;
@@ -1779,14 +1954,31 @@ pub fn write_bcr_isotype_values(path: &Path, rows: &[BcrIsotypeSampleValue]) -> 
 pub fn write_tcr_sample_summaries(path: &Path, rows: &[TcrSampleSummary]) -> Result<()> {
     let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
     writer.write_record([
-        "sample_id", "group", "chain", "total_clone_count", "unique_clones", "shannon", "simpson",
-        "clonality", "effective_n", "top_clone_fraction", "weighted_mean_cdr3_aa_length",
+        "sample_id",
+        "group",
+        "chain",
+        "total_clone_count",
+        "unique_clones",
+        "shannon",
+        "simpson",
+        "clonality",
+        "effective_n",
+        "top_clone_fraction",
+        "weighted_mean_cdr3_aa_length",
     ])?;
     for r in rows {
         writer.write_record([
-            r.sample_id.clone(), r.group.clone(), r.chain.clone(), r.total_clone_count.to_string(),
-            r.unique_clones.to_string(), r.shannon.to_string(), r.simpson.to_string(), r.clonality.to_string(),
-            r.effective_n.to_string(), r.top_clone_fraction.to_string(), r.weighted_mean_cdr3_aa_length.to_string(),
+            r.sample_id.clone(),
+            r.group.clone(),
+            r.chain.clone(),
+            r.total_clone_count.to_string(),
+            r.unique_clones.to_string(),
+            r.shannon.to_string(),
+            r.simpson.to_string(),
+            r.clonality.to_string(),
+            r.effective_n.to_string(),
+            r.top_clone_fraction.to_string(),
+            r.weighted_mean_cdr3_aa_length.to_string(),
         ])?;
     }
     writer.flush()?;
@@ -1797,14 +1989,26 @@ pub fn write_immune_values(path: &Path, rows: &[ImmuneSampleValue]) -> Result<()
     let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
     writer.write_record(["sample_id", "group", "cell_type", "lineage", "ssgsea_score"])?;
     for r in rows {
-        writer.write_record([r.sample_id.clone(), r.group.clone(), r.cell_type.clone(), r.lineage.clone(), r.score.to_string()])?;
+        writer.write_record([
+            r.sample_id.clone(),
+            r.group.clone(),
+            r.cell_type.clone(),
+            r.lineage.clone(),
+            r.score.to_string(),
+        ])?;
     }
     writer.flush()?;
     Ok(())
 }
 
-fn write_mapping_audit_delimited(path: &Path, mapping: &CohortMapping, delimiter: u8) -> Result<()> {
-    let mut writer = csv::WriterBuilder::new().delimiter(delimiter).from_path(path)?;
+fn write_mapping_audit_delimited(
+    path: &Path,
+    mapping: &CohortMapping,
+    delimiter: u8,
+) -> Result<()> {
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(delimiter)
+        .from_path(path)?;
     writer.write_record([
         "sample_id",
         "mapping_status",
@@ -1875,14 +2079,13 @@ mod tests {
         assert_eq!(kind, CohortModality::Bcr);
         assert_eq!(id, "4C_101");
 
-        let (kind, id) = classify_workbook_name(
-            "4C_465_tumor_rna_gene_expression_report (1).xlsx",
-        )
-        .unwrap();
+        let (kind, id) =
+            classify_workbook_name("4C_465_tumor_rna_gene_expression_report (1).xlsx").unwrap();
         assert_eq!(kind, CohortModality::GeneExpression);
         assert_eq!(id, "4C_465");
 
-        let (kind, id) = classify_workbook_name("Normal_FJ_RNA_23_tcr_alpha_clone_report.xlsx").unwrap();
+        let (kind, id) =
+            classify_workbook_name("Normal_FJ_RNA_23_tcr_alpha_clone_report.xlsx").unwrap();
         assert_eq!(kind, CohortModality::TcrAlpha);
         assert_eq!(id, "Normal_FJ_RNA_23");
 

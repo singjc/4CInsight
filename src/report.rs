@@ -3,18 +3,21 @@ use crate::cohort::{
     CohortMapping, CohortModality, FeatureTestResult, GeneComparisonResult, ImmuneComparisonResult,
     MappingStatus, TcrComparisonResult, TcrSampleSummary,
 };
-use crate::focused::{FocusedCandidateSummary, FocusedGeneCandidate, FocusedOtherCandidate, FocusedPathwayCandidate};
 use crate::corrected::{
     AdjustedFeatureResult, CorrectedExpressionResult, CorrectedImmuneResult,
-    CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult, DendrogramResult, DtuGeneResult, OrdinationResult,
+    CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult,
+    DendrogramResult, DtuGeneResult, OrdinationResult,
+};
+use crate::focused::{
+    FocusedCandidateSummary, FocusedGeneCandidate, FocusedOtherCandidate, FocusedPathwayCandidate,
 };
 use anyhow::{Context, Result};
-use maud::{html, Markup};
-use report_builder::plots::plot_boxplot;
-use report_builder::{Report, ReportSection};
+use maud::{Markup, html};
 use plotly::common::{HoverInfo, Mode, Title};
 use plotly::layout::Axis;
 use plotly::{Layout, Plot, Scatter};
+use report_builder::plots::plot_boxplot;
+use report_builder::{Report, ReportSection};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -40,23 +43,48 @@ pub struct CohortReportInputs<'a> {
 
 pub fn generate_cohort_html_report(path: &Path, inputs: CohortReportInputs<'_>) -> Result<()> {
     let title = format!("4C cohort analysis — {}", inputs.comparison.name);
-    let mut report = Report::new("4C Cohort Explorer", env!("CARGO_PKG_VERSION"), None, &title);
+    let mut report = Report::new(
+        "4C Cohort Explorer",
+        env!("CARGO_PKG_VERSION"),
+        None,
+        &title,
+    );
 
     report.add_section(build_overview_section(&inputs));
     if let Some(mapping) = inputs.mapping {
         report.add_section(build_mapping_section(mapping));
     }
-    if inputs.gene.is_some() || inputs.gene_error.is_some() { report.add_section(build_gene_section(&inputs)); }
-    if inputs.transcript.is_some() || inputs.transcript_error.is_some() { report.add_section(build_transcript_section(&inputs)); }
-    if inputs.bcr.is_some() || inputs.bcr_error.is_some() { report.add_section(build_bcr_section(&inputs)); }
-    if inputs.bcr_isotype.is_some() || inputs.bcr_isotype_error.is_some() { report.add_section(build_bcr_isotype_section(&inputs)); }
+    if inputs.gene.is_some() || inputs.gene_error.is_some() {
+        report.add_section(build_gene_section(&inputs));
+    }
+    if inputs.transcript.is_some() || inputs.transcript_error.is_some() {
+        report.add_section(build_transcript_section(&inputs));
+    }
+    if inputs.bcr.is_some() || inputs.bcr_error.is_some() {
+        report.add_section(build_bcr_section(&inputs));
+    }
+    if inputs.bcr_isotype.is_some() || inputs.bcr_isotype_error.is_some() {
+        report.add_section(build_bcr_isotype_section(&inputs));
+    }
     if inputs.tcr_alpha.is_some() || inputs.tcr_alpha_error.is_some() {
-        report.add_section(build_tcr_section("TCR alpha", inputs.tcr_alpha, inputs.tcr_alpha_error, inputs.comparison));
+        report.add_section(build_tcr_section(
+            "TCR alpha",
+            inputs.tcr_alpha,
+            inputs.tcr_alpha_error,
+            inputs.comparison,
+        ));
     }
     if inputs.tcr_beta.is_some() || inputs.tcr_beta_error.is_some() {
-        report.add_section(build_tcr_section("TCR beta", inputs.tcr_beta, inputs.tcr_beta_error, inputs.comparison));
+        report.add_section(build_tcr_section(
+            "TCR beta",
+            inputs.tcr_beta,
+            inputs.tcr_beta_error,
+            inputs.comparison,
+        ));
     }
-    if inputs.immune.is_some() || inputs.immune_error.is_some() { report.add_section(build_immune_section(&inputs)); }
+    if inputs.immune.is_some() || inputs.immune_error.is_some() {
+        report.add_section(build_immune_section(&inputs));
+    }
 
     let output = path.to_string_lossy().to_string();
     report
@@ -90,7 +118,9 @@ fn make_report_self_contained(path: &Path) -> Result<()> {
     if rendered.contains(REPORT_BUILDER_PLOTLY_CDN) {
         rendered = rendered.replace(REPORT_BUILDER_PLOTLY_CDN, embedded_plotly);
     } else {
-        anyhow::bail!("report-builder Plotly CDN marker was not found; its template may have changed");
+        anyhow::bail!(
+            "report-builder Plotly CDN marker was not found; its template may have changed"
+        );
     }
 
     // Our report uses ordinary HTML tables, so DataTables/FileSaver are optional.
@@ -107,8 +137,12 @@ fn make_report_self_contained(path: &Path) -> Result<()> {
     }
     rendered = strip_script_block_containing(rendered, "$(document).ready(function()");
 
-    fs::write(path, rendered)
-        .with_context(|| format!("Could not finalize standalone HTML report {}", path.display()))?;
+    fs::write(path, rendered).with_context(|| {
+        format!(
+            "Could not finalize standalone HTML report {}",
+            path.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -288,11 +322,17 @@ fn build_expression_section(
 ) -> ReportSection {
     let mut section = ReportSection::new(section_name);
     let Some(result) = result else {
-        section.add_content(html! { p { (error.unwrap_or("Expression analysis was not available.")) } });
+        section.add_content(
+            html! { p { (error.unwrap_or("Expression analysis was not available.")) } },
+        );
         return section;
     };
 
-    let n_sig = result.tests.iter().filter(|r| r.q_value.is_finite() && r.q_value <= 0.05).count();
+    let n_sig = result
+        .tests
+        .iter()
+        .filter(|r| r.q_value.is_finite() && r.q_value <= 0.05)
+        .count();
     section.add_content(html! {
         p {
             "Metric: " strong { (result.metric) } ". "
@@ -301,20 +341,34 @@ fn build_expression_section(
         p { "Mann–Whitney U is applied to log2(value + 1). Effect is log2((mean case + 0.5)/(mean control + 0.5)); BH adjustment is across tested features." }
     });
 
-    if let Some(plot) = expression_volcano_plot(result, &format!("{section_name} discovery screen"), feature_name) {
+    if let Some(plot) = expression_volcano_plot(
+        result,
+        &format!("{section_name} discovery screen"),
+        feature_name,
+    ) {
         section.add_plot(plot);
     }
-    if let Some(plot) = expression_detection_plot(result, &format!("{section_name} detection shift"), feature_name) {
+    if let Some(plot) = expression_detection_plot(
+        result,
+        &format!("{section_name} detection shift"),
+        feature_name,
+    ) {
         section.add_plot(plot);
     }
-    section.add_content(feature_table(&format!("Top differential {feature_name_plural}"), &result.tests, 100));
+    section.add_content(feature_table(
+        &format!("Top differential {feature_name_plural}"),
+        &result.tests,
+        100,
+    ));
     section
 }
 
 fn build_bcr_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
     let mut section = ReportSection::new("BCR");
     let Some(result) = inputs.bcr else {
-        section.add_content(html! { p { (inputs.bcr_error.unwrap_or("BCR analysis was not available.")) } });
+        section.add_content(
+            html! { p { (inputs.bcr_error.unwrap_or("BCR analysis was not available.")) } },
+        );
         return section;
     };
     section.add_content(html! {
@@ -328,19 +382,26 @@ fn build_bcr_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
     });
 
     for (metric_name, getter) in report_bcr_metric_specs() {
-        let case = result.sample_summaries.iter()
+        let case = result
+            .sample_summaries
+            .iter()
             .filter(|r| r.group == inputs.comparison.case_label)
             .map(getter)
             .filter(|v| v.is_finite())
             .collect::<Vec<_>>();
-        let ctrl = result.sample_summaries.iter()
+        let ctrl = result
+            .sample_summaries
+            .iter()
             .filter(|r| r.group == inputs.comparison.control_label)
             .map(getter)
             .filter(|v| v.is_finite())
             .collect::<Vec<_>>();
         if case.len() >= 2 && ctrl.len() >= 2 {
             let scores = vec![ctrl, case];
-            let labels = vec![inputs.comparison.control_label.clone(), inputs.comparison.case_label.clone()];
+            let labels = vec![
+                inputs.comparison.control_label.clone(),
+                inputs.comparison.case_label.clone(),
+            ];
             if let Ok(plot) = plot_boxplot(
                 &scores,
                 labels,
@@ -353,17 +414,31 @@ fn build_bcr_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
         }
     }
 
-    section.add_content(feature_table("Sample-level BCR metrics", &result.metric_tests, 50));
-    section.add_content(feature_table("Heavy-chain isotype usage", &result.isotype_tests, 50));
-    if let Some(plot) = feature_effect_significance_plot("BCR V-gene usage", &result.v_gene_tests, "V gene") {
+    section.add_content(feature_table(
+        "Sample-level BCR metrics",
+        &result.metric_tests,
+        50,
+    ));
+    section.add_content(feature_table(
+        "Heavy-chain isotype usage",
+        &result.isotype_tests,
+        50,
+    ));
+    if let Some(plot) =
+        feature_effect_significance_plot("BCR V-gene usage", &result.v_gene_tests, "V gene")
+    {
         section.add_plot(plot);
     }
     section.add_content(feature_table("V-gene usage", &result.v_gene_tests, 75));
-    if let Some(plot) = feature_effect_significance_plot("BCR D-gene usage", &result.d_gene_tests, "D gene") {
+    if let Some(plot) =
+        feature_effect_significance_plot("BCR D-gene usage", &result.d_gene_tests, "D gene")
+    {
         section.add_plot(plot);
     }
     section.add_content(feature_table("D-gene usage", &result.d_gene_tests, 75));
-    if let Some(plot) = feature_effect_significance_plot("BCR J-gene usage", &result.j_gene_tests, "J gene") {
+    if let Some(plot) =
+        feature_effect_significance_plot("BCR J-gene usage", &result.j_gene_tests, "J gene")
+    {
         section.add_plot(plot);
     }
     section.add_content(feature_table("J-gene usage", &result.j_gene_tests, 75));
@@ -387,12 +462,16 @@ fn build_bcr_isotype_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
     let mut scores = Vec::new();
     let mut labels = Vec::new();
     for feature in features {
-        let ctrl = result.values.iter()
+        let ctrl = result
+            .values
+            .iter()
             .filter(|r| r.isotype == feature && r.group == inputs.comparison.control_label)
             .map(|r| r.fraction)
             .filter(|v| v.is_finite())
             .collect::<Vec<_>>();
-        let case = result.values.iter()
+        let case = result
+            .values
+            .iter()
             .filter(|r| r.isotype == feature && r.group == inputs.comparison.case_label)
             .map(|r| r.fraction)
             .filter(|v| v.is_finite())
@@ -407,14 +486,28 @@ fn build_bcr_isotype_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
         }
     }
     if !scores.is_empty() {
-        if let Ok(plot) = plot_boxplot(&scores, labels, "BCR isotype composition by group", "Isotype / group", "Fraction") {
+        if let Ok(plot) = plot_boxplot(
+            &scores,
+            labels,
+            "BCR isotype composition by group",
+            "Isotype / group",
+            "Fraction",
+        ) {
             section.add_plot(plot);
         }
     }
-    if let Some(plot) = feature_effect_significance_plot("BCR isotype fraction shifts", &result.tests, "BCR isotype") {
+    if let Some(plot) = feature_effect_significance_plot(
+        "BCR isotype fraction shifts",
+        &result.tests,
+        "BCR isotype",
+    ) {
         section.add_plot(plot);
     }
-    section.add_content(feature_table("BCR isotype fraction tests", &result.tests, 50));
+    section.add_content(feature_table(
+        "BCR isotype fraction tests",
+        &result.tests,
+        50,
+    ));
     section.add_content(group_mean_isotype_table(result, inputs.comparison));
     section
 }
@@ -442,30 +535,65 @@ fn build_tcr_section(
     });
 
     for (metric_name, getter) in report_tcr_metric_specs() {
-        let case = result.sample_summaries.iter()
+        let case = result
+            .sample_summaries
+            .iter()
             .filter(|r| r.group == comparison.case_label)
             .map(getter)
             .filter(|v| v.is_finite())
             .collect::<Vec<_>>();
-        let ctrl = result.sample_summaries.iter()
+        let ctrl = result
+            .sample_summaries
+            .iter()
             .filter(|r| r.group == comparison.control_label)
             .map(getter)
             .filter(|v| v.is_finite())
             .collect::<Vec<_>>();
         if case.len() >= 2 && ctrl.len() >= 2 {
             let scores = vec![ctrl, case];
-            let labels = vec![comparison.control_label.clone(), comparison.case_label.clone()];
-            if let Ok(plot) = plot_boxplot(&scores, labels, &format!("{}: {metric_name}", result.chain), "Group", metric_name) {
+            let labels = vec![
+                comparison.control_label.clone(),
+                comparison.case_label.clone(),
+            ];
+            if let Ok(plot) = plot_boxplot(
+                &scores,
+                labels,
+                &format!("{}: {metric_name}", result.chain),
+                "Group",
+                metric_name,
+            ) {
                 section.add_plot(plot);
             }
         }
     }
-    section.add_content(feature_table(&format!("{} sample-level repertoire metrics", result.chain), &result.metric_tests, 50));
-    if let Some(plot) = feature_effect_significance_plot(&format!("{} V-gene usage", result.chain), &result.v_gene_tests, "V gene") { section.add_plot(plot); }
+    section.add_content(feature_table(
+        &format!("{} sample-level repertoire metrics", result.chain),
+        &result.metric_tests,
+        50,
+    ));
+    if let Some(plot) = feature_effect_significance_plot(
+        &format!("{} V-gene usage", result.chain),
+        &result.v_gene_tests,
+        "V gene",
+    ) {
+        section.add_plot(plot);
+    }
     section.add_content(feature_table("V-gene usage", &result.v_gene_tests, 75));
-    if let Some(plot) = feature_effect_significance_plot(&format!("{} J-gene usage", result.chain), &result.j_gene_tests, "J gene") { section.add_plot(plot); }
+    if let Some(plot) = feature_effect_significance_plot(
+        &format!("{} J-gene usage", result.chain),
+        &result.j_gene_tests,
+        "J gene",
+    ) {
+        section.add_plot(plot);
+    }
     section.add_content(feature_table("J-gene usage", &result.j_gene_tests, 75));
-    if let Some(plot) = feature_effect_significance_plot(&format!("{} V–J pair usage", result.chain), &result.vj_pair_tests, "V-J pair") { section.add_plot(plot); }
+    if let Some(plot) = feature_effect_significance_plot(
+        &format!("{} V–J pair usage", result.chain),
+        &result.vj_pair_tests,
+        "V-J pair",
+    ) {
+        section.add_plot(plot);
+    }
     section.add_content(feature_table("V–J pair usage", &result.vj_pair_tests, 75));
     section
 }
@@ -485,27 +613,44 @@ fn build_immune_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
             }
         }
     });
-    if let Some(plot) = feature_effect_significance_plot("Immune-cell ssGSEA shifts", &result.tests, "Immune cell") {
+    if let Some(plot) =
+        feature_effect_significance_plot("Immune-cell ssGSEA shifts", &result.tests, "Immune cell")
+    {
         section.add_plot(plot);
     }
 
     let mut features = BTreeSet::new();
-    for row in &result.values { features.insert(row.cell_type.clone()); }
+    for row in &result.values {
+        features.insert(row.cell_type.clone());
+    }
     for feature in features {
-        let ctrl = result.values.iter()
+        let ctrl = result
+            .values
+            .iter()
             .filter(|r| r.cell_type == feature && r.group == inputs.comparison.control_label)
-            .map(|r| r.score).filter(|v| v.is_finite()).collect::<Vec<_>>();
-        let case = result.values.iter()
+            .map(|r| r.score)
+            .filter(|v| v.is_finite())
+            .collect::<Vec<_>>();
+        let case = result
+            .values
+            .iter()
             .filter(|r| r.cell_type == feature && r.group == inputs.comparison.case_label)
-            .map(|r| r.score).filter(|v| v.is_finite()).collect::<Vec<_>>();
+            .map(|r| r.score)
+            .filter(|v| v.is_finite())
+            .collect::<Vec<_>>();
         if ctrl.len() >= 2 && case.len() >= 2 {
             if let Ok(plot) = plot_boxplot(
                 &vec![ctrl, case],
-                vec![inputs.comparison.control_label.clone(), inputs.comparison.case_label.clone()],
+                vec![
+                    inputs.comparison.control_label.clone(),
+                    inputs.comparison.case_label.clone(),
+                ],
                 &format!("Immune infiltrate: {feature}"),
                 "Group",
                 "ssGSEA score",
-            ) { section.add_plot(plot); }
+            ) {
+                section.add_plot(plot);
+            }
         }
     }
     section.add_content(feature_table("Immune-cell ssGSEA tests", &result.tests, 50));
@@ -523,7 +668,9 @@ fn labeled_scatter_plot(
     }
     let mut plot = Plot::new();
     for (name, x, y, hover) in traces {
-        if x.is_empty() { continue; }
+        if x.is_empty() {
+            continue;
+        }
         let trace = Scatter::new(x, y)
             .mode(Mode::Markers)
             .name(name)
@@ -585,7 +732,11 @@ fn feature_hover(r: &FeatureTestResult, feature_label: &str) -> String {
     )
 }
 
-fn expression_volcano_plot(result: &GeneComparisonResult, title: &str, feature_label: &str) -> Option<Plot> {
+fn expression_volcano_plot(
+    result: &GeneComparisonResult,
+    title: &str,
+    feature_label: &str,
+) -> Option<Plot> {
     let mut x_other = Vec::new();
     let mut y_other = Vec::new();
     let mut h_other = Vec::new();
@@ -593,18 +744,36 @@ fn expression_volcano_plot(result: &GeneComparisonResult, title: &str, feature_l
     let mut y_sig = Vec::new();
     let mut h_sig = Vec::new();
     for r in &result.tests {
-        if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 { continue; }
+        if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 {
+            continue;
+        }
         let y = -r.q_value.max(1e-300).log10();
         let hover = feature_hover(r, feature_label);
         if r.q_value <= 0.05 {
-            x_sig.push(r.effect); y_sig.push(y); h_sig.push(hover);
+            x_sig.push(r.effect);
+            y_sig.push(y);
+            h_sig.push(hover);
         } else {
-            x_other.push(r.effect); y_other.push(y); h_other.push(hover);
+            x_other.push(r.effect);
+            y_other.push(y);
+            h_other.push(hover);
         }
     }
     labeled_scatter_plot(
         vec![
-            (format!("Other {}", if feature_label == "Gene" { "genes" } else { "transcripts" }), x_other, y_other, h_other),
+            (
+                format!(
+                    "Other {}",
+                    if feature_label == "Gene" {
+                        "genes"
+                    } else {
+                        "transcripts"
+                    }
+                ),
+                x_other,
+                y_other,
+                h_other,
+            ),
             ("BH q ≤ 0.05".to_string(), x_sig, y_sig, h_sig),
         ],
         title,
@@ -613,17 +782,35 @@ fn expression_volcano_plot(result: &GeneComparisonResult, title: &str, feature_l
     )
 }
 
-fn expression_detection_plot(result: &GeneComparisonResult, title: &str, feature_label: &str) -> Option<Plot> {
+fn expression_detection_plot(
+    result: &GeneComparisonResult,
+    title: &str,
+    feature_label: &str,
+) -> Option<Plot> {
     let mut x = Vec::new();
     let mut y = Vec::new();
     let mut hover = Vec::new();
     for r in &result.tests {
-        let (Some(case), Some(ctrl)) = (r.detection_case, r.detection_control) else { continue; };
+        let (Some(case), Some(ctrl)) = (r.detection_case, r.detection_control) else {
+            continue;
+        };
         if case.is_finite() && ctrl.is_finite() {
             x.push(ctrl * 100.0);
             y.push(case * 100.0);
-            let secondary_label = if feature_label == "Gene" || feature_label == "Transcript" { "NCBI Gene ID" } else { "Secondary ID" };
-            let secondary = if r.secondary_id.trim().is_empty() { String::new() } else { format!("<br>{}: {}", secondary_label, escape_hover_text(&r.secondary_id)) };
+            let secondary_label = if feature_label == "Gene" || feature_label == "Transcript" {
+                "NCBI Gene ID"
+            } else {
+                "Secondary ID"
+            };
+            let secondary = if r.secondary_id.trim().is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<br>{}: {}",
+                    secondary_label,
+                    escape_hover_text(&r.secondary_id)
+                )
+            };
             hover.push(format!(
                 "<b>{}: {}</b>{secondary}<br>Control detection: {:.1}%<br>Case detection: {:.1}%<br>Δ detection: {:+.1} percentage points<br>Effect: {:.4}<br>BH q: {:.3e}",
                 feature_label,
@@ -644,7 +831,11 @@ fn expression_detection_plot(result: &GeneComparisonResult, title: &str, feature
     )
 }
 
-fn feature_effect_significance_plot(title: &str, tests: &[FeatureTestResult], feature_label: &str) -> Option<Plot> {
+fn feature_effect_significance_plot(
+    title: &str,
+    tests: &[FeatureTestResult],
+    feature_label: &str,
+) -> Option<Plot> {
     let mut x_other = Vec::new();
     let mut y_other = Vec::new();
     let mut h_other = Vec::new();
@@ -652,13 +843,19 @@ fn feature_effect_significance_plot(title: &str, tests: &[FeatureTestResult], fe
     let mut y_sig = Vec::new();
     let mut h_sig = Vec::new();
     for r in tests {
-        if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 { continue; }
+        if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 {
+            continue;
+        }
         let y = -r.q_value.max(1e-300).log10();
         let hover = feature_hover(r, feature_label);
         if r.q_value <= 0.05 {
-            x_sig.push(r.effect); y_sig.push(y); h_sig.push(hover);
+            x_sig.push(r.effect);
+            y_sig.push(y);
+            h_sig.push(hover);
         } else {
-            x_other.push(r.effect); y_other.push(y); h_other.push(hover);
+            x_other.push(r.effect);
+            y_other.push(y);
+            h_other.push(hover);
         }
     }
     labeled_scatter_plot(
@@ -703,12 +900,18 @@ fn feature_table(title: &str, tests: &[FeatureTestResult], limit: usize) -> Mark
     }
 }
 
-fn group_mean_isotype_table(result: &BcrIsotypeComparisonResult, comp: &CohortComparison) -> Markup {
+fn group_mean_isotype_table(
+    result: &BcrIsotypeComparisonResult,
+    comp: &CohortComparison,
+) -> Markup {
     let mut by_feature: BTreeMap<String, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
     for row in &result.values {
         let entry = by_feature.entry(row.isotype.clone()).or_default();
-        if row.group == comp.case_label { entry.0.push(row.fraction); }
-        else if row.group == comp.control_label { entry.1.push(row.fraction); }
+        if row.group == comp.case_label {
+            entry.0.push(row.fraction);
+        } else if row.group == comp.control_label {
+            entry.1.push(row.fraction);
+        }
     }
     html! {
         h3 { "Group mean isotype composition" }
@@ -746,9 +949,13 @@ fn report_tcr_metric_specs() -> [(&'static str, fn(&TcrSampleSummary) -> f64); 4
 }
 
 fn availability(has_result: bool, error: Option<&str>) -> String {
-    if has_result { "available".to_string() }
-    else if let Some(err) = error { format!("not available — {err}") }
-    else { "not requested".to_string() }
+    if has_result {
+        "available".to_string()
+    } else if let Some(err) = error {
+        format!("not available — {err}")
+    } else {
+        "not requested".to_string()
+    }
 }
 
 fn mapping_status_text(status: MappingStatus) -> &'static str {
@@ -765,15 +972,27 @@ fn modality_count(row: &crate::cohort::SampleCoverageRow, modality: CohortModali
 }
 
 fn mean(values: &[f64]) -> f64 {
-    if values.is_empty() { f64::NAN } else { values.iter().sum::<f64>() / values.len() as f64 }
+    if values.is_empty() {
+        f64::NAN
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
 }
 
 fn fmt(value: f64) -> String {
-    if value.is_finite() { format!("{value:.4}") } else { "NA".to_string() }
+    if value.is_finite() {
+        format!("{value:.4}")
+    } else {
+        "NA".to_string()
+    }
 }
 
 fn fmt_sci(value: f64) -> String {
-    if value.is_finite() { format!("{value:.3e}") } else { "NA".to_string() }
+    if value.is_finite() {
+        format!("{value:.3e}")
+    } else {
+        "NA".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -846,7 +1065,9 @@ mod tests {
         assert!(html.contains("TEST1"));
         assert!(html.contains("Gene: TEST1"));
         assert!(html.contains("NCBI Gene ID: 1"));
-        assert!(!html.contains(r#"<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>"#));
+        assert!(
+            !html.contains(r#"<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>"#)
+        );
         assert!(!html.contains("https://cdn.datatables.net/"));
         assert!(!html.contains("https://cdnjs.cloudflare.com/ajax/libs/jquery/"));
         assert!(html.contains("Plotly"));
@@ -875,11 +1096,23 @@ pub struct CorrectedReportInputs<'a> {
     pub pathway_error: Option<&'a str>,
 }
 
-pub fn generate_corrected_html_report(path: &Path, inputs: CorrectedReportInputs<'_>) -> Result<()> {
+pub fn generate_corrected_html_report(
+    path: &Path,
+    inputs: CorrectedReportInputs<'_>,
+) -> Result<()> {
     let title = format!("4C corrected cohort analysis — {}", inputs.comparison.name);
-    let mut report = Report::new("4C Cohort Explorer", env!("CARGO_PKG_VERSION"), None, &title);
+    let mut report = Report::new(
+        "4C Cohort Explorer",
+        env!("CARGO_PKG_VERSION"),
+        None,
+        &title,
+    );
     let subject = inputs.spec.subject_column.as_deref().unwrap_or("none");
-    let covariates = if inputs.spec.covariates.is_empty() { "none".to_string() } else { inputs.spec.covariates.join(", ") };
+    let covariates = if inputs.spec.covariates.is_empty() {
+        "none".to_string()
+    } else {
+        inputs.spec.covariates.join(", ")
+    };
     let mut overview = ReportSection::new("Overview");
     overview.add_content(html! {
         h3 { (inputs.comparison.name) " — corrected / standard layer" }
@@ -890,33 +1123,68 @@ pub fn generate_corrected_html_report(path: &Path, inputs: CorrectedReportInputs
         p { "Repertoire analyses use matched-depth rarefaction, subject-aware clonotype sharing, Morisita-Horn and Jaccard distances with PCoA/PERMANOVA, average-linkage hierarchical clustering, and CLR/Aitchison composition analysis. Immune-infiltrate tests use original ssGSEA scores with adjusted models and standardized scores for unsupervised sample structure." }
     });
     report.add_section(overview);
-    if let Some(mapping)=inputs.mapping { report.add_section(build_mapping_section(mapping)); }
-    if let Some(r)=inputs.gene { report.add_section(build_corrected_expression_section("Gene counts",r)); }
-    else if let Some(e)=inputs.gene_error { report.add_section(corrected_error_section("Gene counts",e)); }
-    if let Some(r)=inputs.transcript { report.add_section(build_corrected_expression_section("Transcript counts",r)); }
-    else if let Some(e)=inputs.transcript_error { report.add_section(corrected_error_section("Transcript counts",e)); }
-    if let Some(r)=inputs.bcr { report.add_section(build_corrected_repertoire_section("BCR",r)); }
-    else if let Some(e)=inputs.bcr_error { report.add_section(corrected_error_section("BCR",e)); }
-    if let Some(r)=inputs.bcr_isotype { report.add_section(build_corrected_isotype_section(r)); }
-    else if let Some(e)=inputs.bcr_isotype_error { report.add_section(corrected_error_section("BCR isotype",e)); }
-    if let Some(r)=inputs.tcr_alpha { report.add_section(build_corrected_repertoire_section("TCR alpha",r)); }
-    else if let Some(e)=inputs.tcr_alpha_error { report.add_section(corrected_error_section("TCR alpha",e)); }
-    if let Some(r)=inputs.tcr_beta { report.add_section(build_corrected_repertoire_section("TCR beta",r)); }
-    else if let Some(e)=inputs.tcr_beta_error { report.add_section(corrected_error_section("TCR beta",e)); }
-    if let Some(r)=inputs.immune { report.add_section(build_corrected_immune_section(r)); }
-    else if let Some(e)=inputs.immune_error { report.add_section(corrected_error_section("Immune infiltrate",e)); }
-    if let Some(r)=inputs.pathway { report.add_section(build_corrected_pathway_section(r)); }
-    else if let Some(e)=inputs.pathway_error { report.add_section(corrected_error_section("Pathways",e)); }
+    if let Some(mapping) = inputs.mapping {
+        report.add_section(build_mapping_section(mapping));
+    }
+    if let Some(r) = inputs.gene {
+        report.add_section(build_corrected_expression_section("Gene counts", r));
+    } else if let Some(e) = inputs.gene_error {
+        report.add_section(corrected_error_section("Gene counts", e));
+    }
+    if let Some(r) = inputs.transcript {
+        report.add_section(build_corrected_expression_section("Transcript counts", r));
+    } else if let Some(e) = inputs.transcript_error {
+        report.add_section(corrected_error_section("Transcript counts", e));
+    }
+    if let Some(r) = inputs.bcr {
+        report.add_section(build_corrected_repertoire_section("BCR", r));
+    } else if let Some(e) = inputs.bcr_error {
+        report.add_section(corrected_error_section("BCR", e));
+    }
+    if let Some(r) = inputs.bcr_isotype {
+        report.add_section(build_corrected_isotype_section(r));
+    } else if let Some(e) = inputs.bcr_isotype_error {
+        report.add_section(corrected_error_section("BCR isotype", e));
+    }
+    if let Some(r) = inputs.tcr_alpha {
+        report.add_section(build_corrected_repertoire_section("TCR alpha", r));
+    } else if let Some(e) = inputs.tcr_alpha_error {
+        report.add_section(corrected_error_section("TCR alpha", e));
+    }
+    if let Some(r) = inputs.tcr_beta {
+        report.add_section(build_corrected_repertoire_section("TCR beta", r));
+    } else if let Some(e) = inputs.tcr_beta_error {
+        report.add_section(corrected_error_section("TCR beta", e));
+    }
+    if let Some(r) = inputs.immune {
+        report.add_section(build_corrected_immune_section(r));
+    } else if let Some(e) = inputs.immune_error {
+        report.add_section(corrected_error_section("Immune infiltrate", e));
+    }
+    if let Some(r) = inputs.pathway {
+        report.add_section(build_corrected_pathway_section(r));
+    } else if let Some(e) = inputs.pathway_error {
+        report.add_section(corrected_error_section("Pathways", e));
+    }
     let output = path.to_string_lossy().to_string();
-    report.save_to_file(&output).with_context(||format!("Could not write corrected HTML report to {}",path.display()))?;
+    report.save_to_file(&output).with_context(|| {
+        format!(
+            "Could not write corrected HTML report to {}",
+            path.display()
+        )
+    })?;
     make_report_self_contained(path)?;
     Ok(())
 }
 
-fn corrected_error_section(title:&str,error:&str)->ReportSection { let mut s=ReportSection::new(title); s.add_content(html!{p{(error)}});s }
+fn corrected_error_section(title: &str, error: &str) -> ReportSection {
+    let mut s = ReportSection::new(title);
+    s.add_content(html! {p{(error)}});
+    s
+}
 
-fn build_corrected_expression_section(title:&str,r:&CorrectedExpressionResult)->ReportSection {
-    let mut s=ReportSection::new(title);
+fn build_corrected_expression_section(title: &str, r: &CorrectedExpressionResult) -> ReportSection {
+    let mut s = ReportSection::new(title);
     s.add_content(html!{
         p { (r.normalization) }
         p { (r.model_description) }
@@ -926,24 +1194,38 @@ fn build_corrected_expression_section(title:&str,r:&CorrectedExpressionResult)->
         p { "PCA and hierarchical clustering are unsupervised sample-level views. Separation by case/control can support a broad phenotype signal, while other clustering may reflect subject, batch, timepoint, or other metadata. These plots are descriptive and should be read alongside the feature-level tests." }
         @for w in &r.warnings { p { em { "Warning: " (w) } } }
     });
-    if let Some(p)=adjusted_volcano_plot(&r.tests,&format!("{title}: adjusted feature screen")){s.add_plot(p);}
-    if let Some(ord)=&r.pca { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
-    if let Some(tree)=&r.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
-    s.add_content(adjusted_table("Adjusted feature tests",&r.tests,150));
-    if let Some(dtu)=&r.dtu {
+    if let Some(p) = adjusted_volcano_plot(&r.tests, &format!("{title}: adjusted feature screen")) {
+        s.add_plot(p);
+    }
+    if let Some(ord) = &r.pca {
+        if let Some(p) = corrected_ordination_plot(ord) {
+            s.add_plot(p);
+        }
+    }
+    if let Some(tree) = &r.dendrogram {
+        if let Some(p) = corrected_dendrogram_plot(tree) {
+            s.add_plot(p);
+        }
+    }
+    s.add_content(adjusted_table("Adjusted feature tests", &r.tests, 150));
+    if let Some(dtu) = &r.dtu {
         s.add_content(html!{
             h3 { "Differential transcript usage" }
             p { (dtu.method_description) }
             p { "Genes tested: " (dtu.genes_tested) ", transcripts tested: " (dtu.transcripts_tested) "." }
         });
-        s.add_content(dtu_gene_table(&dtu.gene_tests,120));
-        s.add_content(adjusted_table("Transcript-level CLR usage tests",&dtu.transcript_tests,150));
+        s.add_content(dtu_gene_table(&dtu.gene_tests, 120));
+        s.add_content(adjusted_table(
+            "Transcript-level CLR usage tests",
+            &dtu.transcript_tests,
+            150,
+        ));
     }
     s
 }
 
-fn build_corrected_repertoire_section(title:&str,r:&CorrectedRepertoireResult)->ReportSection {
-    let mut s=ReportSection::new(title);
+fn build_corrected_repertoire_section(title: &str, r: &CorrectedRepertoireResult) -> ReportSection {
+    let mut s = ReportSection::new(title);
     s.add_content(html!{
         p { "Samples: " (r.files_used) ", matched depth: " (r.matched_depth) ", rarefaction repeats: " (r.rarefaction_reps) "." }
         p { "Ambiguous V/D/J calls: " (r.ambiguous_policy.display_name()) }
@@ -952,37 +1234,83 @@ fn build_corrected_repertoire_section(title:&str,r:&CorrectedRepertoireResult)->
         p { "The dendrogram is an unsupervised average-linkage clustering of Morisita-Horn distance. CLR/Aitchison analyses address V/D/J/V-J or isotype compositions as relative compositions rather than independent percentages." }
         @for w in &r.warnings { p { em { "Warning: " (w) } } }
     });
-    s.add_content(adjusted_table("Adjusted matched-depth / repertoire metrics",&r.metric_tests,100));
-    if let Some(ord)=&r.morisita_horn { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
-    if let Some(tree)=&r.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
-    if let Some(ord)=&r.jaccard { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
+    s.add_content(adjusted_table(
+        "Adjusted matched-depth / repertoire metrics",
+        &r.metric_tests,
+        100,
+    ));
+    if let Some(ord) = &r.morisita_horn {
+        if let Some(p) = corrected_ordination_plot(ord) {
+            s.add_plot(p);
+        }
+    }
+    if let Some(tree) = &r.dendrogram {
+        if let Some(p) = corrected_dendrogram_plot(tree) {
+            s.add_plot(p);
+        }
+    }
+    if let Some(ord) = &r.jaccard {
+        if let Some(p) = corrected_ordination_plot(ord) {
+            s.add_plot(p);
+        }
+    }
     for comp in &r.compositions {
         s.add_content(html!{h3{(comp.family) " — CLR/Aitchison"} p{"Retained features: "(comp.retained_features)}});
-        if let Some(ord)=&comp.ordination { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
-        if let Some(tree)=&comp.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
-        s.add_content(adjusted_table(&format!("{} adjusted CLR tests",comp.family),&comp.tests,80));
+        if let Some(ord) = &comp.ordination {
+            if let Some(p) = corrected_ordination_plot(ord) {
+                s.add_plot(p);
+            }
+        }
+        if let Some(tree) = &comp.dendrogram {
+            if let Some(p) = corrected_dendrogram_plot(tree) {
+                s.add_plot(p);
+            }
+        }
+        s.add_content(adjusted_table(
+            &format!("{} adjusted CLR tests", comp.family),
+            &comp.tests,
+            80,
+        ));
     }
     s
 }
 
-fn build_corrected_isotype_section(r:&CorrectedIsotypeResult)->ReportSection {
-    let mut s=ReportSection::new("BCR isotype");
+fn build_corrected_isotype_section(r: &CorrectedIsotypeResult) -> ReportSection {
+    let mut s = ReportSection::new("BCR isotype");
     s.add_content(html!{p{"Files/samples: "(r.files_used) ". " @if r.determined_only {"Undetermined was excluded and the determined isotypes were renormalized."} @else {"Undetermined was retained in the composition."}} h3{"How to read this analysis"} p{"Isotype fractions are compositional: individual components are interpreted relative to the remaining isotype mixture. PCoA/PERMANOVA and hierarchical clustering summarize whole-composition differences, while the CLR tests identify components contributing to those differences."} @for w in &r.warnings{p{em{"Warning: "(w)}}}});
-    if let Some(ord)=&r.ordination { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
-    if let Some(tree)=&r.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
-    s.add_content(adjusted_table("Isotype CLR tests",&r.tests,50)); s
+    if let Some(ord) = &r.ordination {
+        if let Some(p) = corrected_ordination_plot(ord) {
+            s.add_plot(p);
+        }
+    }
+    if let Some(tree) = &r.dendrogram {
+        if let Some(p) = corrected_dendrogram_plot(tree) {
+            s.add_plot(p);
+        }
+    }
+    s.add_content(adjusted_table("Isotype CLR tests", &r.tests, 50));
+    s
 }
 
-fn build_corrected_immune_section(r:&CorrectedImmuneResult)->ReportSection {
-    let mut s=ReportSection::new("Immune infiltrate");
+fn build_corrected_immune_section(r: &CorrectedImmuneResult) -> ReportSection {
+    let mut s = ReportSection::new("Immune infiltrate");
     s.add_content(html!{p{"Samples: "(r.files_used) ". Original ssGSEA scores are used for adjusted tests; PCA and clustering use cell-type z-scores."} h3{"How to read this analysis"} p{"Each immune-cell signature is compared across groups on its original ssGSEA scale after adjustment. ssGSEA values are enrichment scores rather than literal cell percentages. PCA and hierarchical clustering use standardized cell-type scores to summarize coordinated immune-profile structure."} @for w in &r.warnings{p{em{"Warning: "(w)}}}});
-    if let Some(ord)=&r.pca { if let Some(p)=corrected_ordination_plot(ord){s.add_plot(p);} }
-    if let Some(tree)=&r.dendrogram { if let Some(p)=corrected_dendrogram_plot(tree){s.add_plot(p);} }
-    s.add_content(adjusted_table("Adjusted immune-cell tests",&r.tests,80)); s
+    if let Some(ord) = &r.pca {
+        if let Some(p) = corrected_ordination_plot(ord) {
+            s.add_plot(p);
+        }
+    }
+    if let Some(tree) = &r.dendrogram {
+        if let Some(p) = corrected_dendrogram_plot(tree) {
+            s.add_plot(p);
+        }
+    }
+    s.add_content(adjusted_table("Adjusted immune-cell tests", &r.tests, 80));
+    s
 }
 
-fn build_corrected_pathway_section(r:&CorrectedPathwayResult)->ReportSection {
-    let mut s=ReportSection::new("Pathways");
+fn build_corrected_pathway_section(r: &CorrectedPathwayResult) -> ReportSection {
+    let mut s = ReportSection::new("Pathways");
     s.add_content(html!{
         p { "GMT: " code { (r.gmt_path.to_string_lossy()) } }
         p { "Tested-gene universe: " (r.universe_size) "; foreground: " (r.foreground_size) "; foreground definition: BH q ≤ " (fmt(r.q_threshold)) " and |adjusted log2FC| ≥ " (fmt(r.effect_threshold)) "." }
@@ -991,94 +1319,236 @@ fn build_corrected_pathway_section(r:&CorrectedPathwayResult)->ReportSection {
         p { "Odds ratio > 1 indicates that a pathway contains more foreground genes than expected from the measured-gene universe. BH q-values control the false-discovery rate across the retained pathways. Closely related gene sets can share many genes, so clusters of significant pathways are often best interpreted as a broader biological theme." }
         p { "Plot hover labels show a compact subset of overlap genes to remain readable; the complete overlap list is preserved in the table and exported result files." }
     });
-    let rows=r.tests.iter().filter(|x|x.q_value.is_finite()&&x.q_value>0.0).take(120).collect::<Vec<_>>();
-    if !rows.is_empty(){
-        let x=rows.iter().map(|x|x.odds_ratio.max(1e-12).ln()).collect();
-        let y=rows.iter().map(|x|-x.q_value.max(1e-300).log10()).collect();
+    let rows = r
+        .tests
+        .iter()
+        .filter(|x| x.q_value.is_finite() && x.q_value > 0.0)
+        .take(120)
+        .collect::<Vec<_>>();
+    if !rows.is_empty() {
+        let x = rows.iter().map(|x| x.odds_ratio.max(1e-12).ln()).collect();
+        let y = rows
+            .iter()
+            .map(|x| -x.q_value.max(1e-300).log10())
+            .collect();
         let h=rows.iter().map(|x|format!("<b>{}</b><br>Overlap: {}/{}<br>Odds ratio: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Overlap genes: {}",escape_hover_text(&x.pathway),x.overlap,x.measured_set_size,x.odds_ratio,x.p_value,x.q_value,compact_hover_gene_list(&x.overlap_genes,6,110))).collect();
-        if let Some(p)=labeled_scatter_plot(vec![("Pathways".to_string(),x,y,h)],"Pathway over-representation","ln odds ratio","-log10(BH q)"){s.add_plot(p);}
+        if let Some(p) = labeled_scatter_plot(
+            vec![("Pathways".to_string(), x, y, h)],
+            "Pathway over-representation",
+            "ln odds ratio",
+            "-log10(BH q)",
+        ) {
+            s.add_plot(p);
+        }
     }
-    s.add_content(pathway_table(r,150));
+    s.add_content(pathway_table(r, 150));
     s
 }
 
-fn pathway_table(r:&CorrectedPathwayResult,limit:usize)->Markup{
-    html!{h3{"Pathway ORA results ("(r.tests.len())" rows; showing up to "(limit.min(r.tests.len()))")"}div class="table-container"{table{thead{tr{th{"Pathway"}th{"Description"}th{"Set size"}th{"Overlap"}th{"Odds ratio"}th{"p"}th{"BH q"}th{"Overlap genes"}}}tbody{@for x in r.tests.iter().take(limit){tr{td{(x.pathway)}td{(x.description)}td{(x.measured_set_size)}td{(x.overlap)}td{(fmt(x.odds_ratio))}td{(fmt_sci(x.p_value))}td{(fmt_sci(x.q_value))}td{(x.overlap_genes)}}}}}}}
+fn pathway_table(r: &CorrectedPathwayResult, limit: usize) -> Markup {
+    html! {h3{"Pathway ORA results ("(r.tests.len())" rows; showing up to "(limit.min(r.tests.len()))")"}div class="table-container"{table{thead{tr{th{"Pathway"}th{"Description"}th{"Set size"}th{"Overlap"}th{"Odds ratio"}th{"p"}th{"BH q"}th{"Overlap genes"}}}tbody{@for x in r.tests.iter().take(limit){tr{td{(x.pathway)}td{(x.description)}td{(x.measured_set_size)}td{(x.overlap)}td{(fmt(x.odds_ratio))}td{(fmt_sci(x.p_value))}td{(fmt_sci(x.q_value))}td{(x.overlap_genes)}}}}}}}
 }
 
-fn adjusted_hover(r:&AdjustedFeatureResult)->String {
-    format!("<b>{}</b>{}<br>Adjusted β: {:.4}<br>SE: {:.4}<br>z: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Subject-collapsed effect: {:.4}<br>Subject BH q: {:.3e}<br>Case/control mean: {:.4} / {:.4}<br>n samples/subjects: {} / {}",
-        escape_hover_text(&r.feature), if r.secondary_id.is_empty(){String::new()}else{format!("<br>{}",escape_hover_text(&r.secondary_id))},r.beta_group,r.robust_se,r.z_value,r.p_value,r.q_value,r.subject_effect,r.subject_q_value,r.mean_case,r.mean_control,r.n_samples,r.n_subjects)
+fn adjusted_hover(r: &AdjustedFeatureResult) -> String {
+    format!(
+        "<b>{}</b>{}<br>Adjusted β: {:.4}<br>SE: {:.4}<br>z: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Subject-collapsed effect: {:.4}<br>Subject BH q: {:.3e}<br>Case/control mean: {:.4} / {:.4}<br>n samples/subjects: {} / {}",
+        escape_hover_text(&r.feature),
+        if r.secondary_id.is_empty() {
+            String::new()
+        } else {
+            format!("<br>{}", escape_hover_text(&r.secondary_id))
+        },
+        r.beta_group,
+        r.robust_se,
+        r.z_value,
+        r.p_value,
+        r.q_value,
+        r.subject_effect,
+        r.subject_q_value,
+        r.mean_case,
+        r.mean_control,
+        r.n_samples,
+        r.n_subjects
+    )
 }
 
-fn adjusted_volcano_plot(tests:&[AdjustedFeatureResult],title:&str)->Option<Plot>{
-    let rows=tests.iter().filter(|r|r.beta_group.is_finite()&&r.q_value.is_finite()&&r.q_value>0.0).collect::<Vec<_>>(); if rows.is_empty(){return None;}
-    let x=rows.iter().map(|r|r.beta_group).collect(); let y=rows.iter().map(|r|-r.q_value.max(1e-300).log10()).collect(); let h=rows.iter().map(|r|adjusted_hover(r)).collect();
-    labeled_scatter_plot(vec![("Adjusted tests".to_string(),x,y,h)],title,"Adjusted group coefficient","-log10(BH q)")
-}
-
-fn corrected_ordination_plot(ord:&OrdinationResult)->Option<Plot>{
-    let mut traces=Vec::new();
-    for group in ["Control","Case"] {
-        let pts=ord.points.iter().filter(|p|p.group==group).collect::<Vec<_>>();
-        let x=pts.iter().map(|p|p.x).collect(); let y=pts.iter().map(|p|p.y).collect();
-        let hover=pts.iter().map(|p|format!("<b>{}</b><br>Group: {}<br>Subject: {}<br>{}: {:.4}<br>{}: {:.4}",escape_hover_text(&p.sample_id),p.group,escape_hover_text(&p.subject),ord.x_label,p.x,ord.y_label,p.y)).collect();
-        traces.push((group.to_string(),x,y,hover));
+fn adjusted_volcano_plot(tests: &[AdjustedFeatureResult], title: &str) -> Option<Plot> {
+    let rows = tests
+        .iter()
+        .filter(|r| r.beta_group.is_finite() && r.q_value.is_finite() && r.q_value > 0.0)
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return None;
     }
-    let title=if ord.permanova_p.is_finite(){format!("{} — PERMANOVA F={:.3}, p={:.3e}",ord.name,ord.permanova_f,ord.permanova_p)}else{ord.name.clone()};
-    labeled_scatter_plot(traces,&title,&ord.x_label,&ord.y_label)
+    let x = rows.iter().map(|r| r.beta_group).collect();
+    let y = rows
+        .iter()
+        .map(|r| -r.q_value.max(1e-300).log10())
+        .collect();
+    let h = rows.iter().map(|r| adjusted_hover(r)).collect();
+    labeled_scatter_plot(
+        vec![("Adjusted tests".to_string(), x, y, h)],
+        title,
+        "Adjusted group coefficient",
+        "-log10(BH q)",
+    )
 }
 
-fn corrected_dendrogram_plot(tree:&DendrogramResult)->Option<Plot>{
-    if tree.leaves.is_empty() || tree.segments.is_empty(){return None;}
-    let mut plot=Plot::new();
-    let mut xs:Vec<Option<f64>>=Vec::with_capacity(tree.segments.len()*3);
-    let mut ys:Vec<Option<f64>>=Vec::with_capacity(tree.segments.len()*3);
-    for seg in &tree.segments{
-        xs.push(Some(seg.x1));ys.push(Some(seg.y1));
-        xs.push(Some(seg.x2));ys.push(Some(seg.y2));
-        xs.push(None);ys.push(None);
+fn corrected_ordination_plot(ord: &OrdinationResult) -> Option<Plot> {
+    let mut traces = Vec::new();
+    for group in ["Control", "Case"] {
+        let pts = ord
+            .points
+            .iter()
+            .filter(|p| p.group == group)
+            .collect::<Vec<_>>();
+        let x = pts.iter().map(|p| p.x).collect();
+        let y = pts.iter().map(|p| p.y).collect();
+        let hover = pts
+            .iter()
+            .map(|p| {
+                format!(
+                    "<b>{}</b><br>Group: {}<br>Subject: {}<br>{}: {:.4}<br>{}: {:.4}",
+                    escape_hover_text(&p.sample_id),
+                    p.group,
+                    escape_hover_text(&p.subject),
+                    ord.x_label,
+                    p.x,
+                    ord.y_label,
+                    p.y
+                )
+            })
+            .collect();
+        traces.push((group.to_string(), x, y, hover));
     }
-    plot.add_trace(Scatter::new(xs,ys).mode(Mode::Lines).name("Average-linkage tree").hover_info(HoverInfo::Skip));
-    for group in ["Control","Case"]{
-        let leaves=tree.leaves.iter().filter(|l|l.group==group).collect::<Vec<_>>();
-        if leaves.is_empty(){continue;}
-        let x=vec![0.0;leaves.len()];
-        let y=leaves.iter().map(|l|l.position).collect::<Vec<_>>();
-        let h=leaves.iter().map(|l|format!("<b>{}</b><br>Group: {}<br>Subject: {}<br>Cluster order: {}",escape_hover_text(&l.sample_id),l.group,escape_hover_text(&l.subject),l.position as usize+1)).collect::<Vec<_>>();
-        plot.add_trace(Scatter::new(x,y).mode(Mode::Markers).name(group).hover_text_array(h).hover_template("%{hovertext}<extra>%{fullData.name}</extra>"));
+    let title = if ord.permanova_p.is_finite() {
+        format!(
+            "{} — PERMANOVA F={:.3}, p={:.3e}",
+            ord.name, ord.permanova_f, ord.permanova_p
+        )
+    } else {
+        ord.name.clone()
+    };
+    labeled_scatter_plot(traces, &title, &ord.x_label, &ord.y_label)
+}
+
+fn corrected_dendrogram_plot(tree: &DendrogramResult) -> Option<Plot> {
+    if tree.leaves.is_empty() || tree.segments.is_empty() {
+        return None;
     }
-    plot.set_layout(Layout::new().title(Title::with_text(&tree.name)).x_axis(Axis::new().title(Title::with_text(&tree.distance_label))).y_axis(Axis::new().title(Title::with_text("Cluster leaf order"))));
+    let mut plot = Plot::new();
+    let mut xs: Vec<Option<f64>> = Vec::with_capacity(tree.segments.len() * 3);
+    let mut ys: Vec<Option<f64>> = Vec::with_capacity(tree.segments.len() * 3);
+    for seg in &tree.segments {
+        xs.push(Some(seg.x1));
+        ys.push(Some(seg.y1));
+        xs.push(Some(seg.x2));
+        ys.push(Some(seg.y2));
+        xs.push(None);
+        ys.push(None);
+    }
+    plot.add_trace(
+        Scatter::new(xs, ys)
+            .mode(Mode::Lines)
+            .name("Average-linkage tree")
+            .hover_info(HoverInfo::Skip),
+    );
+    for group in ["Control", "Case"] {
+        let leaves = tree
+            .leaves
+            .iter()
+            .filter(|l| l.group == group)
+            .collect::<Vec<_>>();
+        if leaves.is_empty() {
+            continue;
+        }
+        let x = vec![0.0; leaves.len()];
+        let y = leaves.iter().map(|l| l.position).collect::<Vec<_>>();
+        let h = leaves
+            .iter()
+            .map(|l| {
+                format!(
+                    "<b>{}</b><br>Group: {}<br>Subject: {}<br>Cluster order: {}",
+                    escape_hover_text(&l.sample_id),
+                    l.group,
+                    escape_hover_text(&l.subject),
+                    l.position as usize + 1
+                )
+            })
+            .collect::<Vec<_>>();
+        plot.add_trace(
+            Scatter::new(x, y)
+                .mode(Mode::Markers)
+                .name(group)
+                .hover_text_array(h)
+                .hover_template("%{hovertext}<extra>%{fullData.name}</extra>"),
+        );
+    }
+    plot.set_layout(
+        Layout::new()
+            .title(Title::with_text(&tree.name))
+            .x_axis(Axis::new().title(Title::with_text(&tree.distance_label)))
+            .y_axis(Axis::new().title(Title::with_text("Cluster leaf order"))),
+    );
     Some(plot)
 }
 
-fn compact_hover_gene_list(value:&str,max_items:usize,max_chars:usize)->String{
-    let items=value.split(',').map(str::trim).filter(|x|!x.is_empty()).collect::<Vec<_>>();
-    if items.is_empty(){return "none".to_string();}
-    let mut shown=Vec::new();let mut chars=0usize;
-    for item in items.iter().take(max_items){
-        let extra=if shown.is_empty(){item.len()}else{item.len()+2};
-        if !shown.is_empty() && chars+extra>max_chars{break;}
-        shown.push(*item);chars+=extra;
+fn compact_hover_gene_list(value: &str, max_items: usize, max_chars: usize) -> String {
+    let items = value
+        .split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return "none".to_string();
     }
-    let remaining=items.len().saturating_sub(shown.len());
-    let display=if remaining>0{format!("{} … (+{} more)",shown.join(", "),remaining)}else{shown.join(", ")};
+    let mut shown = Vec::new();
+    let mut chars = 0usize;
+    for item in items.iter().take(max_items) {
+        let extra = if shown.is_empty() {
+            item.len()
+        } else {
+            item.len() + 2
+        };
+        if !shown.is_empty() && chars + extra > max_chars {
+            break;
+        }
+        shown.push(*item);
+        chars += extra;
+    }
+    let remaining = items.len().saturating_sub(shown.len());
+    let display = if remaining > 0 {
+        format!("{} … (+{} more)", shown.join(", "), remaining)
+    } else {
+        shown.join(", ")
+    };
     escape_hover_text(&display)
 }
 
-fn dtu_gene_table(tests:&[DtuGeneResult],limit:usize)->Markup {
-    html!{h4{"Gene-level DTU screen ("(tests.len())" rows; showing up to "(limit.min(tests.len()))")"} div class="table-container"{table{thead{tr{th{"NCBI Gene ID"}th{"Transcripts"}th{"Simes p"}th{"BH q"}th{"Max |CLR effect|"}}}tbody{@for r in tests.iter().take(limit){tr{td{(r.gene_id)}td{(r.n_transcripts)}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.max_abs_clr_effect))}}}}}}}
+fn dtu_gene_table(tests: &[DtuGeneResult], limit: usize) -> Markup {
+    html! {h4{"Gene-level DTU screen ("(tests.len())" rows; showing up to "(limit.min(tests.len()))")"} div class="table-container"{table{thead{tr{th{"NCBI Gene ID"}th{"Transcripts"}th{"Simes p"}th{"BH q"}th{"Max |CLR effect|"}}}tbody{@for r in tests.iter().take(limit){tr{td{(r.gene_id)}td{(r.n_transcripts)}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.max_abs_clr_effect))}}}}}}}
 }
 
-fn adjusted_table(title:&str,tests:&[AdjustedFeatureResult],limit:usize)->Markup{
-    html!{h3{(title)" ("(tests.len())" rows; showing up to "(limit.min(tests.len()))")"} div class="table-container"{table{thead{tr{th{"Feature"}th{"ID/family"}th{"β group"}th{"SE"}th{"p"}th{"BH q"}th{"Subject effect"}th{"Subject BH q"}th{"n"}th{"subjects"}th{"Case mean"}th{"Control mean"}}} tbody{@for r in tests.iter().take(limit){tr{td{(r.feature)}td{(r.secondary_id)}td{(fmt(r.beta_group))}td{(fmt(r.robust_se))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.subject_effect))}td{(fmt_sci(r.subject_q_value))}td{(r.n_samples)}td{(r.n_subjects)}td{(fmt(r.mean_case))}td{(fmt(r.mean_control))}}}}}}}
+fn adjusted_table(title: &str, tests: &[AdjustedFeatureResult], limit: usize) -> Markup {
+    html! {h3{(title)" ("(tests.len())" rows; showing up to "(limit.min(tests.len()))")"} div class="table-container"{table{thead{tr{th{"Feature"}th{"ID/family"}th{"β group"}th{"SE"}th{"p"}th{"BH q"}th{"Subject effect"}th{"Subject BH q"}th{"n"}th{"subjects"}th{"Case mean"}th{"Control mean"}}} tbody{@for r in tests.iter().take(limit){tr{td{(r.feature)}td{(r.secondary_id)}td{(fmt(r.beta_group))}td{(fmt(r.robust_se))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.subject_effect))}td{(fmt_sci(r.subject_q_value))}td{(r.n_samples)}td{(r.n_subjects)}td{(fmt(r.mean_case))}td{(fmt(r.mean_control))}}}}}}}
 }
 
-pub fn generate_focused_candidate_html_report(path:&Path, summary:&FocusedCandidateSummary)->Result<()> {
-    let title=format!("4C focused candidate signals — {} vs {}",summary.case_label,summary.control_label);
-    let mut report=Report::new("4C Cohort Explorer",env!("CARGO_PKG_VERSION"),None,&title);
+pub fn generate_focused_candidate_html_report(
+    path: &Path,
+    summary: &FocusedCandidateSummary,
+) -> Result<()> {
+    let title = format!(
+        "4C focused candidate signals — {} vs {}",
+        summary.case_label, summary.control_label
+    );
+    let mut report = Report::new(
+        "4C Cohort Explorer",
+        env!("CARGO_PKG_VERSION"),
+        None,
+        &title,
+    );
 
-    let mut overview=ReportSection::new("Overview");
+    let mut overview = ReportSection::new("Overview");
     overview.add_content(html!{
         h2{"Focused candidate-signal summary"}
         p{strong{"Comparison: "}(summary.case_label)" vs "(summary.control_label)}
@@ -1090,26 +1560,30 @@ pub fn generate_focused_candidate_html_report(path:&Path, summary:&FocusedCandid
     });
     report.add_section(overview);
 
-    let mut genes=ReportSection::new("Candidate genes");
+    let mut genes = ReportSection::new("Candidate genes");
     genes.add_content(html!{
         p{"Genes are ranked primarily by corrected BH q-value, then nominal p-value and absolute adjusted log2 fold change. The shortlist requires |adjusted log2FC| ≥ "(fmt(summary.settings.min_gene_abs_log2fc))". Pathway support counts how many q≤0.10 enriched pathways contain the gene."}
         (focused_gene_table(&summary.genes))
     });
-    if let Some(plot)=focused_gene_plot(&summary.genes){genes.add_plot(plot);}
+    if let Some(plot) = focused_gene_plot(&summary.genes) {
+        genes.add_plot(plot);
+    }
     report.add_section(genes);
 
-    if !summary.pathways.is_empty(){
-        let mut pathways=ReportSection::new("Candidate pathways");
+    if !summary.pathways.is_empty() {
+        let mut pathways = ReportSection::new("Candidate pathways");
         pathways.add_content(html!{
             p{"Pathways are ranked by BH q-value and enrichment strength. Odds ratio >1 indicates over-representation among the corrected gene foreground. Related pathways often share genes, so multiple significant sets can reflect one broader biological theme."}
             (focused_pathway_table(&summary.pathways))
         });
-        if let Some(plot)=focused_pathway_plot(&summary.pathways){pathways.add_plot(plot);}
+        if let Some(plot) = focused_pathway_plot(&summary.pathways) {
+            pathways.add_plot(plot);
+        }
         report.add_section(pathways);
     }
 
-    if !summary.other.is_empty(){
-        let mut other=ReportSection::new("Other candidate signals");
+    if !summary.other.is_empty() {
+        let mut other = ReportSection::new("Other candidate signals");
         other.add_content(html!{
             p{"This table collects the strongest corrected signals from BCR/TCR repertoire metrics and compositions, BCR isotypes, and immune-infiltrate scores. Effects are on each model's analysis scale and should be interpreted within the named modality/family rather than compared numerically across modalities."}
             (focused_other_table(&summary.other))
@@ -1117,8 +1591,8 @@ pub fn generate_focused_candidate_html_report(path:&Path, summary:&FocusedCandid
         report.add_section(other);
     }
 
-    if !summary.transcripts.is_empty(){
-        let mut transcripts=ReportSection::new("Candidate transcripts");
+    if !summary.transcripts.is_empty() {
+        let mut transcripts = ReportSection::new("Candidate transcripts");
         transcripts.add_content(html!{
             p{"Transcript-level abundance signals are shown separately from gene-level candidates. They can motivate isoform follow-up but should not be interpreted as differential transcript usage unless supported by the dedicated DTU analysis."}
             (focused_gene_table(&summary.transcripts))
@@ -1126,7 +1600,7 @@ pub fn generate_focused_candidate_html_report(path:&Path, summary:&FocusedCandid
         report.add_section(transcripts);
     }
 
-    let mut interpretation=ReportSection::new("Interpretation & next steps");
+    let mut interpretation = ReportSection::new("Interpretation & next steps");
     interpretation.add_content(html!{
         h3{"How to present these results"}
         ul{
@@ -1140,41 +1614,74 @@ pub fn generate_focused_candidate_html_report(path:&Path, summary:&FocusedCandid
     });
     report.add_section(interpretation);
 
-    let output=path.to_string_lossy().to_string();
-    report.save_to_file(&output).with_context(||format!("Could not write focused HTML report to {}",path.display()))?;
+    let output = path.to_string_lossy().to_string();
+    report
+        .save_to_file(&output)
+        .with_context(|| format!("Could not write focused HTML report to {}", path.display()))?;
     make_report_self_contained(path)?;
     Ok(())
 }
 
-fn focused_gene_plot(rows:&[FocusedGeneCandidate])->Option<Plot>{
-    let rows=rows.iter().filter(|r|r.q_value.is_finite()&&r.q_value>0.0&&r.adjusted_log2fc.is_finite()).collect::<Vec<_>>();
-    if rows.is_empty(){return None;}
-    let x=rows.iter().map(|r|r.adjusted_log2fc).collect();
-    let y=rows.iter().map(|r|-r.q_value.max(1e-300).log10()).collect();
+fn focused_gene_plot(rows: &[FocusedGeneCandidate]) -> Option<Plot> {
+    let rows = rows
+        .iter()
+        .filter(|r| r.q_value.is_finite() && r.q_value > 0.0 && r.adjusted_log2fc.is_finite())
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return None;
+    }
+    let x = rows.iter().map(|r| r.adjusted_log2fc).collect();
+    let y = rows
+        .iter()
+        .map(|r| -r.q_value.max(1e-300).log10())
+        .collect();
     let hover=rows.iter().map(|r|{
         let concordance=match r.direction_concordant{Some(true)=>"same direction",Some(false)=>"opposite direction",None=>"not available"};
         format!("<b>{}</b><br>Gene ID: {}<br>Adjusted log2FC: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Case/control mean: {:.3} / {:.3}<br>Exploratory concordance: {}<br>Pathway support: {}<br>{}",escape_hover_text(&r.gene),escape_hover_text(&r.gene_id),r.adjusted_log2fc,r.p_value,r.q_value,r.case_mean,r.control_mean,concordance,r.pathway_support_count,escape_hover_text(&r.evidence))
     }).collect();
-    labeled_scatter_plot(vec![("Candidate genes".to_string(),x,y,hover)],"Focused candidate genes","Adjusted log2 fold change","-log10(BH q)")
+    labeled_scatter_plot(
+        vec![("Candidate genes".to_string(), x, y, hover)],
+        "Focused candidate genes",
+        "Adjusted log2 fold change",
+        "-log10(BH q)",
+    )
 }
 
-fn focused_pathway_plot(rows:&[FocusedPathwayCandidate])->Option<Plot>{
-    let rows=rows.iter().filter(|r|r.q_value.is_finite()&&r.q_value>0.0&&r.odds_ratio.is_finite()&&r.odds_ratio>0.0).collect::<Vec<_>>();
-    if rows.is_empty(){return None;}
-    let x=rows.iter().map(|r|r.odds_ratio.ln()).collect();
-    let y=rows.iter().map(|r|-r.q_value.max(1e-300).log10()).collect();
+fn focused_pathway_plot(rows: &[FocusedPathwayCandidate]) -> Option<Plot> {
+    let rows = rows
+        .iter()
+        .filter(|r| {
+            r.q_value.is_finite()
+                && r.q_value > 0.0
+                && r.odds_ratio.is_finite()
+                && r.odds_ratio > 0.0
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return None;
+    }
+    let x = rows.iter().map(|r| r.odds_ratio.ln()).collect();
+    let y = rows
+        .iter()
+        .map(|r| -r.q_value.max(1e-300).log10())
+        .collect();
     let hover=rows.iter().map(|r|format!("<b>{}</b><br>Overlap: {}/{}<br>Odds ratio: {:.3}<br>p: {:.3e}<br>BH q: {:.3e}<br>Overlap genes: {}",escape_hover_text(&r.pathway),r.overlap,r.measured_set_size,r.odds_ratio,r.p_value,r.q_value,compact_hover_gene_list(&r.overlap_genes,6,110))).collect();
-    labeled_scatter_plot(vec![("Candidate pathways".to_string(),x,y,hover)],"Focused candidate pathways","ln odds ratio","-log10(BH q)")
+    labeled_scatter_plot(
+        vec![("Candidate pathways".to_string(), x, y, hover)],
+        "Focused candidate pathways",
+        "ln odds ratio",
+        "-log10(BH q)",
+    )
 }
 
-fn focused_gene_table(rows:&[FocusedGeneCandidate])->Markup{
-    html!{div class="table-container"{table{thead{tr{th{"Rank"}th{"Gene / transcript"}th{"ID"}th{"Adjusted log2FC"}th{"p"}th{"BH q"}th{"Case mean"}th{"Control mean"}th{"Exploratory direction"}th{"Pathway support"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.gene)}td{(r.gene_id)}td{(fmt(r.adjusted_log2fc))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.case_mean))}td{(fmt(r.control_mean))}td{(match r.direction_concordant{Some(true)=>"same",Some(false)=>"opposite",None=>"—"})}td{(r.pathway_support_count) @if !r.pathway_support.is_empty(){br; small{(r.pathway_support)}}}td{(r.evidence)}}}}}}}
+fn focused_gene_table(rows: &[FocusedGeneCandidate]) -> Markup {
+    html! {div class="table-container"{table{thead{tr{th{"Rank"}th{"Gene / transcript"}th{"ID"}th{"Adjusted log2FC"}th{"p"}th{"BH q"}th{"Case mean"}th{"Control mean"}th{"Exploratory direction"}th{"Pathway support"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.gene)}td{(r.gene_id)}td{(fmt(r.adjusted_log2fc))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.case_mean))}td{(fmt(r.control_mean))}td{(match r.direction_concordant{Some(true)=>"same",Some(false)=>"opposite",None=>"—"})}td{(r.pathway_support_count) @if !r.pathway_support.is_empty(){br; small{(r.pathway_support)}}}td{(r.evidence)}}}}}}}
 }
 
-fn focused_pathway_table(rows:&[FocusedPathwayCandidate])->Markup{
-    html!{div class="table-container"{table{thead{tr{th{"Rank"}th{"Pathway"}th{"Description"}th{"Odds ratio"}th{"Overlap"}th{"Set size"}th{"p"}th{"BH q"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.pathway)}td{(r.description)}td{(fmt(r.odds_ratio))}td{(r.overlap)}td{(r.measured_set_size)}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(r.evidence)}}}}}}}
+fn focused_pathway_table(rows: &[FocusedPathwayCandidate]) -> Markup {
+    html! {div class="table-container"{table{thead{tr{th{"Rank"}th{"Pathway"}th{"Description"}th{"Odds ratio"}th{"Overlap"}th{"Set size"}th{"p"}th{"BH q"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.pathway)}td{(r.description)}td{(fmt(r.odds_ratio))}td{(r.overlap)}td{(r.measured_set_size)}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(r.evidence)}}}}}}}
 }
 
-fn focused_other_table(rows:&[FocusedOtherCandidate])->Markup{
-    html!{div class="table-container"{table{thead{tr{th{"Rank"}th{"Modality"}th{"Family"}th{"Feature"}th{"ID"}th{"Effect"}th{"p"}th{"BH q"}th{"Case mean"}th{"Control mean"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.modality)}td{(r.family)}td{(r.feature)}td{(r.secondary_id)}td{(fmt(r.effect))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.case_mean))}td{(fmt(r.control_mean))}td{(r.evidence)}}}}}}}
+fn focused_other_table(rows: &[FocusedOtherCandidate]) -> Markup {
+    html! {div class="table-container"{table{thead{tr{th{"Rank"}th{"Modality"}th{"Family"}th{"Feature"}th{"ID"}th{"Effect"}th{"p"}th{"BH q"}th{"Case mean"}th{"Control mean"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.modality)}td{(r.family)}td{(r.feature)}td{(r.secondary_id)}td{(fmt(r.effect))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.case_mean))}td{(fmt(r.control_mean))}td{(r.evidence)}}}}}}}
 }

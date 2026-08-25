@@ -1,11 +1,12 @@
 pub mod cohort;
 pub mod corrected;
+pub mod diagnostics;
 pub mod focused;
 pub mod gmt_catalog;
 pub mod report;
 
-use anyhow::{anyhow, bail, Context, Result};
-use calamine::{open_workbook, Data, Range, Reader, Xlsx};
+use anyhow::{Context, Result, anyhow, bail};
+use calamine::{Data, Range, Reader, Xlsx, open_workbook};
 use csv::{ReaderBuilder, WriterBuilder};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -336,8 +337,7 @@ where
         .saturating_mul(n_metrics)
         .saturating_mul(CELL_BYTES)
         .max(1);
-    let samples_per_chunk = (TARGET_CHUNK_BYTES / bytes_per_sample)
-        .clamp(1, MAX_SAMPLES_PER_CHUNK);
+    let samples_per_chunk = (TARGET_CHUNK_BYTES / bytes_per_sample).clamp(1, MAX_SAMPLES_PER_CHUNK);
 
     let tempdir = TempDir::new().context("cannot create temporary working directory")?;
     let mut chunk_paths = Vec::new();
@@ -352,15 +352,13 @@ where
             progress(
                 sample_no,
                 config.files.len(),
-                &format!("Reading {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                &format!(
+                    "Reading {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ),
             );
-            let (cells, missing, unknown) = read_sample(
-                path,
-                kind,
-                &config.metrics,
-                &index,
-                n_rows,
-            )?;
+            let (cells, missing, unknown) =
+                read_sample(path, kind, &config.metrics, &index, n_rows)?;
             missing_rows_total += missing;
             unknown_rows_total += unknown;
             sample_cells.push(cells);
@@ -380,7 +378,11 @@ where
         chunk_paths.push((chunk_path, group.len()));
     }
 
-    progress(config.files.len(), config.files.len(), "Writing merged table");
+    progress(
+        config.files.len(),
+        config.files.len(),
+        "Writing merged table",
+    );
     write_wide_output(
         &config.output,
         kind,
@@ -475,8 +477,8 @@ fn read_sample(
 }
 
 fn read_sheet(path: &Path) -> Result<(Vec<String>, Range<Data>)> {
-    let mut workbook: Xlsx<_> = open_workbook(path)
-        .with_context(|| format!("cannot open workbook {}", path.display()))?;
+    let mut workbook: Xlsx<_> =
+        open_workbook(path).with_context(|| format!("cannot open workbook {}", path.display()))?;
     let sheet_name = workbook
         .sheet_names()
         .first()
@@ -499,7 +501,8 @@ fn schema_from_headers(headers: &[String], requested_kind: DataKind) -> Result<S
         columns.insert(h.trim().to_string(), i);
     }
 
-    let detected = if columns.contains_key("Transcript Name") && columns.contains_key("Total Reads") {
+    let detected = if columns.contains_key("Transcript Name") && columns.contains_key("Total Reads")
+    {
         DataKind::Transcript
     } else if columns.contains_key("RNA-Seq Raw Counts") {
         DataKind::Gene
@@ -591,7 +594,11 @@ fn parse_measurement(cell: &Data, metric: Metric) -> Result<StoredCell> {
         Data::Float(v) => *v,
         Data::String(s) => s.trim().parse::<f64>()?,
         Data::Bool(v) => {
-            if *v { 1.0 } else { 0.0 }
+            if *v {
+                1.0
+            } else {
+                0.0
+            }
         }
         _ => cell_text(cell).trim().parse::<f64>()?,
     };
@@ -623,10 +630,7 @@ fn write_wide_output(
 
     let mut header = match kind {
         DataKind::Gene => vec!["Gene Symbol".to_string(), "NCBI Gene ID".to_string()],
-        DataKind::Transcript => vec![
-            "Transcript Name".to_string(),
-            "NCBI Gene ID".to_string(),
-        ],
+        DataKind::Transcript => vec!["Transcript Name".to_string(), "NCBI Gene ID".to_string()],
         DataKind::Auto => unreachable!(),
     };
 
@@ -671,10 +675,7 @@ fn write_wide_output(
 
         let mut record = match kind {
             DataKind::Gene => vec![entity.key.primary.clone(), entity.key.gene_id.clone()],
-            DataKind::Transcript => vec![
-                entity.key.primary.clone(),
-                entity.key.gene_id.clone(),
-            ],
+            DataKind::Transcript => vec![entity.key.primary.clone(), entity.key.gene_id.clone()],
             DataKind::Auto => unreachable!(),
         };
 
@@ -763,7 +764,10 @@ where
         bail!("no input files were selected");
     }
     if !metric.is_numeric() {
-        bail!("'{}' is categorical and cannot be plotted as a numeric distribution", metric.display_name());
+        bail!(
+            "'{}' is categorical and cannot be plotted as a numeric distribution",
+            metric.display_name()
+        );
     }
 
     let mut summaries = Vec::with_capacity(files.len());
@@ -851,7 +855,10 @@ where
         bail!("no input files were selected");
     }
     if !metric.is_numeric() {
-        bail!("'{}' is categorical and cannot be plotted as a numeric profile", metric.display_name());
+        bail!(
+            "'{}' is categorical and cannot be plotted as a numeric profile",
+            metric.display_name()
+        );
     }
 
     let wanted = EntityKey {
@@ -895,7 +902,6 @@ where
 
     Ok(out)
 }
-
 
 /// Inspect a merged TSV produced by this tool without loading its data matrix.
 pub fn inspect_merged_tsv(path: &Path) -> Result<MergedDatasetInfo> {
@@ -967,23 +973,16 @@ where
         );
     }
 
-    let file = File::open(path)
-        .with_context(|| format!("cannot open merged TSV {}", path.display()))?;
-    let n_rows = BufReader::new(file)
-        .lines()
-        .skip(1)
-        .count()
-        .max(1);
+    let file =
+        File::open(path).with_context(|| format!("cannot open merged TSV {}", path.display()))?;
+    let n_rows = BufReader::new(file).lines().skip(1).count().max(1);
     let bytes_per_sample = n_rows.saturating_mul(std::mem::size_of::<f64>()).max(1);
     let samples_per_chunk = (TARGET_CHUNK_BYTES / bytes_per_sample).clamp(1, 128);
 
     let mut summaries = Vec::with_capacity(columns.len());
     let total_samples = columns.len();
     for chunk in columns.chunks(samples_per_chunk) {
-        let mut values: Vec<Vec<f64>> = chunk
-            .iter()
-            .map(|_| Vec::with_capacity(n_rows))
-            .collect();
+        let mut values: Vec<Vec<f64>> = chunk.iter().map(|_| Vec::with_capacity(n_rows)).collect();
         let mut n_total = vec![0usize; chunk.len()];
         let mut n_missing = vec![0usize; chunk.len()];
         let mut n_zero = vec![0usize; chunk.len()];
@@ -1156,7 +1155,10 @@ fn read_merged_schema(path: &Path) -> Result<MergedSchema> {
             continue;
         };
         if !seen_sample_metrics.insert((sample.clone(), metric)) {
-            bail!("duplicate merged TSV column for sample '{sample}' and '{}'", metric.display_name());
+            bail!(
+                "duplicate merged TSV column for sample '{sample}' and '{}'",
+                metric.display_name()
+            );
         }
         if seen_samples.insert(sample.clone()) {
             samples.push(sample.clone());

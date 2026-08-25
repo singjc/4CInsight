@@ -115,11 +115,19 @@ fn finite_or_inf(x: f64) -> f64 {
     if x.is_finite() { x } else { f64::INFINITY }
 }
 
-fn exploratory_index(result: Option<&GeneComparisonResult>) -> HashMap<(String, String), &FeatureTestResult> {
+fn exploratory_index(
+    result: Option<&GeneComparisonResult>,
+) -> HashMap<(String, String), &FeatureTestResult> {
     let mut out = HashMap::new();
     if let Some(result) = result {
         for row in &result.tests {
-            out.insert((row.feature.to_ascii_uppercase(), row.secondary_id.to_ascii_uppercase()), row);
+            out.insert(
+                (
+                    row.feature.to_ascii_uppercase(),
+                    row.secondary_id.to_ascii_uppercase(),
+                ),
+                row,
+            );
         }
     }
     out
@@ -127,11 +135,24 @@ fn exploratory_index(result: Option<&GeneComparisonResult>) -> HashMap<(String, 
 
 fn pathway_support_index(pathway: Option<&CorrectedPathwayResult>) -> HashMap<String, Vec<String>> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
-    let Some(pathway) = pathway else { return out; };
-    for row in pathway.tests.iter().filter(|r| r.q_value.is_finite() && r.q_value <= 0.10 && r.odds_ratio > 1.0) {
-        for gene in row.overlap_genes.split(',').map(str::trim).filter(|x| !x.is_empty()) {
+    let Some(pathway) = pathway else {
+        return out;
+    };
+    for row in pathway
+        .tests
+        .iter()
+        .filter(|r| r.q_value.is_finite() && r.q_value <= 0.10 && r.odds_ratio > 1.0)
+    {
+        for gene in row
+            .overlap_genes
+            .split(',')
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+        {
             let entry = out.entry(gene.to_ascii_uppercase()).or_default();
-            if !entry.iter().any(|p| p == &row.pathway) { entry.push(row.pathway.clone()); }
+            if !entry.iter().any(|p| p == &row.pathway) {
+                entry.push(row.pathway.clone());
+            }
         }
     }
     out
@@ -144,14 +165,20 @@ fn shortlist_expression(
     top_n: usize,
     min_abs_effect: f64,
 ) -> Vec<FocusedGeneCandidate> {
-    let Some(corrected) = corrected else { return Vec::new(); };
+    let Some(corrected) = corrected else {
+        return Vec::new();
+    };
     let exploratory = exploratory_index(exploratory);
     let pathway_support = pathway_support_index(pathway);
 
     let mut rows = corrected
         .tests
         .iter()
-        .filter(|r| r.beta_group.is_finite() && r.beta_group.abs() >= min_abs_effect && r.p_value.is_finite())
+        .filter(|r| {
+            r.beta_group.is_finite()
+                && r.beta_group.abs() >= min_abs_effect
+                && r.p_value.is_finite()
+        })
         .collect::<Vec<_>>();
     rows.sort_by(|a, b| {
         finite_or_inf(a.q_value)
@@ -164,19 +191,34 @@ fn shortlist_expression(
         .take(top_n)
         .enumerate()
         .map(|(idx, r)| {
-            let key = (r.feature.to_ascii_uppercase(), r.secondary_id.to_ascii_uppercase());
+            let key = (
+                r.feature.to_ascii_uppercase(),
+                r.secondary_id.to_ascii_uppercase(),
+            );
             let exp = exploratory.get(&key).copied();
             let exploratory_log2fc = exp.map(|x| x.effect);
             let exploratory_q = exp.map(|x| x.q_value);
             let direction_concordant = exp.and_then(|x| {
-                if x.effect.is_finite() && r.beta_group.is_finite() && x.effect != 0.0 && r.beta_group != 0.0 {
+                if x.effect.is_finite()
+                    && r.beta_group.is_finite()
+                    && x.effect != 0.0
+                    && r.beta_group != 0.0
+                {
                     Some(x.effect.signum() == r.beta_group.signum())
                 } else {
                     None
                 }
             });
-            let support = pathway_support.get(&r.feature.to_ascii_uppercase()).cloned().unwrap_or_default();
-            let support_display=support.iter().take(8).cloned().collect::<Vec<_>>().join("; ");
+            let support = pathway_support
+                .get(&r.feature.to_ascii_uppercase())
+                .cloned()
+                .unwrap_or_default();
+            let support_display = support
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ");
             FocusedGeneCandidate {
                 rank: idx + 1,
                 gene: r.feature.clone(),
@@ -197,12 +239,23 @@ fn shortlist_expression(
         .collect()
 }
 
-fn shortlist_pathways(pathway: Option<&CorrectedPathwayResult>, top_n: usize) -> Vec<FocusedPathwayCandidate> {
-    let Some(pathway) = pathway else { return Vec::new(); };
+fn shortlist_pathways(
+    pathway: Option<&CorrectedPathwayResult>,
+    top_n: usize,
+) -> Vec<FocusedPathwayCandidate> {
+    let Some(pathway) = pathway else {
+        return Vec::new();
+    };
     let mut rows = pathway
         .tests
         .iter()
-        .filter(|r| r.overlap > 0 && r.p_value.is_finite() && r.p_value < 1.0 && r.odds_ratio.is_finite() && r.odds_ratio > 1.0)
+        .filter(|r| {
+            r.overlap > 0
+                && r.p_value.is_finite()
+                && r.p_value < 1.0
+                && r.odds_ratio.is_finite()
+                && r.odds_ratio > 1.0
+        })
         .collect::<Vec<_>>();
     rows.sort_by(|a, b| {
         finite_or_inf(a.q_value)
@@ -235,7 +288,9 @@ fn append_adjusted_candidates(
     tests: &[AdjustedFeatureResult],
 ) {
     for r in tests {
-        if !r.p_value.is_finite() || !r.beta_group.is_finite() { continue; }
+        if !r.p_value.is_finite() || !r.beta_group.is_finite() {
+            continue;
+        }
         out.push(FocusedOtherCandidate {
             rank: 0,
             modality: modality.to_string(),
@@ -263,18 +318,24 @@ fn collect_other_candidates(
     let mut out = Vec::new();
     if let Some(r) = bcr {
         append_adjusted_candidates(&mut out, "BCR", "Repertoire metrics", &r.metric_tests);
-        for c in &r.compositions { append_adjusted_candidates(&mut out, "BCR", &c.family, &c.tests); }
+        for c in &r.compositions {
+            append_adjusted_candidates(&mut out, "BCR", &c.family, &c.tests);
+        }
     }
     if let Some(r) = bcr_isotype {
         append_adjusted_candidates(&mut out, "BCR isotype", "Isotype composition", &r.tests);
     }
     if let Some(r) = tcr_alpha {
         append_adjusted_candidates(&mut out, "TCR alpha", "Repertoire metrics", &r.metric_tests);
-        for c in &r.compositions { append_adjusted_candidates(&mut out, "TCR alpha", &c.family, &c.tests); }
+        for c in &r.compositions {
+            append_adjusted_candidates(&mut out, "TCR alpha", &c.family, &c.tests);
+        }
     }
     if let Some(r) = tcr_beta {
         append_adjusted_candidates(&mut out, "TCR beta", "Repertoire metrics", &r.metric_tests);
-        for c in &r.compositions { append_adjusted_candidates(&mut out, "TCR beta", &c.family, &c.tests); }
+        for c in &r.compositions {
+            append_adjusted_candidates(&mut out, "TCR beta", &c.family, &c.tests);
+        }
     }
     if let Some(r) = immune {
         append_adjusted_candidates(&mut out, "Immune infiltrate", "ssGSEA score", &r.tests);
@@ -286,7 +347,9 @@ fn collect_other_candidates(
             .then_with(|| b.effect.abs().total_cmp(&a.effect.abs()))
     });
     out.truncate(top_n);
-    for (idx, row) in out.iter_mut().enumerate() { row.rank = idx + 1; }
+    for (idx, row) in out.iter_mut().enumerate() {
+        row.rank = idx + 1;
+    }
     out
 }
 
@@ -309,18 +372,41 @@ pub fn build_focused_candidate_summary(
     immune: Option<&CorrectedImmuneResult>,
     pathway: Option<&CorrectedPathwayResult>,
 ) -> FocusedCandidateSummary {
-    let genes = shortlist_expression(corrected_gene, exploratory_gene, pathway, settings.top_genes, settings.min_gene_abs_log2fc);
-    let transcripts = shortlist_expression(corrected_transcript, exploratory_transcript, None, settings.top_transcripts, settings.min_gene_abs_log2fc);
+    let genes = shortlist_expression(
+        corrected_gene,
+        exploratory_gene,
+        pathway,
+        settings.top_genes,
+        settings.min_gene_abs_log2fc,
+    );
+    let transcripts = shortlist_expression(
+        corrected_transcript,
+        exploratory_transcript,
+        None,
+        settings.top_transcripts,
+        settings.min_gene_abs_log2fc,
+    );
     let pathways = shortlist_pathways(pathway, settings.top_pathways);
-    let other = collect_other_candidates(bcr, bcr_isotype, tcr_alpha, tcr_beta, immune, settings.top_other);
+    let other = collect_other_candidates(
+        bcr,
+        bcr_isotype,
+        tcr_alpha,
+        tcr_beta,
+        immune,
+        settings.top_other,
+    );
 
     let mut notes = vec![
         "Corrected/standard results are the primary evidence used for prioritization. Exploratory expression results, when requested, are shown only as a direction-concordance check and are not independent validation.".to_string(),
         "Candidate labels are deliberately preliminary. A ranked signal can be useful for follow-up even when it does not meet FDR <= 0.05, especially in a small focused cohort, but it should not be presented as a validated biomarker.".to_string(),
         "Because the focused metadata is expected to contain one sample per individual, repeated-measure clustering is not required. Related family members can still violate strict independence and should be considered in later validation.".to_string(),
     ];
-    if genes.is_empty() { notes.push("No gene passed the configured minimum absolute adjusted log2 fold-change for the focused shortlist.".to_string()); }
-    if pathway.is_none() { notes.push("No pathway collection was analyzed; pathway support is therefore unavailable for gene prioritization.".to_string()); }
+    if genes.is_empty() {
+        notes.push("No gene passed the configured minimum absolute adjusted log2 fold-change for the focused shortlist.".to_string());
+    }
+    if pathway.is_none() {
+        notes.push("No pathway collection was analyzed; pathway support is therefore unavailable for gene prioritization.".to_string());
+    }
 
     FocusedCandidateSummary {
         metadata_path: metadata_path.to_path_buf(),
@@ -337,55 +423,150 @@ pub fn build_focused_candidate_summary(
     }
 }
 
-pub fn write_focused_candidate_tables(folder: &Path, summary: &FocusedCandidateSummary) -> Result<PathBuf> {
+pub fn write_focused_candidate_tables(
+    folder: &Path,
+    summary: &FocusedCandidateSummary,
+) -> Result<PathBuf> {
     fs::create_dir_all(folder).with_context(|| format!("Could not create {}", folder.display()))?;
 
     let gene_path = folder.join("focused_candidate_genes.csv");
     let mut w = WriterBuilder::new().from_path(&gene_path)?;
     w.write_record([
-        "rank","gene","gene_id","adjusted_log2fc","p_value","q_value","case_mean","control_mean",
-        "exploratory_log2fc","exploratory_q","direction_concordant","pathway_support_count","pathway_support","evidence",
+        "rank",
+        "gene",
+        "gene_id",
+        "adjusted_log2fc",
+        "p_value",
+        "q_value",
+        "case_mean",
+        "control_mean",
+        "exploratory_log2fc",
+        "exploratory_q",
+        "direction_concordant",
+        "pathway_support_count",
+        "pathway_support",
+        "evidence",
     ])?;
     for r in &summary.genes {
         w.write_record([
-            r.rank.to_string(), r.gene.clone(), r.gene_id.clone(), r.adjusted_log2fc.to_string(), r.p_value.to_string(), r.q_value.to_string(),
-            r.case_mean.to_string(), r.control_mean.to_string(), r.exploratory_log2fc.map(|x|x.to_string()).unwrap_or_default(),
-            r.exploratory_q.map(|x|x.to_string()).unwrap_or_default(), r.direction_concordant.map(|x|x.to_string()).unwrap_or_default(),
-            r.pathway_support_count.to_string(), r.pathway_support.clone(), r.evidence.clone(),
+            r.rank.to_string(),
+            r.gene.clone(),
+            r.gene_id.clone(),
+            r.adjusted_log2fc.to_string(),
+            r.p_value.to_string(),
+            r.q_value.to_string(),
+            r.case_mean.to_string(),
+            r.control_mean.to_string(),
+            r.exploratory_log2fc
+                .map(|x| x.to_string())
+                .unwrap_or_default(),
+            r.exploratory_q.map(|x| x.to_string()).unwrap_or_default(),
+            r.direction_concordant
+                .map(|x| x.to_string())
+                .unwrap_or_default(),
+            r.pathway_support_count.to_string(),
+            r.pathway_support.clone(),
+            r.evidence.clone(),
         ])?;
     }
     w.flush()?;
 
     let pathway_path = folder.join("focused_candidate_pathways.csv");
     let mut w = WriterBuilder::new().from_path(&pathway_path)?;
-    w.write_record(["rank","pathway","description","odds_ratio","overlap","measured_set_size","p_value","q_value","overlap_genes","evidence"])?;
+    w.write_record([
+        "rank",
+        "pathway",
+        "description",
+        "odds_ratio",
+        "overlap",
+        "measured_set_size",
+        "p_value",
+        "q_value",
+        "overlap_genes",
+        "evidence",
+    ])?;
     for r in &summary.pathways {
         w.write_record([
-            r.rank.to_string(), r.pathway.clone(), r.description.clone(), r.odds_ratio.to_string(), r.overlap.to_string(), r.measured_set_size.to_string(),
-            r.p_value.to_string(), r.q_value.to_string(), r.overlap_genes.clone(), r.evidence.clone(),
+            r.rank.to_string(),
+            r.pathway.clone(),
+            r.description.clone(),
+            r.odds_ratio.to_string(),
+            r.overlap.to_string(),
+            r.measured_set_size.to_string(),
+            r.p_value.to_string(),
+            r.q_value.to_string(),
+            r.overlap_genes.clone(),
+            r.evidence.clone(),
         ])?;
     }
     w.flush()?;
 
     let other_path = folder.join("focused_candidate_other_signals.csv");
     let mut w = WriterBuilder::new().from_path(&other_path)?;
-    w.write_record(["rank","modality","family","feature","secondary_id","effect","p_value","q_value","case_mean","control_mean","evidence"])?;
+    w.write_record([
+        "rank",
+        "modality",
+        "family",
+        "feature",
+        "secondary_id",
+        "effect",
+        "p_value",
+        "q_value",
+        "case_mean",
+        "control_mean",
+        "evidence",
+    ])?;
     for r in &summary.other {
         w.write_record([
-            r.rank.to_string(), r.modality.clone(), r.family.clone(), r.feature.clone(), r.secondary_id.clone(), r.effect.to_string(),
-            r.p_value.to_string(), r.q_value.to_string(), r.case_mean.to_string(), r.control_mean.to_string(), r.evidence.clone(),
+            r.rank.to_string(),
+            r.modality.clone(),
+            r.family.clone(),
+            r.feature.clone(),
+            r.secondary_id.clone(),
+            r.effect.to_string(),
+            r.p_value.to_string(),
+            r.q_value.to_string(),
+            r.case_mean.to_string(),
+            r.control_mean.to_string(),
+            r.evidence.clone(),
         ])?;
     }
     w.flush()?;
 
     let transcript_path = folder.join("focused_candidate_transcripts.csv");
     let mut w = WriterBuilder::new().from_path(&transcript_path)?;
-    w.write_record(["rank","transcript","gene_id","adjusted_effect","p_value","q_value","case_mean","control_mean","exploratory_effect","exploratory_q","direction_concordant","evidence"])?;
+    w.write_record([
+        "rank",
+        "transcript",
+        "gene_id",
+        "adjusted_effect",
+        "p_value",
+        "q_value",
+        "case_mean",
+        "control_mean",
+        "exploratory_effect",
+        "exploratory_q",
+        "direction_concordant",
+        "evidence",
+    ])?;
     for r in &summary.transcripts {
         w.write_record([
-            r.rank.to_string(), r.gene.clone(), r.gene_id.clone(), r.adjusted_log2fc.to_string(), r.p_value.to_string(), r.q_value.to_string(),
-            r.case_mean.to_string(), r.control_mean.to_string(), r.exploratory_log2fc.map(|x|x.to_string()).unwrap_or_default(),
-            r.exploratory_q.map(|x|x.to_string()).unwrap_or_default(), r.direction_concordant.map(|x|x.to_string()).unwrap_or_default(), r.evidence.clone(),
+            r.rank.to_string(),
+            r.gene.clone(),
+            r.gene_id.clone(),
+            r.adjusted_log2fc.to_string(),
+            r.p_value.to_string(),
+            r.q_value.to_string(),
+            r.case_mean.to_string(),
+            r.control_mean.to_string(),
+            r.exploratory_log2fc
+                .map(|x| x.to_string())
+                .unwrap_or_default(),
+            r.exploratory_q.map(|x| x.to_string()).unwrap_or_default(),
+            r.direction_concordant
+                .map(|x| x.to_string())
+                .unwrap_or_default(),
+            r.evidence.clone(),
         ])?;
     }
     w.flush()?;
@@ -393,9 +574,18 @@ pub fn write_focused_candidate_tables(folder: &Path, summary: &FocusedCandidateS
     let note_path = folder.join("focused_candidate_notes.txt");
     let mut text = format!(
         "Focused candidate-signal analysis\n===============================\n\nMetadata: {}\nComparison: {} vs {}\nCase samples: {}\nControl samples: {}\nMinimum gene |adjusted log2FC|: {:.3}\n\n",
-        summary.metadata_path.display(), summary.case_label, summary.control_label, summary.n_case, summary.n_control, summary.settings.min_gene_abs_log2fc,
+        summary.metadata_path.display(),
+        summary.case_label,
+        summary.control_label,
+        summary.n_case,
+        summary.n_control,
+        summary.settings.min_gene_abs_log2fc,
     );
-    for note in &summary.notes { text.push_str("- "); text.push_str(note); text.push('\n'); }
+    for note in &summary.notes {
+        text.push_str("- ");
+        text.push_str(note);
+        text.push('\n');
+    }
     fs::write(&note_path, text)?;
 
     Ok(folder.to_path_buf())
@@ -407,39 +597,91 @@ mod tests {
     use crate::corrected::CorrectedExpressionResult;
     use std::path::PathBuf;
 
-    fn adjusted(feature:&str,beta:f64,p:f64,q:f64)->AdjustedFeatureResult{
-        AdjustedFeatureResult{
-            feature:feature.to_string(),secondary_id:"1".to_string(),n_samples:20,n_subjects:20,n_case:10,n_control:10,
-            mean_case:2.0,mean_control:1.0,beta_group:beta,robust_se:0.2,z_value:beta/0.2,p_value:p,q_value:q,
-            subject_effect:beta,subject_p_value:p,subject_q_value:q,method:"test".to_string(),
+    fn adjusted(feature: &str, beta: f64, p: f64, q: f64) -> AdjustedFeatureResult {
+        AdjustedFeatureResult {
+            feature: feature.to_string(),
+            secondary_id: "1".to_string(),
+            n_samples: 20,
+            n_subjects: 20,
+            n_case: 10,
+            n_control: 10,
+            mean_case: 2.0,
+            mean_control: 1.0,
+            beta_group: beta,
+            robust_se: 0.2,
+            z_value: beta / 0.2,
+            p_value: p,
+            q_value: q,
+            subject_effect: beta,
+            subject_p_value: p,
+            subject_q_value: q,
+            method: "test".to_string(),
         }
     }
 
     #[test]
-    fn focused_gene_ranking_prefers_q_then_effect(){
-        let r=CorrectedExpressionResult{
-            input:PathBuf::new(),feature_label:"Gene".to_string(),source_metric:"Raw Count".to_string(),normalization:String::new(),model_description:String::new(),
-            n_input_samples:20,n_model_samples:20,n_subjects:20,tested_features:3,filtered_features:0,
-            tests:vec![adjusted("B",1.2,0.001,0.02),adjusted("A",0.8,0.0001,0.01),adjusted("C",2.0,0.02,0.2)],
-            pca:None,dendrogram:None,dtu:None,warnings:Vec::new(),
+    fn focused_gene_ranking_prefers_q_then_effect() {
+        let r = CorrectedExpressionResult {
+            input: PathBuf::new(),
+            feature_label: "Gene".to_string(),
+            source_metric: "Raw Count".to_string(),
+            normalization: String::new(),
+            model_description: String::new(),
+            n_input_samples: 20,
+            n_model_samples: 20,
+            n_subjects: 20,
+            tested_features: 3,
+            filtered_features: 0,
+            tests: vec![
+                adjusted("B", 1.2, 0.001, 0.02),
+                adjusted("A", 0.8, 0.0001, 0.01),
+                adjusted("C", 2.0, 0.02, 0.2),
+            ],
+            pca: None,
+            dendrogram: None,
+            dtu: None,
+            warnings: Vec::new(),
         };
-        let out=shortlist_expression(Some(&r),None,None,3,0.5);
-        assert_eq!(out[0].gene,"A");
-        assert_eq!(out[1].gene,"B");
-        assert_eq!(out[2].gene,"C");
+        let out = shortlist_expression(Some(&r), None, None, 3, 0.5);
+        assert_eq!(out[0].gene, "A");
+        assert_eq!(out[1].gene, "B");
+        assert_eq!(out[2].gene, "C");
     }
     #[test]
-    fn focused_pathways_require_real_foreground_overlap(){
-        let pathway=CorrectedPathwayResult{
-            gmt_path:PathBuf::new(),universe_size:1000,foreground_size:25,q_threshold:0.05,effect_threshold:0.5,min_set_size:10,max_set_size:500,
-            tests:vec![
-                crate::corrected::PathwayOraResult{pathway:"ZERO".to_string(),description:String::new(),measured_set_size:20,overlap:0,odds_ratio:99.0,p_value:1.0,q_value:1.0,overlap_genes:String::new()},
-                crate::corrected::PathwayOraResult{pathway:"REAL".to_string(),description:String::new(),measured_set_size:20,overlap:3,odds_ratio:2.0,p_value:0.01,q_value:0.04,overlap_genes:"A,B,C".to_string()},
+    fn focused_pathways_require_real_foreground_overlap() {
+        let pathway = CorrectedPathwayResult {
+            gmt_path: PathBuf::new(),
+            universe_size: 1000,
+            foreground_size: 25,
+            q_threshold: 0.05,
+            effect_threshold: 0.5,
+            min_set_size: 10,
+            max_set_size: 500,
+            tests: vec![
+                crate::corrected::PathwayOraResult {
+                    pathway: "ZERO".to_string(),
+                    description: String::new(),
+                    measured_set_size: 20,
+                    overlap: 0,
+                    odds_ratio: 99.0,
+                    p_value: 1.0,
+                    q_value: 1.0,
+                    overlap_genes: String::new(),
+                },
+                crate::corrected::PathwayOraResult {
+                    pathway: "REAL".to_string(),
+                    description: String::new(),
+                    measured_set_size: 20,
+                    overlap: 3,
+                    odds_ratio: 2.0,
+                    p_value: 0.01,
+                    q_value: 0.04,
+                    overlap_genes: "A,B,C".to_string(),
+                },
             ],
         };
-        let out=shortlist_pathways(Some(&pathway),10);
-        assert_eq!(out.len(),1);
-        assert_eq!(out[0].pathway,"REAL");
+        let out = shortlist_pathways(Some(&pathway), 10);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pathway, "REAL");
     }
-
 }
