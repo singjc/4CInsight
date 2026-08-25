@@ -29,8 +29,14 @@ use cfs_expression_merger::gmt_catalog::{
     GMT_CATALOG, MSIGDB_LICENSE_URL, MSIGDB_RELEASE_URL, MSIGDB_VERSION,
     cache_path as gmt_cache_path, download_public_gmt,
 };
+use cfs_expression_merger::outliers::{
+    CrossModalOutlierResult, OutlierConfig, OutlierConsensusRule, OutlierFilterSnapshot,
+    OutlierScope, build_outlier_filter_snapshot, filter_comparison_excluding,
+    run_cross_modal_outlier_qc, write_outlier_audit_csv, write_outlier_filter_modalities_tsv,
+    write_outlier_filter_snapshot_csv, write_outlier_filter_summary,
+};
 use cfs_expression_merger::report::{
-    CohortReportInputs, CorrectedReportInputs, generate_cohort_html_report,
+    CohortReportInputs, CorrectedReportInputs, FocusedReportInputs, generate_cohort_html_report,
     generate_corrected_html_report, generate_focused_candidate_html_report,
 };
 use cfs_expression_merger::{
@@ -256,6 +262,7 @@ enum CohortWorkerMessage {
     CorrectedDone(CorrectedAnalysisBundle),
     FocusedDone(FocusedAnalysisBundle),
     DiagnosticsDone(PbmcDiagnosticsResult),
+    OutlierDone(Result<CrossModalOutlierResult, String>),
 }
 
 enum GmtDownloadMessage {
@@ -371,6 +378,14 @@ struct MergeApp {
     diagnostics_outlier_z: f64,
     diagnostics_top_candidates: usize,
     diagnostics_selected_gene: Option<String>,
+    outlier_results: Option<CrossModalOutlierResult>,
+    corrected_outlier_snapshot: Option<OutlierFilterSnapshot>,
+    focused_outlier_snapshot: Option<OutlierFilterSnapshot>,
+    outlier_config: OutlierConfig,
+    outlier_excluded_ids: HashSet<String>,
+    outlier_apply_to_corrected: bool,
+    outlier_apply_to_focused: bool,
+    outlier_plot_modality: usize,
     cohort_run_gene: bool,
     cohort_gene_metric: Metric,
     cohort_run_transcript: bool,
@@ -698,6 +713,14 @@ impl MergeApp {
             diagnostics_outlier_z: 4.0,
             diagnostics_top_candidates: 50,
             diagnostics_selected_gene: None,
+            outlier_results: None,
+            corrected_outlier_snapshot: None,
+            focused_outlier_snapshot: None,
+            outlier_config: OutlierConfig::default(),
+            outlier_excluded_ids: HashSet::new(),
+            outlier_apply_to_corrected: false,
+            outlier_apply_to_focused: false,
+            outlier_plot_modality: 0,
             cohort_run_gene: true,
             cohort_gene_metric: Metric::Tpm,
             cohort_run_transcript: false,
@@ -2596,6 +2619,8 @@ impl MergeApp {
         match self.cohort_analysis_mode {
             CohortAnalysisMode::Exploratory => {
                 self.render_cohort_comparison_card(ui);
+                ui.add_space(10.0);
+                self.render_outlier_qc_card(ui);
                 if self.cohort_results.is_some() {
                     ui.add_space(10.0);
                     self.render_cohort_results_card(ui);
@@ -2776,6 +2801,8 @@ impl MergeApp {
                 .on_hover_text("Phenotype=HYP+ME/CFS versus Phenotype=ME/CFS and HYP not marked yes.");
                 if old != this.cohort_preset {
                     this.cohort_results = None;
+                    this.outlier_results = None;
+                    this.outlier_excluded_ids.clear();
                 }
             });
             ui.label(
@@ -2893,6 +2920,200 @@ impl MergeApp {
         });
     }
 
+    fn render_outlier_qc_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "Sample outlier QC", |this, ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Outlier screening is an unsupervised QC step. It flags samples that are unusually distant from comparable samples within one or more data types. A flag is evidence to review a sample, not proof that the biology is invalid.",
+                )
+                .weak(),
+            );
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 190, 90),
+                "Recommended: detect outliers within case/control groups, inspect them, then run corrected/focused analyses both with and without exclusions as a sensitivity check.",
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Detection scope:");
+                egui::ComboBox::from_id_salt("outlier_scope")
+                    .selected_text(this.outlier_config.scope.display_name())
+                    .show_ui(ui, |ui| {
+                        for scope in OutlierScope::ALL {
+                            ui.selectable_value(&mut this.outlier_config.scope, scope, scope.display_name());
+                        }
+                    });
+                ui.label("Robust distance threshold:");
+                ui.add(egui::DragValue::new(&mut this.outlier_config.robust_distance_threshold).range(2.0..=10.0).speed(0.1));
+            });
+            ui.label(
+                egui::RichText::new(
+                    "Within-group detection is safer when the disease itself may create a real global expression/repertoire shift. The score is a robust distance in the first two unsupervised components of each modality.",
+                )
+                .small()
+                .weak(),
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Cross-modal exclusion rule:");
+                egui::ComboBox::from_id_salt("outlier_consensus_rule")
+                    .selected_text(this.outlier_config.consensus_rule.display_name())
+                    .show_ui(ui, |ui| {
+                        for rule in OutlierConsensusRule::ALL {
+                            ui.selectable_value(&mut this.outlier_config.consensus_rule, rule, rule.display_name());
+                        }
+                    });
+                if this.outlier_config.consensus_rule == OutlierConsensusRule::AtLeastN {
+                    ui.label("N:");
+                    ui.add(egui::DragValue::new(&mut this.outlier_config.at_least_n).range(1..=7));
+                }
+                if this.outlier_config.consensus_rule != OutlierConsensusRule::Any {
+                    ui.label("Minimum available modalities:");
+                    ui.add(egui::DragValue::new(&mut this.outlier_config.min_available_modalities).range(1..=7));
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Modalities included:").strong());
+                if this.cohort_run_gene { ui.label("Gene"); }
+                if this.cohort_run_transcript { ui.label("Transcript"); }
+                if this.cohort_run_bcr { ui.label("BCR"); }
+                if this.cohort_run_bcr_isotype { ui.label("BCR isotype"); }
+                if this.cohort_run_tcr_alpha { ui.label("TCR alpha"); }
+                if this.cohort_run_tcr_beta { ui.label("TCR beta"); }
+                if this.cohort_run_immune { ui.label("Immune"); }
+            });
+            let ready = this.cohort_scan.is_some() && this.cohort_metadata.is_some() && !this.cohort_running;
+            if ui.add_enabled(ready, egui::Button::new("Run sample outlier QC"))
+                .on_hover_text("Build sample-level unsupervised representations for the currently enabled modalities, flag modality-specific outliers, and combine those flags using the selected consensus rule.")
+                .clicked()
+            {
+                this.start_outlier_qc();
+            }
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut this.outlier_apply_to_corrected, "Apply selected exclusions to corrected / standard runs")
+                    .on_hover_text("When enabled, samples checked in the outlier audit are removed from the case/control comparison before the corrected analysis is run. The exploratory result remains unchanged so you can compare inclusive vs filtered analyses.");
+                ui.checkbox(&mut this.outlier_apply_to_focused, "Apply selected exclusions to focused runs")
+                    .on_hover_text("When enabled, the focused metadata comparison excludes any checked sample IDs that are present in the focused cohort.");
+            });
+            if this.outlier_apply_to_corrected || this.outlier_apply_to_focused {
+                ui.label(egui::RichText::new(format!("{} sample(s) currently selected for outlier exclusion.", this.outlier_excluded_ids.len())).small().weak());
+            }
+
+            let Some(result) = this.outlier_results.clone() else { return; };
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Audit comparison: {}", result.comparison_name));
+                ui.separator();
+                ui.label(format!("{} modality result(s)", result.modalities.len()));
+                ui.separator();
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 170, 70),
+                    format!("{} consensus outlier(s)", result.consensus_ids.len()),
+                );
+                if ui.button("Select consensus outliers").on_hover_text("Replace the manual exclusion list with the samples meeting the current audit's cross-modal consensus rule.").clicked() {
+                    this.outlier_excluded_ids = result.consensus_ids.iter().cloned().collect();
+                }
+                if ui.button("Clear exclusions").clicked() {
+                    this.outlier_excluded_ids.clear();
+                }
+                if ui.button("Export audit CSV…")
+                    .on_hover_text("Save the sample-level consensus flags plus per-modality robust outlier scores/flags for review outside the app.")
+                    .clicked()
+                {
+                    let mut dialog = FileDialog::new().add_filter("CSV", &["csv"]);
+                    if let Some(root) = &this.cohort_root { dialog = dialog.set_directory(root); }
+                    if let Some(path) = dialog.set_file_name("sample_outlier_audit.csv").save_file() {
+                        match write_outlier_audit_csv(&path, &result) {
+                            Ok(()) => this.cohort_status = format!("Saved sample outlier audit to {}", path.display()),
+                            Err(e) => this.cohort_status = format!("Could not save sample outlier audit: {e:#}"),
+                        }
+                    }
+                }
+            });
+            ui.label(
+                egui::RichText::new(
+                    "The exclusion checkbox is deliberately editable. A sample can be reviewed and kept even if it crosses the automatic threshold, or manually excluded if the QC/provenance evidence supports doing so.",
+                )
+                .small()
+                .weak(),
+            );
+
+            if !result.modalities.is_empty() {
+                this.outlier_plot_modality = this.outlier_plot_modality.min(result.modalities.len() - 1);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Outlier view:");
+                    egui::ComboBox::from_id_salt("outlier_plot_modality")
+                        .selected_text(&result.modalities[this.outlier_plot_modality].modality)
+                        .show_ui(ui, |ui| {
+                            for (idx, modality) in result.modalities.iter().enumerate() {
+                                ui.selectable_value(&mut this.outlier_plot_modality, idx, &modality.modality);
+                            }
+                        });
+                });
+                let modality = &result.modalities[this.outlier_plot_modality];
+                ui.label(egui::RichText::new(&modality.representation).small().weak());
+                let mut ordinary = Vec::new();
+                let mut flagged = Vec::new();
+                let mut hover_points = Vec::new();
+                for point in &modality.points {
+                    if point.flagged { flagged.push([point.x, point.y]); } else { ordinary.push([point.x, point.y]); }
+                    hover_points.push((point.x, point.y, format!("{}\nGroup: {}\nRobust distance: {:.2}\nModality flag: {}", point.sample_id, point.group, point.robust_distance, if point.flagged { "yes" } else { "no" })));
+                }
+                let formatter_points = hover_points.clone();
+                Plot::new("outlier_qc_plot")
+                    .height(360.0)
+                    .x_axis_label(&modality.x_label)
+                    .y_axis_label(&modality.y_label)
+                    .legend(Legend::default())
+                    .label_formatter(move |hover| match hover {
+                        HoverPosition::NearDataPoint { position, .. } => nearest_hover_label(position.x, position.y, &formatter_points),
+                        _ => None,
+                    })
+                    .show(ui, |plot_ui| {
+                        if !ordinary.is_empty() { plot_ui.points(Points::new("Not flagged", ordinary).color(egui::Color32::from_rgb(100, 165, 225)).radius(3.5)); }
+                        if !flagged.is_empty() { plot_ui.points(Points::new("Modality outlier", flagged).color(egui::Color32::from_rgb(235, 145, 70)).radius(5.0)); }
+                    });
+            }
+
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(format!("Sample outlier audit ({} samples)", result.samples.len())).strong());
+            fixed_table_viewport(ui, "outlier_audit_table", 420.0, 900.0, |ui| {
+                egui::Grid::new("outlier_audit_grid").striped(true).show(ui, |ui| {
+                    for h in ["Exclude", "Sample", "Group", "Available modalities", "Flagged modalities", "Flagged in"] {
+                        ui.label(egui::RichText::new(h).strong());
+                    }
+                    ui.end_row();
+                    for row in &result.samples {
+                        let mut excluded = this.outlier_excluded_ids.contains(&row.sample_id);
+                        if ui.checkbox(&mut excluded, "").changed() {
+                            if excluded { this.outlier_excluded_ids.insert(row.sample_id.clone()); }
+                            else { this.outlier_excluded_ids.remove(&row.sample_id); }
+                        }
+                        ui.monospace(&row.sample_id);
+                        ui.label(&row.group);
+                        ui.label(row.available_modalities.to_string());
+                        if row.consensus_flag {
+                            ui.colored_label(egui::Color32::from_rgb(235, 145, 70), row.flagged_modalities.to_string());
+                        } else {
+                            ui.label(row.flagged_modalities.to_string());
+                        }
+                        ui.label(if row.flagged_names.is_empty() { "—".to_string() } else { row.flagged_names.join(", ") });
+                        ui.end_row();
+                    }
+                });
+            });
+            if !result.warnings.is_empty() || result.modalities.iter().any(|m| !m.warnings.is_empty()) {
+                egui::CollapsingHeader::new("Outlier QC warnings").show(ui, |ui| {
+                    for warning in &result.warnings { ui.label(format!("• {warning}")); }
+                    for modality in &result.modalities {
+                        for warning in &modality.warnings { ui.label(format!("• {}: {}", modality.modality, warning)); }
+                    }
+                });
+            }
+        });
+    }
+
     fn render_focused_analysis_card(&mut self, ui: &mut egui::Ui) {
         self.card(ui, "3. Focused candidate-signal workflow", |this, ui| {
             ui.label(
@@ -2905,6 +3126,12 @@ impl MergeApp {
                 egui::Color32::from_rgb(230, 190, 90),
                 "Outputs are preliminary candidate signals for follow-up, not validated biomarkers.",
             );
+            if this.outlier_apply_to_focused && !this.outlier_excluded_ids.is_empty() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 170, 70),
+                    format!("Outlier sensitivity filter is ON: up to {} reviewed sample(s) will be excluded if present in the focused metadata.", this.outlier_excluded_ids.len()),
+                );
+            }
 
             ui.add_space(6.0);
             ui.label(egui::RichText::new("Focused sample list / metadata").strong());
@@ -2959,6 +3186,7 @@ impl MergeApp {
             }
 
             ui.separator();
+            let old_preset = this.cohort_preset;
             ui.horizontal_wrapped(|ui| {
                 ui.label("Comparison:");
                 ui.selectable_value(&mut this.cohort_preset, ComparisonPreset::HypVsTrueHc, "HYP vs True_HC")
@@ -2966,6 +3194,10 @@ impl MergeApp {
                 ui.selectable_value(&mut this.cohort_preset, ComparisonPreset::HypMecfsVsMecfsOnly, "HYP+ME/CFS vs ME/CFS-only")
                     .on_hover_text("Phenotype=HYP+ME/CFS versus Phenotype=ME/CFS without HYP, restricted to the focused metadata rows.");
             });
+            if old_preset != this.cohort_preset {
+                this.outlier_results = None;
+                this.outlier_excluded_ids.clear();
+            }
             if let Some(meta) = &this.focused_metadata {
                 match build_comparison(meta, this.cohort_preset) {
                     Ok(comp) => ui.label(format!("Direct comparison: {} case samples / {} control samples", comp.case_metadata_rows, comp.control_metadata_rows)),
@@ -3026,15 +3258,26 @@ impl MergeApp {
                 ui.label(egui::RichText::new(format!("{} vs {} — preliminary shortlist",summary.case_label,summary.control_label)).strong());
                 if ui.button("Export candidate CSVs…").on_hover_text("Export concise CSV files for candidate genes, pathways, transcripts, and other modality signals, plus interpretation notes.").clicked() {
                     let mut dialog=FileDialog::new(); if let Some(root)=&this.cohort_root{dialog=dialog.set_directory(root);}
-                    if let Some(folder)=dialog.pick_folder(){ match write_focused_candidate_tables(&folder,&summary){Ok(path)=>this.cohort_status=format!("Saved focused candidate tables to {}",path.display()),Err(e)=>this.cohort_status=format!("Could not save focused candidate tables: {e:#}")}; }
+                    if let Some(folder)=dialog.pick_folder(){
+                        match this.save_focused_result_tables(&folder,&summary){
+                            Ok(path)=>this.cohort_status=format!("Saved focused candidate tables to {}",path.display()),
+                            Err(e)=>this.cohort_status=format!("Could not save focused candidate tables: {e:#}")
+                        };
+                    }
                 }
                 if ui.button("Generate focused HTML report…").on_hover_text("Generate a concise standalone report intended for a less technical audience. It emphasizes preliminary candidate genes/pathways, clear interpretation, and limitations rather than exhaustive analysis tables.").clicked() {
                     let safe=format!("{}_vs_{}",summary.case_label,summary.control_label).chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'_'}).collect::<String>();
                     let mut dialog=FileDialog::new().add_filter("HTML report", &["html"]).set_file_name(format!("4c_focused_candidates_{safe}.html")); if let Some(root)=&this.cohort_root{dialog=dialog.set_directory(root);}
-                    if let Some(path)=dialog.save_file(){ match generate_focused_candidate_html_report(&path,&summary){Ok(())=>this.cohort_status=format!("Generated focused candidate report: {}",path.display()),Err(e)=>this.cohort_status=format!("Could not generate focused report: {e:#}")}; }
+                    if let Some(path)=dialog.save_file(){
+                        let inputs=FocusedReportInputs{summary:&summary,outlier_qc:this.focused_outlier_snapshot.as_ref()};
+                        match generate_focused_candidate_html_report(&path,inputs){Ok(())=>this.cohort_status=format!("Generated focused candidate report: {}",path.display()),Err(e)=>this.cohort_status=format!("Could not generate focused report: {e:#}")};
+                    }
                 }
             });
             ui.label(format!("Focused metadata: {} | {} case / {} control",summary.metadata_path.file_name().and_then(|x|x.to_str()).unwrap_or("metadata"),summary.n_case,summary.n_control));
+            if let Some(qc)=&this.focused_outlier_snapshot {
+                ui.colored_label(egui::Color32::from_rgb(230,170,80),format!("QC-filtered focused run: {} reviewed sample exclusion(s) applied (case {} → {}, control {} → {}). The exact audit is included in exports and the HTML report.",qc.excluded_ids.len(),qc.original_case_n,qc.filtered_case_n,qc.original_control_n,qc.filtered_control_n));
+            }
             ui.colored_label(egui::Color32::from_rgb(230,190,90),"These are preliminary signals for follow-up, not validated biomarkers.");
 
             ui.horizontal_wrapped(|ui| {
@@ -3743,6 +3986,13 @@ impl MergeApp {
                 )
                 .weak(),
             );
+            if this.outlier_apply_to_corrected && !this.outlier_excluded_ids.is_empty() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 170, 70),
+                    format!("Outlier sensitivity filter is ON: {} reviewed sample(s) will be excluded from this corrected run. Keep an inclusive run for comparison.", this.outlier_excluded_ids.len()),
+                );
+            }
+            let old_preset = this.cohort_preset;
             ui.horizontal_wrapped(|ui| {
                 ui.label("Comparison:");
                 ui.selectable_value(&mut this.cohort_preset, ComparisonPreset::HypVsTrueHc, "HYP vs True_HC")
@@ -3750,6 +4000,10 @@ impl MergeApp {
                 ui.selectable_value(&mut this.cohort_preset, ComparisonPreset::HypMecfsVsMecfsOnly, "HYP+ME/CFS vs ME/CFS-only")
                     .on_hover_text("HYP+ME/CFS versus ME/CFS samples without HYP.");
             });
+            if old_preset != this.cohort_preset {
+                this.outlier_results = None;
+                this.outlier_excluded_ids.clear();
+            }
 
             let columns = this.cohort_metadata.as_ref().map(|m| m.columns.clone()).unwrap_or_default();
             if !columns.is_empty() {
@@ -3898,6 +4152,7 @@ impl MergeApp {
                             tcr_beta:bundle.tcr_beta.as_ref(), tcr_beta_error:bundle.tcr_beta_error.as_deref(),
                             immune:bundle.immune.as_ref(), immune_error:bundle.immune_error.as_deref(),
                             pathway:bundle.pathway.as_ref(), pathway_error:bundle.pathway_error.as_deref(),
+                            outlier_qc:this.corrected_outlier_snapshot.as_ref(),
                         };
                         match generate_corrected_html_report(&path,inputs) {
                             Ok(())=>this.cohort_status=format!("Generated corrected HTML report: {}",path.display()),
@@ -3906,6 +4161,9 @@ impl MergeApp {
                     }
                 }
             });
+            if let Some(qc)=&this.corrected_outlier_snapshot {
+                ui.colored_label(egui::Color32::from_rgb(230,170,80),format!("QC-filtered corrected run: {} reviewed sample exclusion(s) applied (case {} → {}, control {} → {}). The export/report preserves the exact rule, modality flags, distances, and manual overrides.",qc.excluded_ids.len(),qc.original_case_n,qc.filtered_case_n,qc.original_control_n,qc.filtered_control_n));
+            }
             ui.label(egui::RichText::new(format!(
                 "Subject column: {} | covariates: {} | ambiguous repertoire calls: {}",
                 bundle.spec.subject_column.as_deref().unwrap_or("none"),
@@ -4619,6 +4877,7 @@ impl MergeApp {
                     }
                     if let Some(path) = dialog.save_file() {
                         this.remember_directory_for(&path);
+                        let outlier_snapshot=this.current_outlier_snapshot_for_comparison(&bundle.comparison,false);
                         let inputs = CohortReportInputs {
                             comparison: &bundle.comparison,
                             mapping: this.cohort_mapping.as_ref(),
@@ -4636,6 +4895,7 @@ impl MergeApp {
                             tcr_beta_error: bundle.tcr_beta_error.as_deref(),
                             immune: bundle.immune.as_ref(),
                             immune_error: bundle.immune_error.as_deref(),
+                            outlier_qc: outlier_snapshot.as_ref(),
                         };
                         match generate_cohort_html_report(&path, inputs) {
                             Ok(()) => {
@@ -5753,8 +6013,16 @@ impl MergeApp {
                 )?;
             }
         }
+        if let Some(qc) = self.current_outlier_snapshot_for_comparison(&bundle.comparison, false) {
+            write_outlier_filter_snapshot_csv(&outdir.join("sample_outlier_qc.csv"), &qc)?;
+            write_outlier_filter_modalities_tsv(
+                &outdir.join("sample_outlier_qc_modalities.tsv"),
+                &qc,
+            )?;
+            write_outlier_filter_summary(&outdir.join("sample_outlier_qc_summary.txt"), &qc)?;
+        }
         let notes = format!(
-            "Exploratory comparison: {}\nCase: {}\nControl: {}\n\nThis first-pass analysis intentionally uses all available mapped samples, including longitudinal samples, without repeated-measures or covariate adjustment.\n",
+            "Exploratory comparison: {}\nCase: {}\nControl: {}\n\nThis first-pass analysis intentionally uses all available mapped samples, including longitudinal samples, without repeated-measures or covariate adjustment. If a sample outlier QC audit was run, its reviewed decisions are exported separately; those exclusions were not applied to this exploratory result.\n",
             bundle.comparison.name, bundle.comparison.case_label, bundle.comparison.control_label,
         );
         fs::write(outdir.join("README.txt"), notes)?;
@@ -5904,8 +6172,29 @@ impl MergeApp {
         if let Some(r) = &bundle.pathway {
             write_pathway_ora(&outdir.join("pathway_ora.tsv"), r)?;
         }
+        if let Some(qc) = &self.corrected_outlier_snapshot {
+            write_outlier_filter_snapshot_csv(&outdir.join("sample_outlier_qc.csv"), qc)?;
+            write_outlier_filter_modalities_tsv(
+                &outdir.join("sample_outlier_qc_modalities.tsv"),
+                qc,
+            )?;
+            write_outlier_filter_summary(&outdir.join("sample_outlier_qc_summary.txt"), qc)?;
+        }
+        let qc_note = if let Some(qc) = &self.corrected_outlier_snapshot {
+            format!(
+                "\nSample outlier QC: {} reviewed exclusion(s) were applied before this analysis (case {} -> {}, control {} -> {}). See sample_outlier_qc.csv and sample_outlier_qc_summary.txt for the exact samples, automatic flags, manual overrides, modality distances, and rule used.\n",
+                qc.excluded_ids.len(),
+                qc.original_case_n,
+                qc.filtered_case_n,
+                qc.original_control_n,
+                qc.filtered_control_n
+            )
+        } else {
+            "\nSample outlier QC: no reviewed outlier exclusions were applied to this analysis.\n"
+                .to_string()
+        };
         let notes = format!(
-            "4C Cohort Explorer corrected/standard analysis\nComparison: {}\nCase: {}\nControl: {}\nSubject column: {}\nCovariates: {}\n\nExpression uses positive-count median-ratio normalization with a negative-binomial log-link count model, optional covariates, subject-clustered inference when repeated samples are configured, and a subject-collapsed non-parametric sensitivity analysis.\n\nRepertoire analyses use matched-depth exact-without-replacement Monte-Carlo rarefaction, subject-aware public/private sharing, Morisita-Horn and Jaccard distances, PCoA/PERMANOVA, average-linkage hierarchical clustering, and CLR/Aitchison composition analysis.\n",
+            "4C Cohort Explorer corrected/standard analysis\nComparison: {}\nCase: {}\nControl: {}\nSubject column: {}\nCovariates: {}\n{}\nExpression uses positive-count median-ratio normalization with a negative-binomial log-link count model, optional covariates, subject-clustered inference when repeated samples are configured, and a subject-collapsed non-parametric sensitivity analysis.\n\nRepertoire analyses use matched-depth exact-without-replacement Monte-Carlo rarefaction, subject-aware public/private sharing, Morisita-Horn and Jaccard distances, PCoA/PERMANOVA, average-linkage hierarchical clustering, and CLR/Aitchison composition analysis.\n",
             bundle.comparison.name,
             bundle.comparison.case_label,
             bundle.comparison.control_label,
@@ -5914,10 +6203,49 @@ impl MergeApp {
                 "none".to_string()
             } else {
                 bundle.spec.covariates.join(", ")
-            }
+            },
+            qc_note
         );
         fs::write(outdir.join("README.txt"), notes)?;
         Ok(outdir)
+    }
+
+    fn current_outlier_snapshot_for_comparison(
+        &self,
+        comparison: &CohortComparison,
+        applied_to_analysis: bool,
+    ) -> Option<OutlierFilterSnapshot> {
+        let audit = self.outlier_results.as_ref()?;
+        if audit.comparison_name != comparison.name
+            && !comparison.name.starts_with(&audit.comparison_name)
+        {
+            return None;
+        }
+        let filtered = filter_comparison_excluding(comparison, &self.outlier_excluded_ids);
+        Some(build_outlier_filter_snapshot(
+            audit,
+            &self.outlier_excluded_ids,
+            comparison,
+            &filtered,
+            applied_to_analysis,
+        ))
+    }
+
+    fn save_focused_result_tables(
+        &self,
+        folder: &Path,
+        summary: &FocusedCandidateSummary,
+    ) -> anyhow::Result<PathBuf> {
+        let path = write_focused_candidate_tables(folder, summary)?;
+        if let Some(qc) = &self.focused_outlier_snapshot {
+            write_outlier_filter_snapshot_csv(&path.join("sample_outlier_qc.csv"), qc)?;
+            write_outlier_filter_modalities_tsv(
+                &path.join("sample_outlier_qc_modalities.tsv"),
+                qc,
+            )?;
+            write_outlier_filter_summary(&path.join("sample_outlier_qc_summary.txt"), qc)?;
+        }
+        Ok(path)
     }
 
     fn configure_corrected_metadata_defaults(&mut self) {
@@ -5965,7 +6293,7 @@ impl MergeApp {
         }
     }
 
-    fn start_corrected_analysis(&mut self) {
+    fn start_outlier_qc(&mut self) {
         let (Some(scan), Some(metadata)) = (self.cohort_scan.clone(), self.cohort_metadata.clone())
         else {
             self.cohort_status = "Load a project and metadata first.".to_string();
@@ -5974,10 +6302,107 @@ impl MergeApp {
         let comparison = match build_comparison(&metadata, self.cohort_preset) {
             Ok(c) => c,
             Err(e) => {
+                self.cohort_status = format!("Could not build comparison for outlier QC: {e:#}");
+                return;
+            }
+        };
+        let mut modalities = Vec::new();
+        if self.cohort_run_gene {
+            modalities.push(CohortModality::GeneExpression);
+        }
+        if self.cohort_run_transcript {
+            modalities.push(CohortModality::TranscriptExpression);
+        }
+        if self.cohort_run_bcr {
+            modalities.push(CohortModality::Bcr);
+        }
+        if self.cohort_run_bcr_isotype {
+            modalities.push(CohortModality::BcrIsotype);
+        }
+        if self.cohort_run_tcr_alpha {
+            modalities.push(CohortModality::TcrAlpha);
+        }
+        if self.cohort_run_tcr_beta {
+            modalities.push(CohortModality::TcrBeta);
+        }
+        if self.cohort_run_immune {
+            modalities.push(CohortModality::ImmuneInfiltrate);
+        }
+        if modalities.is_empty() {
+            self.cohort_status =
+                "Enable at least one modality before running outlier QC.".to_string();
+            return;
+        }
+        let config = self.outlier_config.clone();
+        let (tx, rx) = mpsc::channel();
+        self.cohort_receiver = Some(rx);
+        self.cohort_running = true;
+        self.cohort_progress = 0.0;
+        self.cohort_status = format!("Running sample outlier QC for {}…", comparison.name);
+        self.outlier_results = None;
+        std::thread::spawn(move || {
+            let result = run_cross_modal_outlier_qc(
+                scan.merged_gene_tsv.as_deref(),
+                scan.merged_transcript_tsv.as_deref(),
+                &scan.files,
+                &comparison,
+                &modalities,
+                &config,
+                |done, total, msg| {
+                    let frac = if total == 0 {
+                        0.0
+                    } else {
+                        done as f32 / total as f32
+                    };
+                    let _ = tx.send(CohortWorkerMessage::Progress(frac, msg.to_string()));
+                },
+            )
+            .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(CohortWorkerMessage::OutlierDone(result));
+        });
+    }
+
+    fn start_corrected_analysis(&mut self) {
+        let (Some(scan), Some(metadata)) = (self.cohort_scan.clone(), self.cohort_metadata.clone())
+        else {
+            self.cohort_status = "Load a project and metadata first.".to_string();
+            return;
+        };
+        let original_comparison = match build_comparison(&metadata, self.cohort_preset) {
+            Ok(c) => c,
+            Err(e) => {
                 self.cohort_status = format!("Could not build comparison: {e:#}");
                 return;
             }
         };
+        let mut comparison = original_comparison.clone();
+        self.corrected_outlier_snapshot = None;
+        if self.outlier_apply_to_corrected && !self.outlier_excluded_ids.is_empty() {
+            let Some(audit) = self.outlier_results.as_ref() else {
+                self.cohort_status="Outlier exclusions are enabled but the QC audit is no longer available. Rerun Sample outlier QC before the corrected analysis so the exclusions are auditable.".to_string();
+                return;
+            };
+            if audit.comparison_name != original_comparison.name {
+                self.cohort_status = format!(
+                    "The current outlier QC was generated for '{}', but the corrected comparison is '{}'. Rerun Sample outlier QC for the current comparison before applying exclusions.",
+                    audit.comparison_name, original_comparison.name
+                );
+                return;
+            }
+            comparison =
+                filter_comparison_excluding(&original_comparison, &self.outlier_excluded_ids);
+            if comparison.case_ids.len() < 2 || comparison.control_ids.len() < 2 {
+                self.cohort_status = "Outlier filtering leaves fewer than two samples in one comparison group; review the exclusion list.".to_string();
+                return;
+            }
+            self.corrected_outlier_snapshot = Some(build_outlier_filter_snapshot(
+                audit,
+                &self.outlier_excluded_ids,
+                &original_comparison,
+                &comparison,
+                true,
+            ));
+        }
         let mut covariates = self
             .corrected_covariates
             .iter()
@@ -6243,6 +6668,10 @@ impl MergeApp {
                 self.corrected_results = None;
                 self.focused_results = None;
                 self.diagnostics_results = None;
+                self.outlier_results = None;
+                self.corrected_outlier_snapshot = None;
+                self.focused_outlier_snapshot = None;
+                self.outlier_excluded_ids.clear();
                 if let Some(path) = auto_meta {
                     self.load_cohort_metadata_path(path);
                 } else {
@@ -6268,6 +6697,10 @@ impl MergeApp {
                 self.cohort_results = None;
                 self.corrected_results = None;
                 self.diagnostics_results = None;
+                self.outlier_results = None;
+                self.corrected_outlier_snapshot = None;
+                self.focused_outlier_snapshot = None;
+                self.outlier_excluded_ids.clear();
                 self.configure_corrected_metadata_defaults();
                 self.rebuild_cohort_mapping();
                 self.cohort_status =
@@ -6294,6 +6727,7 @@ impl MergeApp {
                 self.focused_metadata_path = Some(path);
                 self.focused_metadata = Some(meta);
                 self.focused_results = None;
+                self.focused_outlier_snapshot = None;
                 self.rebuild_focused_mapping();
                 self.cohort_status =
                     format!("Focused metadata loaded: {rows} rows; matching on '{id_column}'.");
@@ -6318,13 +6752,41 @@ impl MergeApp {
             self.cohort_status = "Load a project and a focused metadata file first.".to_string();
             return;
         };
-        let comparison = match build_comparison(&metadata, self.cohort_preset) {
+        let original_comparison = match build_comparison(&metadata, self.cohort_preset) {
             Ok(c) => c,
             Err(e) => {
                 self.cohort_status = format!("Could not build focused comparison: {e:#}");
                 return;
             }
         };
+        let mut comparison = original_comparison.clone();
+        self.focused_outlier_snapshot = None;
+        if self.outlier_apply_to_focused && !self.outlier_excluded_ids.is_empty() {
+            let Some(audit) = self.outlier_results.as_ref() else {
+                self.cohort_status="Outlier exclusions are enabled but the QC audit is no longer available. Rerun Sample outlier QC before the focused analysis so the exclusions are auditable.".to_string();
+                return;
+            };
+            if audit.comparison_name != original_comparison.name {
+                self.cohort_status = format!(
+                    "The current outlier QC was generated for '{}', but the focused comparison is '{}'. Rerun Sample outlier QC for the current comparison before applying exclusions.",
+                    audit.comparison_name, original_comparison.name
+                );
+                return;
+            }
+            comparison =
+                filter_comparison_excluding(&original_comparison, &self.outlier_excluded_ids);
+            if comparison.case_ids.len() < 2 || comparison.control_ids.len() < 2 {
+                self.cohort_status = "Outlier filtering leaves fewer than two samples in one focused comparison group; review the exclusion list.".to_string();
+                return;
+            }
+            self.focused_outlier_snapshot = Some(build_outlier_filter_snapshot(
+                audit,
+                &self.outlier_excluded_ids,
+                &original_comparison,
+                &comparison,
+                true,
+            ));
+        }
         let spec = CorrectedModelSpec {
             subject_column: None,
             covariates: Vec::new(),
@@ -6877,6 +7339,7 @@ impl MergeApp {
         let mut corrected_done = None;
         let mut focused_done = None;
         let mut diagnostics_done = None;
+        let mut outlier_done = None;
         if let Some(rx) = &self.cohort_receiver {
             while let Ok(message) = rx.try_recv() {
                 match message {
@@ -6888,6 +7351,7 @@ impl MergeApp {
                     CohortWorkerMessage::CorrectedDone(bundle) => corrected_done = Some(bundle),
                     CohortWorkerMessage::FocusedDone(bundle) => focused_done = Some(bundle),
                     CohortWorkerMessage::DiagnosticsDone(result) => diagnostics_done = Some(result),
+                    CohortWorkerMessage::OutlierDone(result) => outlier_done = Some(result),
                 }
             }
         }
@@ -7027,6 +7491,7 @@ impl MergeApp {
             let gene_count = bundle.candidates.genes.len();
             let pathway_count = bundle.candidates.pathways.len();
             self.corrected_results = Some(bundle.corrected);
+            self.corrected_outlier_snapshot = self.focused_outlier_snapshot.clone();
             self.focused_results = Some(bundle.candidates);
             self.focused_result_view = FocusedResultView::Overview;
             self.cohort_running = false;
@@ -7052,6 +7517,25 @@ impl MergeApp {
             self.cohort_status = format!(
                 "PBMC/confounding diagnostics complete: {flagged} sample(s) flagged for review; {candidates} candidate gene robustness profile(s)."
             );
+        }
+        if let Some(result) = outlier_done {
+            self.cohort_running = false;
+            self.cohort_progress = 1.0;
+            self.cohort_receiver = None;
+            match result {
+                Ok(audit) => {
+                    let n = audit.consensus_ids.len();
+                    self.outlier_excluded_ids = audit.consensus_ids.iter().cloned().collect();
+                    self.outlier_plot_modality = 0;
+                    self.outlier_results = Some(audit);
+                    self.cohort_status = format!(
+                        "Sample outlier QC complete: {n} sample(s) meet the selected cross-modal rule. Review the audit before applying exclusions."
+                    );
+                }
+                Err(error) => {
+                    self.cohort_status = format!("Sample outlier QC failed: {error}");
+                }
+            }
         }
     }
 
@@ -7185,6 +7669,10 @@ impl MergeApp {
                 ui.label("• Fast first pass across many features.");
                 ui.label("• Helps spot large differences, obvious outliers, and broad biological themes.");
                 ui.label("• Useful when discussing data quality and whether a planned comparison is promising before moving into more formal modelling.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Sample outlier QC").strong());
+                ui.label("The exploratory workspace also has an unsupervised cross-modal outlier audit. Each selected data type produces a sample-level PCA representation and robust distance score. You can flag a sample if it is unusual in any one modality, in at least N modalities, in a majority, or in all available modalities.");
+                ui.label("Within-group detection is the recommended default so a real case/control-wide biological shift is less likely to be removed simply because one group differs from the other. Automatic flags should be reviewed before exclusion; outlier-filtered corrected/focused runs are best treated as sensitivity analyses alongside the inclusive result.");
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("What to be careful about").strong());
                 ui.label("• Repeated samples from the same person are still treated as separate observations in this layer.");

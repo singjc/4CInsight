@@ -50,6 +50,23 @@ Good for:
 - spotting large effects,
 - deciding whether a comparison is promising.
 
+#### Sample outlier QC
+
+The Exploratory layer also contains a cross-modal sample outlier screen. It asks a different question from differential analysis: **does one sample look unusually different from comparable samples within a data type?**
+
+The default is to detect outliers **within the case and control groups separately**. This is important because a real disease-wide shift should not automatically cause the entire case group to be labelled as an outlier.
+
+Each enabled modality contributes a sample-level QC representation:
+
+- gene/transcript expression: PCA of top-variable expression features,
+- BCR/TCR: PCA of repertoire summary metrics,
+- BCR isotype: CLR-composition PCA,
+- immune infiltrate: PCA of standardized immune signatures.
+
+The app then combines modality-specific flags using one of several rules: any modality, at least N modalities, majority, or all available modalities. A sample flagged in one modality may indicate an assay-specific problem; a sample flagged repeatedly across several modalities is stronger evidence of a broad sample/source/processing issue.
+
+**Do not automatically delete every flagged sample.** Review the sample-level plot, metadata/provenance, longitudinal context, and whether the sample is unusual in one assay or many assays. If exclusions are used, the recommended interpretation is a **sensitivity analysis**: compare the inclusive corrected result with the outlier-filtered result and ask whether the biological conclusion survives.
+
 Main caveats:
 
 - repeated samples from the same person are still separate observations here,
@@ -214,3 +231,19 @@ For a lay audience:
 ## Practical note
 
 The app is intended to help with discovery and interpretation. It does not replace external validation, domain-specific clinical interpretation, or a full study-design discussion.
+
+## QC-filtered analysis provenance
+
+When sample outlier QC is used to remove reviewed samples from a corrected or focused analysis, the app records the exact QC decision at the time the analysis starts. The exported tables and HTML report include:
+
+- the outlier-detection scope and robust-distance threshold,
+- the cross-modal consensus rule,
+- the number of modalities available for each sample,
+- which modalities flagged each sample,
+- the per-modality PCA/ordination coordinates and robust distances,
+- whether a sample was an automatic consensus flag,
+- whether it was actually excluded after review,
+- manual overrides (consensus flags that were retained or samples manually excluded), and
+- case/control sample counts before and after QC filtering.
+
+This distinction is important: an automatic outlier flag is a QC signal, not proof that a sample is biologically invalid. Corrected/focused reports therefore document the **reviewed exclusion set actually used**, while exploratory reports can show the audit without pretending that the exploratory result was filtered.

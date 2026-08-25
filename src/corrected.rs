@@ -2299,6 +2299,56 @@ fn parse_repertoire_file(
     })
 }
 
+pub(crate) fn parse_repertoire_qc_metrics(
+    path: &Path,
+    sample_id: &str,
+    modality: CohortModality,
+) -> Result<Vec<(String, f64)>> {
+    let parsed = parse_repertoire_file(
+        path,
+        sample_id,
+        "QC",
+        modality,
+        AmbiguousCallPolicy::Exclude,
+    )?;
+    let total = parsed.counts.iter().copied().sum::<f64>();
+    if total <= 0.0 {
+        bail!("No positive clone counts");
+    }
+    let probs = parsed
+        .counts
+        .iter()
+        .copied()
+        .filter(|v| *v > 0.0)
+        .map(|v| v / total)
+        .collect::<Vec<_>>();
+    let richness = probs.len() as f64;
+    let shannon = -probs
+        .iter()
+        .copied()
+        .filter(|p| *p > 0.0)
+        .map(|p| p * p.ln())
+        .sum::<f64>();
+    let simpson = 1.0 - probs.iter().map(|p| p * p).sum::<f64>();
+    let clonality = if richness > 1.0 {
+        1.0 - shannon / richness.ln()
+    } else {
+        0.0
+    };
+    Ok(vec![
+        ("Total clone count".to_string(), total),
+        ("Observed richness".to_string(), richness),
+        ("Shannon diversity".to_string(), shannon),
+        ("Simpson diversity".to_string(), simpson),
+        ("Clonality".to_string(), clonality),
+        ("Top clone fraction".to_string(), parsed.top_clone_fraction),
+        (
+            "Weighted mean CDR3 AA length".to_string(),
+            parsed.weighted_mean_cdr3_aa_length,
+        ),
+    ])
+}
+
 fn resolve_calls(raw: &str, policy: AmbiguousCallPolicy) -> Vec<(String, f64)> {
     let mut hits = raw
         .split(',')
@@ -2349,7 +2399,10 @@ fn add_resolved(map: &mut HashMap<String, f64>, calls: &[(String, f64)], count: 
     }
 }
 
-fn parse_isotype_file(path: &Path, determined_only: bool) -> Result<HashMap<String, f64>> {
+pub(crate) fn parse_isotype_file(
+    path: &Path,
+    determined_only: bool,
+) -> Result<HashMap<String, f64>> {
     let (headers, rows) = read_first_sheet(path)?;
     let columns = header_map(&headers);
     let fraction_idx = find_header(&columns, &["Isotype Read Fraction"])

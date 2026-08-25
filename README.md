@@ -4,6 +4,25 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.14.1 adds
+
+- Makes **QC filtering fully auditable in exports and HTML reports**. When reviewed outlier exclusions are applied to Corrected / standard or Focused candidate analyses, the app snapshots the exact outlier audit and reviewed exclusion list used for that run.
+- Corrected and focused exports now include `sample_outlier_qc.csv`, `sample_outlier_qc_modalities.tsv`, and `sample_outlier_qc_summary.txt` with the detection scope, robust-distance threshold, cross-modal rule, consensus flags, manual overrides, per-modality coordinates/distances, and the exact sample IDs removed.
+- Corrected and focused HTML reports now include a dedicated **Sample QC and reviewed exclusions** section with before/after case/control counts, excluded IDs, consensus-vs-manual decisions, per-modality QC summaries, and interactive outlier scatter plots.
+- Exploratory exports/reports also include the current outlier audit when one has been run, but explicitly state that those reviewed exclusions were **not applied** to the exploratory result.
+- Run-specific QC snapshots are preserved even if the user later changes the outlier settings, preventing a report from accidentally describing a different exclusion configuration than the one used to generate the statistics.
+
+## What v0.14 adds
+
+- Adds a **cross-modal sample outlier QC** section to the Exploratory workflow. Outlier detection is unsupervised and is based on sample-level representations for the currently enabled modalities rather than on the significance of individual biomarkers.
+- Gene/transcript QC uses PCA of top-variable expression features; BCR/TCR use robust-standardized repertoire summary metrics; BCR isotype uses CLR composition; immune infiltrate uses robust-standardized ssGSEA signatures.
+- Adds a configurable **within-group vs across-all** detection scope. Within case/control groups is the recommended default so a genuine disease-wide shift is less likely to be mistaken for a technical outlier.
+- Adds configurable cross-modal rules: **any modality**, **at least N modalities**, **majority**, or **all available selected modalities**, with a minimum-modality requirement for consensus rules.
+- Adds an editable sample audit table and per-modality PCA view. Automatic flags can be accepted, overridden, or cleared; the app does not treat an automatic flag as proof that a sample is biologically invalid.
+- Adds optional application of the reviewed exclusion list to **Corrected / standard** and/or **Focused candidate** analyses. Exploratory results remain inclusive so filtered analyses can be treated as sensitivity checks rather than silently replacing the original cohort.
+- Adds CSV export of the sample-level consensus flags and per-modality robust outlier scores.
+- Adds unit tests for the cross-modal consensus rules and robust-distance detection.
+
 ## What v0.13 adds
 
 - Adds an optional **sample-metadata filter directly to Merge & Export**. Load XLSX/CSV/TSV/TXT metadata without changing the selected workbook set.

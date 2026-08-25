@@ -3,6 +3,7 @@ pub mod corrected;
 pub mod diagnostics;
 pub mod focused;
 pub mod gmt_catalog;
+pub mod outliers;
 pub mod report;
 
 use anyhow::{Context, Result, anyhow, bail};

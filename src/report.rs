@@ -11,6 +11,7 @@ use crate::corrected::{
 use crate::focused::{
     FocusedCandidateSummary, FocusedGeneCandidate, FocusedOtherCandidate, FocusedPathwayCandidate,
 };
+use crate::outliers::{OutlierConsensusRule, OutlierFilterSnapshot};
 use anyhow::{Context, Result};
 use maud::{Markup, html};
 use plotly::common::{HoverInfo, Mode, Title};
@@ -39,6 +40,7 @@ pub struct CohortReportInputs<'a> {
     pub tcr_beta_error: Option<&'a str>,
     pub immune: Option<&'a ImmuneComparisonResult>,
     pub immune_error: Option<&'a str>,
+    pub outlier_qc: Option<&'a OutlierFilterSnapshot>,
 }
 
 pub fn generate_cohort_html_report(path: &Path, inputs: CohortReportInputs<'_>) -> Result<()> {
@@ -53,6 +55,12 @@ pub fn generate_cohort_html_report(path: &Path, inputs: CohortReportInputs<'_>) 
     report.add_section(build_overview_section(&inputs));
     if let Some(mapping) = inputs.mapping {
         report.add_section(build_mapping_section(mapping));
+    }
+    if let Some(qc) = inputs.outlier_qc {
+        report.add_section(build_outlier_qc_section(
+            qc,
+            "Sample outlier QC (exploratory audit)",
+        ));
     }
     if inputs.gene.is_some() || inputs.gene_error.is_some() {
         report.add_section(build_gene_section(&inputs));
@@ -92,6 +100,255 @@ pub fn generate_cohort_html_report(path: &Path, inputs: CohortReportInputs<'_>) 
         .with_context(|| format!("Could not write HTML report to {}", path.display()))?;
     make_report_self_contained(path)?;
     Ok(())
+}
+
+fn build_outlier_qc_section(snapshot: &OutlierFilterSnapshot, title: &str) -> ReportSection {
+    let mut section = ReportSection::new(title);
+    let cfg = &snapshot.audit.config;
+    let consensus = snapshot
+        .audit
+        .consensus_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let excluded = snapshot
+        .excluded_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let manual_excluded = excluded.difference(&consensus).count();
+    let consensus_kept = consensus.difference(&excluded).count();
+    let rule_detail = if cfg.consensus_rule == OutlierConsensusRule::AtLeastN {
+        format!(
+            "{} (N={})",
+            cfg.consensus_rule.display_name(),
+            cfg.at_least_n
+        )
+    } else {
+        cfg.consensus_rule.display_name().to_string()
+    };
+    let excluded_evidence_rows = snapshot
+        .audit
+        .samples
+        .iter()
+        .filter(|row| excluded.contains(&row.sample_id))
+        .map(|row| {
+            let mut evidence = Vec::new();
+            for modality in &snapshot.audit.modalities {
+                if let Some(point) = modality
+                    .points
+                    .iter()
+                    .find(|p| crate::cohort::normalize_sample_id(&p.sample_id) == row.sample_id)
+                {
+                    evidence.push(format!(
+                        "{}: distance {:.2}{}",
+                        modality.modality,
+                        point.robust_distance,
+                        if point.flagged { " (flagged)" } else { "" }
+                    ));
+                }
+            }
+            (
+                row.sample_id.clone(),
+                row.group.clone(),
+                row.flagged_names.join("; "),
+                evidence.join(" | "),
+            )
+        })
+        .collect::<Vec<_>>();
+    let decision_rows = snapshot
+        .audit
+        .samples
+        .iter()
+        .map(|row| {
+            let is_consensus = consensus.contains(&row.sample_id);
+            let is_excluded = excluded.contains(&row.sample_id);
+            let decision = match (is_consensus, is_excluded) {
+                (true, true) => "excluded — consensus flag",
+                (true, false) => "kept — manual override",
+                (false, true) => "excluded — manual override",
+                (false, false) => "kept",
+            }
+            .to_string();
+            (
+                row.sample_id.clone(),
+                row.group.clone(),
+                row.available_modalities,
+                row.flagged_modalities,
+                is_consensus,
+                is_excluded,
+                decision,
+                if row.flagged_names.is_empty() {
+                    "—".to_string()
+                } else {
+                    row.flagged_names.join("; ")
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    section.add_content(html! {
+        h3 { "QC filter provenance" }
+        p {
+            strong { "Important: " }
+            "The table below records the sample-outlier audit and reviewed exclusion decisions associated with this result. "
+            "Outlier flags are unsupervised QC signals and are not, by themselves, proof that a sample is biologically invalid. "
+            @if snapshot.applied_to_analysis {
+                "The reviewed exclusion list shown here is the exact set removed before this analysis was run."
+            } @else {
+                "These reviewed exclusions were recorded for downstream sensitivity analyses but were not removed from this exploratory result."
+            }
+        }
+        ul {
+            li { strong { "QC comparison: " } (snapshot.audit.comparison_name) }
+            li { strong { "Detection scope: " } (cfg.scope.display_name()) }
+            li { strong { "Robust-distance threshold: " } (format!("{:.3}", cfg.robust_distance_threshold)) }
+            li { strong { "Cross-modal consensus rule: " } (rule_detail) }
+            li { strong { "Minimum available modalities: " } (cfg.min_available_modalities) }
+            li { strong { "Consensus-flagged samples: " } (snapshot.audit.consensus_ids.len()) }
+            li { strong { "Reviewed exclusions selected: " } (snapshot.excluded_ids.len()) }
+            li { strong { "Applied to this analysis: " } (if snapshot.applied_to_analysis { "yes" } else { "no" }) }
+            li { strong { "Manual exclusions outside consensus: " } (manual_excluded) }
+            li { strong { "Consensus flags manually retained: " } (consensus_kept) }
+            li { strong { "Case samples: " } (snapshot.original_case_n) " before reviewed exclusions → " (snapshot.filtered_case_n) " after reviewed exclusions" }
+            li { strong { "Control samples: " } (snapshot.original_control_n) " before reviewed exclusions → " (snapshot.filtered_control_n) " after reviewed exclusions" }
+        }
+        @if !snapshot.excluded_ids.is_empty() {
+            p { strong { "Excluded sample IDs: " } (snapshot.excluded_ids.join(", ")) }
+        }
+        @if !snapshot.audit.warnings.is_empty() {
+            h4 { "QC warnings" }
+            ul { @for warning in &snapshot.audit.warnings { li { (warning) } } }
+        }
+        @if !excluded_evidence_rows.is_empty() {
+            h3 { "Why the excluded samples were flagged" }
+            p { "The evidence below shows the modality-specific robust distances that were available when the reviewed exclusion decision was made. A modality is marked '(flagged)' when its robust distance exceeded the configured threshold under the selected detection scope." }
+            div class="table-container" {
+                table {
+                    thead { tr { th { "Sample" } th { "Group" } th { "Automatically flagged in" } th { "Per-modality evidence" } } }
+                    tbody {
+                        @for (sample_id,group,flagged_in,evidence) in &excluded_evidence_rows {
+                            tr { td { (sample_id) } td { (group) } td { (if flagged_in.is_empty(){"—".to_string()}else{flagged_in.clone()}) } td { (evidence) } }
+                        }
+                    }
+                }
+            }
+        }
+        h3 { "Per-modality QC summary" }
+        div class="table-container" {
+            table {
+                thead { tr { th { "Modality" } th { "Representation" } th { "Samples" } th { "Flagged" } th { "Axes" } } }
+                tbody {
+                    @for modality in &snapshot.audit.modalities {
+                        tr {
+                            td { (modality.modality) }
+                            td { (modality.representation) }
+                            td { (modality.points.len()) }
+                            td { (modality.points.iter().filter(|p| p.flagged).count()) }
+                            td { (modality.x_label) " / " (modality.y_label) }
+                        }
+                    }
+                }
+            }
+        }
+        h3 { "Sample-level QC decisions" }
+        p { "Decision labels distinguish automatic consensus flags from the reviewed set that was actually excluded. This makes manual overrides explicit." }
+        div class="table-container" {
+            table {
+                thead { tr { th { "Sample" } th { "Group" } th { "Available modalities" } th { "Flagged modalities" } th { "Consensus" } th { "Reviewed exclusion" } th { "Decision" } th { "Flagged in" } } }
+                tbody {
+                    @for (sample_id,group,available,flagged,is_consensus,is_excluded,decision,flagged_in) in &decision_rows {
+                        tr {
+                            td { (sample_id) }
+                            td { (group) }
+                            td { (available) }
+                            td { (flagged) }
+                            td { (if *is_consensus { "yes" } else { "no" }) }
+                            td { (if *is_excluded { "yes" } else { "no" }) }
+                            td { (decision) }
+                            td { (flagged_in) }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    for modality in &snapshot.audit.modalities {
+        if let Some(plot) = outlier_modality_plot(modality, &excluded, snapshot.applied_to_analysis)
+        {
+            section.add_plot(plot);
+        }
+    }
+    section
+}
+
+fn outlier_modality_plot(
+    modality: &crate::outliers::ModalityOutlierResult,
+    excluded: &BTreeSet<String>,
+    applied_to_analysis: bool,
+) -> Option<Plot> {
+    let mut ordinary_x = Vec::new();
+    let mut ordinary_y = Vec::new();
+    let mut ordinary_hover = Vec::new();
+    let mut flagged_x = Vec::new();
+    let mut flagged_y = Vec::new();
+    let mut flagged_hover = Vec::new();
+    let mut excluded_x = Vec::new();
+    let mut excluded_y = Vec::new();
+    let mut excluded_hover = Vec::new();
+    for point in &modality.points {
+        let id = crate::cohort::normalize_sample_id(&point.sample_id);
+        let hover = format!(
+            "<b>{}</b><br>Group: {}<br>Robust distance: {:.3}<br>Modality flag: {}<br>Reviewed exclusion: {}",
+            escape_hover_text(&point.sample_id),
+            escape_hover_text(&point.group),
+            point.robust_distance,
+            if point.flagged { "yes" } else { "no" },
+            if excluded.contains(&id) { "yes" } else { "no" },
+        );
+        if excluded.contains(&id) {
+            excluded_x.push(point.x);
+            excluded_y.push(point.y);
+            excluded_hover.push(hover);
+        } else if point.flagged {
+            flagged_x.push(point.x);
+            flagged_y.push(point.y);
+            flagged_hover.push(hover);
+        } else {
+            ordinary_x.push(point.x);
+            ordinary_y.push(point.y);
+            ordinary_hover.push(hover);
+        }
+    }
+    labeled_scatter_plot(
+        vec![
+            (
+                "Ordinary".to_string(),
+                ordinary_x,
+                ordinary_y,
+                ordinary_hover,
+            ),
+            (
+                "Flagged / retained".to_string(),
+                flagged_x,
+                flagged_y,
+                flagged_hover,
+            ),
+            (
+                (if applied_to_analysis {
+                    "Excluded from analysis"
+                } else {
+                    "Selected for downstream exclusion"
+                })
+                .to_string(),
+                excluded_x,
+                excluded_y,
+                excluded_hover,
+            ),
+        ],
+        &format!("{} sample outlier QC", modality.modality),
+        &modality.x_label,
+        &modality.y_label,
+    )
 }
 
 fn make_report_self_contained(path: &Path) -> Result<()> {
@@ -1056,6 +1313,7 @@ mod tests {
                 tcr_beta_error: None,
                 immune: None,
                 immune_error: None,
+                outlier_qc: None,
             },
         )
         .unwrap();
@@ -1094,6 +1352,7 @@ pub struct CorrectedReportInputs<'a> {
     pub immune_error: Option<&'a str>,
     pub pathway: Option<&'a CorrectedPathwayResult>,
     pub pathway_error: Option<&'a str>,
+    pub outlier_qc: Option<&'a OutlierFilterSnapshot>,
 }
 
 pub fn generate_corrected_html_report(
@@ -1119,12 +1378,21 @@ pub fn generate_corrected_html_report(
         p { strong { "Case: " } (inputs.comparison.case_label) " | " strong { "Control: " } (inputs.comparison.control_label) }
         p { strong { "Subject / repeated-measure column: " } (subject) }
         p { strong { "Covariates: " } (covariates) }
+        @if let Some(qc)=inputs.outlier_qc {
+            p { strong { "QC-filtered analysis: " } (qc.excluded_ids.len()) " reviewed sample exclusion(s) were applied before modelling (case " (qc.original_case_n) " → " (qc.filtered_case_n) ", control " (qc.original_control_n) " → " (qc.filtered_control_n) ")." }
+        }
         p { "Expression uses positive-count median-ratio normalization with a negative-binomial log-link count model, optional covariates, subject-clustered standard errors when repeated samples are configured, and a subject-collapsed sensitivity analysis." }
         p { "Repertoire analyses use matched-depth rarefaction, subject-aware clonotype sharing, Morisita-Horn and Jaccard distances with PCoA/PERMANOVA, average-linkage hierarchical clustering, and CLR/Aitchison composition analysis. Immune-infiltrate tests use original ssGSEA scores with adjusted models and standardized scores for unsupervised sample structure." }
     });
     report.add_section(overview);
     if let Some(mapping) = inputs.mapping {
         report.add_section(build_mapping_section(mapping));
+    }
+    if let Some(qc) = inputs.outlier_qc {
+        report.add_section(build_outlier_qc_section(
+            qc,
+            "Sample QC and reviewed exclusions",
+        ));
     }
     if let Some(r) = inputs.gene {
         report.add_section(build_corrected_expression_section("Gene counts", r));
@@ -1533,10 +1801,16 @@ fn adjusted_table(title: &str, tests: &[AdjustedFeatureResult], limit: usize) ->
     html! {h3{(title)" ("(tests.len())" rows; showing up to "(limit.min(tests.len()))")"} div class="table-container"{table{thead{tr{th{"Feature"}th{"ID/family"}th{"β group"}th{"SE"}th{"p"}th{"BH q"}th{"Subject effect"}th{"Subject BH q"}th{"n"}th{"subjects"}th{"Case mean"}th{"Control mean"}}} tbody{@for r in tests.iter().take(limit){tr{td{(r.feature)}td{(r.secondary_id)}td{(fmt(r.beta_group))}td{(fmt(r.robust_se))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.subject_effect))}td{(fmt_sci(r.subject_q_value))}td{(r.n_samples)}td{(r.n_subjects)}td{(fmt(r.mean_case))}td{(fmt(r.mean_control))}}}}}}}
 }
 
+pub struct FocusedReportInputs<'a> {
+    pub summary: &'a FocusedCandidateSummary,
+    pub outlier_qc: Option<&'a OutlierFilterSnapshot>,
+}
+
 pub fn generate_focused_candidate_html_report(
     path: &Path,
-    summary: &FocusedCandidateSummary,
+    inputs: FocusedReportInputs<'_>,
 ) -> Result<()> {
+    let summary = inputs.summary;
     let title = format!(
         "4C focused candidate signals — {} vs {}",
         summary.case_label, summary.control_label
@@ -1554,11 +1828,20 @@ pub fn generate_focused_candidate_html_report(
         p{strong{"Comparison: "}(summary.case_label)" vs "(summary.control_label)}
         p{strong{"Focused metadata: "}code{(summary.metadata_path.to_string_lossy())}}
         p{strong{"Samples: "}(summary.n_case)" case / "(summary.n_control)" control"}
+        @if let Some(qc)=inputs.outlier_qc {
+            p{strong{"QC-filtered focused run: "}(qc.excluded_ids.len())" reviewed sample exclusion(s) were applied before candidate prioritization (case "(qc.original_case_n)" → "(qc.filtered_case_n)", control "(qc.original_control_n)" → "(qc.filtered_control_n)")."}
+        }
         p{strong{"Purpose: "}"Prioritize a small number of preliminary genes, pathways, and other molecular signals for follow-up. These are candidate signals, not validated biomarkers."}
         p{"Corrected/standard statistics are the primary evidence. If an exploratory expression screen was also run, it is used only to show whether the direction of change agrees across two analysis views of the same samples; it is not independent replication."}
         p{"The focused sample list is expected to contain one sample per individual. This removes the repeated-sampling issue from the direct comparison, although related family members can still introduce dependence that should be addressed in later validation."}
     });
     report.add_section(overview);
+    if let Some(qc) = inputs.outlier_qc {
+        report.add_section(build_outlier_qc_section(
+            qc,
+            "Sample QC and reviewed exclusions",
+        ));
+    }
 
     let mut genes = ReportSection::new("Candidate genes");
     genes.add_content(html!{
