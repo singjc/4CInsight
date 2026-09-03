@@ -1,3 +1,4 @@
+use crate::analysis::UnifiedCohortAnalysisRun;
 use crate::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, BcrSampleSummary, CohortComparison,
     CohortMapping, CohortModality, FeatureTestResult, GeneComparisonResult, ImmuneComparisonResult,
@@ -8,6 +9,7 @@ use crate::corrected::{
     CorrectedIsotypeResult, CorrectedModelSpec, CorrectedPathwayResult, CorrectedRepertoireResult,
     DendrogramResult, DtuGeneResult, OrdinationResult,
 };
+use crate::diagnostics::PbmcDiagnosticsResult;
 use crate::focused::{
     FocusedCandidateSummary, FocusedGeneCandidate, FocusedOtherCandidate, FocusedPathwayCandidate,
 };
@@ -195,7 +197,7 @@ fn build_outlier_qc_section(snapshot: &OutlierFilterSnapshot, title: &str) -> Re
             @if snapshot.applied_to_analysis {
                 "The reviewed exclusion list shown here is the exact set removed before this analysis was run."
             } @else {
-                "These reviewed exclusions were recorded for downstream sensitivity analyses but were not removed from this exploratory result."
+                "The QC audit was frozen with this run, but no reviewed sample exclusion was applied to the primary analysis."
             }
         }
         ul {
@@ -1958,7 +1960,7 @@ fn focused_pathway_plot(rows: &[FocusedPathwayCandidate]) -> Option<Plot> {
 }
 
 fn focused_gene_table(rows: &[FocusedGeneCandidate]) -> Markup {
-    html! {div class="table-container"{table{thead{tr{th{"Rank"}th{"Gene / transcript"}th{"ID"}th{"Adjusted log2FC"}th{"p"}th{"BH q"}th{"Case mean"}th{"Control mean"}th{"Exploratory direction"}th{"Pathway support"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.gene)}td{(r.gene_id)}td{(fmt(r.adjusted_log2fc))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.case_mean))}td{(fmt(r.control_mean))}td{(match r.direction_concordant{Some(true)=>"same",Some(false)=>"opposite",None=>"—"})}td{(r.pathway_support_count) @if !r.pathway_support.is_empty(){br; small{(r.pathway_support)}}}td{(r.evidence)}}}}}}}
+    html! {div class="table-container"{table{thead{tr{th{"Rank"}th{"Gene / transcript"}th{"ID"}th{"Adjusted log2FC"}th{"p"}th{"BH q"}th{"Case mean"}th{"Control mean"}th{"Exploratory direction"}th{"Pathway support"}th{"Robustness"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.gene)}td{(r.gene_id)}td{(fmt(r.adjusted_log2fc))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.case_mean))}td{(fmt(r.control_mean))}td{(match r.direction_concordant{Some(true)=>"same",Some(false)=>"opposite",None=>"—"})}td{(r.pathway_support_count) @if !r.pathway_support.is_empty(){br; small{(r.pathway_support)}}}td{@if let Some(label)=&r.robustness{(label) @if !r.robustness_flags.is_empty(){br; small{(r.robustness_flags.join("; "))}}} @else {"—"}}td{(r.evidence)}}}}}}}
 }
 
 fn focused_pathway_table(rows: &[FocusedPathwayCandidate]) -> Markup {
@@ -1967,4 +1969,389 @@ fn focused_pathway_table(rows: &[FocusedPathwayCandidate]) -> Markup {
 
 fn focused_other_table(rows: &[FocusedOtherCandidate]) -> Markup {
     html! {div class="table-container"{table{thead{tr{th{"Rank"}th{"Modality"}th{"Family"}th{"Feature"}th{"ID"}th{"Effect"}th{"p"}th{"BH q"}th{"Case mean"}th{"Control mean"}th{"Evidence"}}}tbody{@for r in rows{tr{td{(r.rank)}td{(r.modality)}td{(r.family)}td{(r.feature)}td{(r.secondary_id)}td{(fmt(r.effect))}td{(fmt_sci(r.p_value))}td{(fmt_sci(r.q_value))}td{(fmt(r.case_mean))}td{(fmt(r.control_mean))}td{(r.evidence)}}}}}}}
+}
+
+/// Render the technical/audit report for one completed unified analysis run.
+/// This consumes the frozen run object and never reruns statistics.
+pub fn generate_unified_detailed_html_report(
+    path: &Path,
+    run: &UnifiedCohortAnalysisRun,
+) -> Result<()> {
+    let title = format!(
+        "4C cohort analysis — {} — full report",
+        run.primary.comparison.name
+    );
+    let mut report = Report::new(
+        "4C Cohort Explorer",
+        env!("CARGO_PKG_VERSION"),
+        None,
+        &title,
+    );
+    let subject = run
+        .settings
+        .corrected
+        .subject_column
+        .as_deref()
+        .unwrap_or("none");
+    let covariates = if run.settings.corrected.covariates.is_empty() {
+        "none".to_string()
+    } else {
+        run.settings.corrected.covariates.join(", ")
+    };
+    let mut overview = ReportSection::new("Run overview and provenance");
+    overview.add_content(html! {
+        h2 { "Unified Cohort Analysis" }
+        p { strong { "Comparison: " } (run.primary.comparison.case_label) " vs " (run.primary.comparison.control_label) }
+        p { strong { "Completed analysis samples: " } (run.case_n()) " case / " (run.control_n()) " control" }
+        p { strong { "Project root: " } code { (run.cohort.project_root.to_string_lossy()) } }
+        p { strong { "Metadata: " } code { (run.cohort.metadata_path.to_string_lossy()) } " (ID column: " (run.cohort.metadata_id_column) ")" }
+        @if run.cohort.uses_filtered_metadata_subset {
+            p { strong { "Cohort definition: " } "A collaborator/user-supplied filtered metadata table defined the analyzed subset. The statistical methodology is unchanged." }
+        } @else {
+            p { strong { "Cohort definition: " } "Primary project metadata." }
+        }
+        p { strong { "Subject / repeated-measure column: " } (subject) }
+        p { strong { "Covariates: " } (covariates) }
+        @if let Some(qc)=run.qc_snapshot.as_ref() {
+            p { strong { "Reviewed QC exclusions: " } (qc.excluded_ids.len()) " applied exclusion(s); case " (qc.original_case_n) " → " (qc.filtered_case_n) ", control " (qc.original_control_n) " → " (qc.filtered_control_n) "." }
+        } @else {
+            p { strong { "Reviewed QC exclusions: " } "none applied to this run." }
+        }
+        p { "Corrected/standard results are the primary inferential evidence. Exploratory expression calculations, when enabled, are retained only as descriptive direction-concordance support. Candidate prioritization and both report styles are derived from this completed run." }
+    });
+    report.add_section(overview);
+
+    let selected_modalities = [
+        (run.settings.modalities.gene, "Gene expression"),
+        (run.settings.modalities.transcript, "Transcript expression"),
+        (run.settings.modalities.bcr, "BCR"),
+        (run.settings.modalities.bcr_isotype, "BCR isotype"),
+        (run.settings.modalities.tcr_alpha, "TCR alpha"),
+        (run.settings.modalities.tcr_beta, "TCR beta"),
+        (run.settings.modalities.immune, "Immune infiltrate"),
+        (run.settings.modalities.pathway, "Pathway ORA"),
+    ]
+    .into_iter()
+    .filter_map(|(selected, label)| selected.then_some(label))
+    .collect::<Vec<_>>()
+    .join(", ");
+    let pathway_source = run
+        .settings
+        .pathway_gmt_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| "not selected".to_string());
+    let mut configuration = ReportSection::new("Analysis configuration");
+    configuration.add_content(html! {
+        ul {
+            li { strong { "Selected modalities: " } (selected_modalities) }
+            li { strong { "Expression filtering: " } "minimum count " (fmt(run.settings.corrected.min_count)) "; minimum sample fraction " (fmt(run.settings.corrected.min_fraction_samples)) }
+            li { strong { "Subject-blocked permutation count: " } (run.settings.corrected.permutations) }
+            li { strong { "Repertoire rarefaction: " } (run.settings.corrected.rarefaction_reps) " replicate(s); depth cap " (run.settings.corrected.rarefaction_cap) }
+            li { strong { "Ambiguous repertoire-call policy: " } (run.settings.corrected.ambiguous_policy.display_name()) }
+            li { strong { "BCR-isotype Undetermined sensitivity policy: " } (if run.settings.corrected.exclude_undetermined_isotype { "exclude and renormalize" } else { "retain" }) }
+            li { strong { "Exploratory TPM direction support: " } (if run.settings.exploratory_direction_check { "enabled" } else { "disabled" }) }
+            li { strong { "PBMC / confounding diagnostics: " } (if run.settings.pbmc_diagnostics.is_some() { "enabled" } else { "disabled" }) }
+            @if run.settings.modalities.pathway {
+                li { strong { "Pathway GMT: " } code { (pathway_source) } }
+                li { strong { "Pathway foreground thresholds: " } "gene BH q ≤ " (fmt(run.settings.pathway_q_threshold)) "; |adjusted effect| ≥ " (fmt(run.settings.pathway_effect_threshold)) }
+            }
+        }
+    });
+    report.add_section(configuration);
+
+    report.add_section(build_mapping_section(&run.cohort.mapping));
+    if let Some(qc) = run.qc_snapshot.as_ref() {
+        report.add_section(build_outlier_qc_section(
+            qc,
+            "Sample QC and reviewed exclusions",
+        ));
+    }
+
+    let primary = &run.primary;
+    if let Some(result) = primary.gene.as_ref() {
+        report.add_section(build_corrected_expression_section("Gene counts", result));
+    } else if let Some(error) = primary.gene_error.as_deref() {
+        report.add_section(corrected_error_section("Gene counts", error));
+    }
+    if let Some(result) = primary.transcript.as_ref() {
+        report.add_section(build_corrected_expression_section(
+            "Transcript counts",
+            result,
+        ));
+    } else if let Some(error) = primary.transcript_error.as_deref() {
+        report.add_section(corrected_error_section("Transcript counts", error));
+    }
+    if let Some(result) = primary.bcr.as_ref() {
+        report.add_section(build_corrected_repertoire_section("BCR", result));
+    } else if let Some(error) = primary.bcr_error.as_deref() {
+        report.add_section(corrected_error_section("BCR", error));
+    }
+    if let Some(result) = primary.bcr_isotype.as_ref() {
+        report.add_section(build_corrected_isotype_section(result));
+    } else if let Some(error) = primary.bcr_isotype_error.as_deref() {
+        report.add_section(corrected_error_section("BCR isotype", error));
+    }
+    if let Some(result) = primary.tcr_alpha.as_ref() {
+        report.add_section(build_corrected_repertoire_section("TCR alpha", result));
+    } else if let Some(error) = primary.tcr_alpha_error.as_deref() {
+        report.add_section(corrected_error_section("TCR alpha", error));
+    }
+    if let Some(result) = primary.tcr_beta.as_ref() {
+        report.add_section(build_corrected_repertoire_section("TCR beta", result));
+    } else if let Some(error) = primary.tcr_beta_error.as_deref() {
+        report.add_section(corrected_error_section("TCR beta", error));
+    }
+    if let Some(result) = primary.immune.as_ref() {
+        report.add_section(build_corrected_immune_section(result));
+    } else if let Some(error) = primary.immune_error.as_deref() {
+        report.add_section(corrected_error_section("Immune infiltrate", error));
+    }
+    if let Some(result) = primary.pathway.as_ref() {
+        report.add_section(build_corrected_pathway_section(result));
+    } else if let Some(error) = primary.pathway_error.as_deref() {
+        report.add_section(corrected_error_section("Pathways", error));
+    }
+
+    if run.settings.exploratory_direction_check {
+        if run.exploratory_support.gene.is_some() || run.exploratory_support.gene_error.is_some() {
+            report.add_section(build_expression_section(
+                "Supporting descriptive gene TPM check",
+                "Gene",
+                "genes",
+                run.exploratory_support.gene.as_ref(),
+                run.exploratory_support.gene_error.as_deref(),
+            ));
+        }
+        if run.exploratory_support.transcript.is_some()
+            || run.exploratory_support.transcript_error.is_some()
+        {
+            report.add_section(build_expression_section(
+                "Supporting descriptive transcript TPM check",
+                "Transcript",
+                "transcripts",
+                run.exploratory_support.transcript.as_ref(),
+                run.exploratory_support.transcript_error.as_deref(),
+            ));
+        }
+    }
+
+    if let Some(diagnostics) = run.diagnostics.as_ref() {
+        report.add_section(build_unified_diagnostics_overview(diagnostics));
+        if let Some(result) = diagnostics.qc_restricted_gene.as_ref() {
+            report.add_section(build_corrected_expression_section(
+                "QC-restricted gene sensitivity analysis",
+                result,
+            ));
+        }
+        if let Some(result) = diagnostics.immune_adjusted_gene.as_ref() {
+            report.add_section(build_corrected_expression_section(
+                "Immune-composition-adjusted gene sensitivity analysis",
+                result,
+            ));
+        }
+        report.add_section(build_unified_candidate_robustness(diagnostics));
+    } else if let Some(error) = run.diagnostics_error.as_deref() {
+        report.add_section(corrected_error_section(
+            "PBMC / confounding sensitivity diagnostics",
+            error,
+        ));
+    }
+
+    let mut candidate = ReportSection::new("Candidate prioritization");
+    candidate.add_content(html! {
+        p { "This section is a presentation/prioritization layer derived from the corrected results above. It is not an independent analysis and does not add statistical evidence." }
+        h3 { "Candidate genes" }
+        (focused_gene_table(&run.candidates.genes))
+        @if !run.candidates.pathways.is_empty() {
+            h3 { "Candidate pathways" }
+            (focused_pathway_table(&run.candidates.pathways))
+        }
+        @if !run.candidates.other.is_empty() {
+            h3 { "Other modality signals" }
+            (focused_other_table(&run.candidates.other))
+        }
+    });
+    report.add_section(candidate);
+
+    let mut limitations = ReportSection::new("Warnings, assumptions, and limitations");
+    limitations.add_content(html! {
+        p { "4C Cohort Explorer supports discovery, robustness assessment, and candidate prioritization. Results are preliminary and must not be described as validated clinical biomarkers without independent replication/validation." }
+        p { "The native expression model does not reproduce the full empirical-Bayes/dispersion-shrinkage machinery of DESeq2, edgeR, or limma-voom. Interpret model-specific effects and uncertainty accordingly." }
+        @if run.warnings.is_empty() {
+            p { "No additional run warnings were recorded." }
+        } @else {
+            h3 { "Run warnings" }
+            ul { @for warning in &run.warnings { li { (warning) } } }
+        }
+    });
+    report.add_section(limitations);
+
+    let output = path.to_string_lossy().to_string();
+    report.save_to_file(&output).with_context(|| {
+        format!(
+            "Could not write unified detailed HTML report to {}",
+            path.display()
+        )
+    })?;
+    make_report_self_contained(path)?;
+    Ok(())
+}
+
+/// Render the presentation-friendly report from the same frozen run used by
+/// the detailed report. No statistics are recalculated here.
+pub fn generate_unified_simplified_html_report(
+    path: &Path,
+    run: &UnifiedCohortAnalysisRun,
+) -> Result<()> {
+    let title = format!(
+        "4C key findings — {} vs {}",
+        run.primary.comparison.case_label, run.primary.comparison.control_label
+    );
+    let mut report = Report::new(
+        "4C Cohort Explorer",
+        env!("CARGO_PKG_VERSION"),
+        None,
+        &title,
+    );
+
+    let top_gene = run.candidates.genes.first();
+    let mut overview = ReportSection::new("Comparison and main takeaway");
+    overview.add_content(html! {
+        h2 { "Key findings" }
+        p { strong { "Comparison: " } (run.primary.comparison.case_label) " vs " (run.primary.comparison.control_label) }
+        p { strong { "Analyzed samples: " } (run.case_n()) " case / " (run.control_n()) " control" }
+        @if let Some(qc)=run.qc_snapshot.as_ref() {
+            p { strong { "QC review: " } (qc.audit.consensus_ids.len()) " sample(s) met the frozen cross-modal consensus flagging rule; " (qc.excluded_ids.len()) " reviewed exclusion(s) were applied to the completed run. Case " (qc.original_case_n) " → " (qc.filtered_case_n) ", control " (qc.original_control_n) " → " (qc.filtered_control_n) "." }
+        } @else {
+            p { strong { "QC review: " } "no frozen cross-modal outlier audit was attached to this run, and no reviewed sample exclusions were applied." }
+        }
+        @if let Some(gene)=top_gene {
+            p { strong { "Main takeaway: " } "The strongest ranked gene-level candidate is " (gene.gene) " (adjusted log2FC " (fmt(gene.adjusted_log2fc)) ", BH q " (fmt_sci(gene.q_value)) "). This is a preliminary candidate signal, not a validated biomarker." }
+        } @else {
+            p { strong { "Main takeaway: " } "No gene met the configured candidate-shortlist criteria. The completed analysis should be interpreted through the modality-specific results and limitations rather than forcing a biomarker claim." }
+        }
+    });
+    report.add_section(overview);
+
+    let mut genes = ReportSection::new("Strongest candidate genes");
+    let gene_limit = run.candidates.genes.len().min(10);
+    genes.add_content(html! {
+        p { "Candidates are ranked from the primary corrected analysis. Robustness labels, when available, come from the run's PBMC/confounding sensitivity diagnostics." }
+        (focused_gene_table(&run.candidates.genes[..gene_limit]))
+    });
+    if let Some(plot) = focused_gene_plot(&run.candidates.genes[..gene_limit]) {
+        genes.add_plot(plot);
+    }
+    report.add_section(genes);
+
+    if !run.candidates.pathways.is_empty() {
+        let mut pathways = ReportSection::new("Key pathways and biological themes");
+        let limit = run.candidates.pathways.len().min(8);
+        pathways.add_content(focused_pathway_table(&run.candidates.pathways[..limit]));
+        if let Some(plot) = focused_pathway_plot(&run.candidates.pathways[..limit]) {
+            pathways.add_plot(plot);
+        }
+        report.add_section(pathways);
+    }
+
+    if !run.candidates.other.is_empty() {
+        let mut other = ReportSection::new("Key multi-modal findings");
+        let limit = run.candidates.other.len().min(10);
+        other.add_content(html! {
+            p { "Only the highest-ranked corrected signals from the selected non-expression modalities are shown here." }
+            (focused_other_table(&run.candidates.other[..limit]))
+        });
+        report.add_section(other);
+    }
+
+    if let Some(pca) = run.primary.gene.as_ref().and_then(|gene| gene.pca.as_ref()) {
+        let mut structure = ReportSection::new("Cohort structure");
+        structure.add_content(html! {
+            p { "This unsupervised PCA is included as context for sample structure; it is not a separate source of inferential evidence." }
+        });
+        if let Some(plot) = corrected_ordination_plot(pca) {
+            structure.add_plot(plot);
+        }
+        report.add_section(structure);
+    }
+
+    let mut limitations = ReportSection::new("Confidence and limitations");
+    limitations.add_content(html! {
+        ul {
+            li { "These findings are preliminary candidates for follow-up, not validated biomarkers." }
+            li { "Interpret the effect estimates together with sample support, repeated/family/batch structure, and QC sensitivity." }
+            li { "Related pathways can share many genes and should be interpreted as broader themes rather than independent discoveries." }
+            li { "Independent replication or a pre-specified follow-up cohort is the strongest next validation step." }
+        }
+        @if let Some(qc)=run.qc_snapshot.as_ref() {
+            p { strong { "Reviewed exclusions used by this run: " } @if qc.excluded_ids.is_empty() { "none" } @else { (qc.excluded_ids.join(", ")) } }
+        }
+        @if !run.warnings.is_empty() {
+            p { strong { "Run note: " } (run.warnings.len()) " warning(s) were recorded. See the full detailed report for the complete technical audit." }
+        }
+    });
+    report.add_section(limitations);
+
+    let output = path.to_string_lossy().to_string();
+    report.save_to_file(&output).with_context(|| {
+        format!(
+            "Could not write unified simplified HTML report to {}",
+            path.display()
+        )
+    })?;
+    make_report_self_contained(path)?;
+    Ok(())
+}
+
+fn build_unified_diagnostics_overview(result: &PbmcDiagnosticsResult) -> ReportSection {
+    let mut section = ReportSection::new("PBMC / confounding diagnostics");
+    section.add_content(html! {
+        p { "These diagnostics are sensitivity/QC evidence attached to the same completed analysis, not a competing disease model." }
+        p { strong { "Samples with QC sensitivity exclusions: " } (result.sensitivity_excluded_ids.len()) }
+        @if !result.sensitivity_excluded_ids.is_empty() {
+            p { (result.sensitivity_excluded_ids.join(", ")) }
+        }
+        h3 { "Sample QC summary" }
+        div class="table-container" { table {
+            thead { tr { th { "Sample" } th { "Group" } th { "Library raw count" } th { "Detected genes" } th { "Transcriptome outlier" } th { "Immune outlier" } th { "Myeloid/lymphoid score" } th { "Flags" } } }
+            tbody { @for row in &result.sample_qc { tr {
+                td { (row.sample_id) } td { (row.comparison_group) } td { (fmt(row.library_raw_count)) } td { (row.detected_genes) }
+                td { (if row.auto_expression_outlier { "yes" } else { "no" }) }
+                td { (if row.auto_immune_outlier { "yes" } else { "no" }) }
+                td { (fmt(row.monocyte_lymphoid_signature)) } td { (row.flags.join("; ")) }
+            } } }
+        } }
+        @if !result.longitudinal_qc.is_empty() {
+            h3 { "Within-subject longitudinal structure" }
+            div class="table-container" { table {
+                thead { tr { th { "Subject" } th { "n" } th { "Max PCA distance" } th { "Samples" } th { "Batches" } th { "Flagged samples" } } }
+                tbody { @for row in &result.longitudinal_qc { tr { td { (row.subject) } td { (row.n_samples) } td { (fmt(row.max_pca_distance)) } td { (row.samples) } td { (row.batches) } td { (row.flagged_samples) } } } }
+            } }
+        }
+    });
+    if let Some(pca) = result.pca.as_ref() {
+        if let Some(plot) = corrected_ordination_plot(pca) {
+            section.add_plot(plot);
+        }
+    }
+    section
+}
+
+fn build_unified_candidate_robustness(result: &PbmcDiagnosticsResult) -> ReportSection {
+    let mut section = ReportSection::new("Candidate robustness diagnostics");
+    section.add_content(html! {
+        p { "Candidate labels summarize low-count support, one/few-sample dominance, leave-one-sample/leave-level-out stability, QC-restricted sensitivity, immune-composition adjustment, and suspect-vs-ordinary source effects where available." }
+        div class="table-container" { table {
+            thead { tr { th { "Gene" } th { "Baseline log2FC" } th { "Baseline q" } th { "QC-restricted log2FC" } th { "QC q" } th { "Immune-adjusted log2FC" } th { "Immune q" } th { "LOO range" } th { "Classification" } th { "Flags" } } }
+            tbody { @for row in &result.candidate_stability { tr {
+                td { (row.gene) } td { (fmt(row.baseline_log2fc)) } td { (fmt_sci(row.baseline_q)) }
+                td { (fmt(row.qc_restricted_log2fc)) } td { (fmt_sci(row.qc_restricted_q)) }
+                td { (fmt(row.immune_adjusted_log2fc)) } td { (fmt_sci(row.immune_adjusted_q)) }
+                td { (fmt(row.loo_log2fc_min)) " … " (fmt(row.loo_log2fc_max)) }
+                td { (row.classification) } td { (row.flags.join("; ")) }
+            } } }
+        } }
+    });
+    section
 }

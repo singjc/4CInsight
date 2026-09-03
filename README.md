@@ -4,6 +4,18 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.15.0 adds
+
+- Replaces the user-facing Exploratory / Corrected / Focused / Diagnostics mode selector with **one coherent Cohort Analysis workflow**: cohort definition → sample mapping/QC → analysis settings → one **Run analysis** action → unified results/export.
+- Adds a library-level `UnifiedCohortAnalysisRun` that freezes the cohort definition, mapping audit, corrected-model settings, reviewed cross-modal QC snapshot, corrected modality results, optional supporting descriptive checks, PBMC/confounding diagnostics, candidate prioritization, and warnings in one self-contained result.
+- Keeps the existing **corrected / standard methods as the primary inferential engine**. The refactor orchestrates the existing corrected functions rather than introducing a second statistical implementation.
+- Treats collaborator-supplied filtered metadata as an **optional cohort/subset definition**. It no longer implies a different analysis methodology.
+- Moves cross-modal outlier QC into the unified sample-QC stage. Fresh automatic outlier calls are **flags only** and no longer preselect samples for exclusion; reviewed exclusions are explicitly applied in Analysis settings and frozen into the completed run.
+- Integrates optional PBMC/source/composition diagnostics and candidate robustness labels into the same run. Focused-style candidate ranking is now a **presentation/prioritization layer derived from corrected results**.
+- Adds two self-contained HTML report presets from the exact same completed run: **Simplified key-findings report** and **Full detailed report**. Choosing a report style never reruns statistics or changes sample inclusion.
+- Adds a unified technical table export containing the frozen mapping/QC provenance, selected corrected modality results, pathways, diagnostics, key findings, warnings, and run summary.
+- Keeps the legacy mode-specific implementation paths temporarily in source for parity/regression comparison; they are no longer the primary user-facing Cohort Analysis navigation and can be removed only after local v0.14.1 parity validation.
+
 ## What v0.14.1 adds
 
 - Makes **QC filtering fully auditable in exports and HTML reports**. When reviewed outlier exclusions are applied to Corrected / standard or Focused candidate analyses, the app snapshots the exact outlier audit and reviewed exclusion list used for that run.
@@ -265,30 +277,24 @@ A selected gene/transcript has one value per sample, so the profile view uses in
 ### Cohort Analysis
 
 1. Choose the top-level cohort project folder. The app recursively detects supported modalities and existing merged expression tables.
-2. Load the sample metadata workbook/table; `4C_ID` is preferred automatically when available.
-3. Review the mapping/coverage audit. Unmatched, ambiguous, metadata-only, and duplicate entries remain visible and do not abort the project.
-4. Choose one of the current study presets: **HYP vs True_HC** or **HYP+ME/CFS vs ME/CFS-only**.
-5. Select any combination of Gene expression, Transcript expression, BCR, BCR isotype, TCR alpha, TCR beta, and Immune infiltrate. Gene expression defaults to TPM; transcript expression can use TPM or Total Reads.
-6. Run the exploratory comparison. Each modality runs independently so a missing or malformed input does not prevent the others from completing.
-7. Inspect the interactive result panels. Transcript, TCR alpha/beta, and immune-infiltrate results receive their own tabs; failed/unavailable modalities remain visible as warnings instead of aborting the comparison.
-8. Use **Save result tables…** to export the mapping audit and statistical tables as TSV files, or **Generate HTML report…** to create a single shareable HTML summary with interactive Plotly figures and ranked tables.
+2. Load the primary sample metadata table. Optionally load a collaborator-supplied **filtered metadata subset**; this changes which samples define the run, not the statistical methodology.
+3. Review **Sample mapping & QC**. The mapping audit keeps unmatched, ambiguous, metadata-only, duplicate, and modality-coverage information visible without aborting other usable modalities.
+4. Optionally run **cross-modal sample QC**. Automatic consensus outliers are review flags only. Explicitly select any samples that should be excluded after review; no sample is automatically selected for deletion.
+5. In **Analysis settings**, choose the comparison, modalities, subject/repeated-measure column, covariates, repertoire settings, GMT/pathway options, whether reviewed QC exclusions should be applied, and optional PBMC/confounding sensitivity diagnostics.
+6. Click the single **Run analysis** button. The corrected/standard methods are the primary inferential engine; modality failures remain fault tolerant. Optional exploratory TPM calculations are used only as descriptive direction-concordance support.
+7. Inspect **Unified results** by modality plus the QC / robustness view. Candidate genes/pathways/other signals are a shortlist derived from the same corrected results, not a separate analysis.
+8. Export either **Simplified key-findings report**, **Full detailed report**, or the complete technical table set. All three exports use the exact same frozen completed run and therefore cannot silently change sample inclusion or rerun a different statistical engine.
 
-The cohort analysis is intentionally exploratory. Longitudinal/repeated samples are currently treated as observations, matching the first-pass study request; covariate-aware and repeated-measures models belong in a later rigorous-analysis mode.
-
+The application supports discovery, robustness assessment, and candidate prioritization. Preliminary candidates should not be described as validated clinical biomarkers without independent replication/validation.
 
 ### HTML reports
 
-The cohort results card can generate a single HTML report using the [`report-builder`](https://github.com/singjc/report-builder) Rust crate. The report includes:
+A completed unified run supports two report detail levels:
 
-- comparison definition and first-pass modelling caveats;
-- sample mapping/coverage audit;
-- gene- and transcript-expression volcano/detection-shift plots plus ranked feature tables;
-- BCR group box plots for key repertoire metrics and ranked sample-metric/isotype/V/D/J tests;
-- dedicated BCR-isotype composition and effect/significance plots;
-- TCR alpha/beta repertoire-summary plots and V/J/V–J composition tests when requested;
-- immune-cell ssGSEA group plots and per-cell-type tests when requested;
-- rich feature-aware hover text on scatter plots rather than anonymous x/y coordinates;
-- file warnings and unavailable-modality messages rather than silently dropping failed analyses.
+- **Simplified key-findings report** — presentation-friendly comparison/QC summary, concise main takeaway, strongest preliminary genes/pathways/other modality signals, a small number of main plots, and short limitations. Candidate wording explicitly avoids validated-biomarker claims.
+- **Full detailed report** — cohort definition, mapping audit, exact reviewed QC exclusions and reasons, per-modality outlier evidence, all selected corrected modality results, ordinations/dendrograms, pathway provenance, PBMC/confounding sensitivity analyses, candidate robustness, warnings, methods, assumptions, and limitations.
+
+Both reports are rendered from the same `UnifiedCohortAnalysisRun`; report generation does **not** rerun statistics. The full technical table export is generated from that same frozen object as well.
 
 `report-builder` 0.1.1 normally references Plotly and optional table helpers from public CDNs. v0.5+ compiles Plotly with its `plotly_embed_js` feature, injects that bundled JavaScript into the report, and removes the unused DataTables/FileSaver CDN helpers during finalization. The resulting `.html` is therefore one self-contained file whose interactive plots can be opened offline. This post-processing is pinned to the current report-builder 0.1.1 template and is covered by a report-generation unit test.
 
@@ -355,7 +361,7 @@ For cohort analysis in particular, useful next modules are:
 - A more specialized DTU model (e.g. Dirichlet-multinomial/DEXSeq-like); the current corrected layer provides a CLR/Simes DTU screen with its assumptions stated explicitly.
 - Gene-expression PCA/correlation heatmaps and selected top-gene heatmaps.
 - Cross-modal candidate-biomarker summaries that combine gene, immune-infiltrate, BCR, BCR-isotype, and later TCR evidence.
-- A later rigorous-analysis mode for longitudinal/repeated measures and covariate adjustment.
+- Further validation/regression fixtures for the unified runner across representative longitudinal/covariate configurations.
 
 General merge/QC additions:
 
@@ -371,31 +377,22 @@ General merge/QC additions:
 - Long-format export matching the legacy R workflow.
 - A detailed QA report listing schema mismatches, missing/extra rows, and duplicate identifiers per sample.
 
-## v0.7 corrected / standard analysis layer
+## Unified Cohort Analysis architecture (v0.15.0)
 
-Cohort Analysis has three complementary layers:
+The corrected / standard layer remains the statistical backbone, but the desktop UX now presents one workflow rather than asking users to choose between competing analysis modes. A completed `UnifiedCohortAnalysisRun` owns the cohort definition, mapping audit, frozen QC provenance, settings, corrected results, optional supporting diagnostics, candidate shortlist, and warnings.
 
-- **Exploratory discovery** preserves the original all-sample first-pass screens requested for hypothesis generation.
-- **Corrected / standard** adds subject-aware and covariate-adjusted analyses, matched-depth repertoire analysis, and multivariate/compositional views.
-- **Focused candidate signals** accepts a separately filtered metadata list for a direct one-sample-per-individual comparison and turns the corrected results into a concise preliminary candidate shortlist.
+The primary corrected methods are preserved:
 
-The corrected layer supports:
-
-- Gene raw counts and transcript Total Reads: positive-count median-ratio normalization, a negative-binomial log-link count model with log(size-factor) offset and per-feature dispersion, metadata covariates, subject-clustered sandwich SEs for repeated sampling, BH FDR, subject-collapsed log2-normalized sensitivity tests, PCA of variable normalized features, and hierarchical clustering. Transcript data additionally gets a within-gene CLR/Simes/BH differential-transcript-usage screen that is clearly distinguished from specialized DEXSeq/DRIMSeq models.
-- BCR/TCR: exact without-replacement matched-depth rarefaction, adjusted repertoire metrics, subject-aware private/longitudinal/public clonotype fractions, Morisita-Horn and Jaccard PCoA, subject-blocked permutation PERMANOVA, and CLR/Aitchison composition analysis.
+- Gene raw counts and transcript Total Reads: positive-count median-ratio normalization, negative-binomial log-link count models with log(size-factor) offsets and per-feature dispersion, metadata covariates, subject-clustered sandwich SEs for repeated sampling, BH FDR, subject-collapsed log2-normalized sensitivity tests, PCA, and hierarchical clustering. Transcript data additionally retains the within-gene CLR/Simes/BH DTU screen.
+- BCR/TCR: exact without-replacement matched-depth rarefaction, adjusted repertoire metrics, subject-aware private/longitudinal/public clonotype fractions, Morisita-Horn and Jaccard PCoA, subject-blocked permutation PERMANOVA, CLR/Aitchison composition analysis, and dendrograms.
 - TCR: AA-convergence read fraction when nucleotide clonal sequences are available.
 - BCR/TCR V/D/J/V-J ambiguity handling: exclude tied calls (default), split weight, legacy first-hit, or gene-family collapse.
 - Dedicated BCR isotypes: CLR/Aitchison analysis, optionally excluding `Undetermined` and renormalizing as a sensitivity analysis.
-- Immune infiltrate: covariate-adjusted ssGSEA models plus PCA on per-cell-type z-scores.
-- Optional pathway analysis from corrected gene-count results using a user-supplied/versioned GMT: hypergeometric over-representation testing against the tested-gene universe, odds ratios, explicit overlap genes, and BH FDR.
-- Corrected TSV exports and a separate self-contained corrected HTML report.
+- Immune infiltrate: covariate-adjusted ssGSEA models plus PCA and clustering of standardized signatures.
+- Optional GMT pathway ORA from corrected gene-count results using the tested-gene universe, odds ratios, explicit overlap genes, and BH FDR. Public MSigDB collections and custom GMT files remain supported.
 
-The expression count model does **not** claim to reproduce DESeq2, edgeR, or limma-voom empirical-Bayes/dispersion machinery. Feature-wise dispersion is not shrunk across genes, so final publication-level RNA-seq findings can still be cross-checked with a specialized RNA-seq package while the exploratory layer remains available for comparison.
+Cross-modal outlier QC and PBMC/confounding diagnostics are now QC/sensitivity evidence attached to the same run. Automatic cross-modal outliers are flags requiring review; when reviewed exclusions are applied, the exact audit, manual overrides, excluded IDs, and before/after group counts are frozen for exports/reports.
 
-## Focused candidate-signal workflow (v0.9)
+Candidate prioritization is likewise derived from the corrected result. A collaborator-filtered metadata table simply defines a narrower cohort, and the same corrected methodology is used. Optional TPM direction concordance and PBMC/confounding robustness classifications annotate the shortlist without becoming independent statistical evidence.
 
-The Cohort Analysis screen now includes a **Focused candidate signals** layer for collaborator-curated direct comparisons. Load a filtered metadata file (for example one sample per individual with unwanted cohorts removed), choose the same comparison preset, and run the selected modalities.
-
-The focused workflow uses the corrected/standard results as the primary evidence and can optionally run TPM-based exploratory gene/transcript screens only to flag direction concordance. It then produces concise ranked tables for candidate genes, candidate pathways, candidate transcripts, and other corrected BCR/TCR/isotype/immune signals. The ranking is intentionally transparent: corrected BH q-value first, then nominal p-value and effect magnitude. Signals are labeled as FDR-supported, promising, suggestive, or ranked exploratory signals rather than being called validated biomarkers.
-
-The focused results can be exported as CSV files and as a standalone HTML report intended for a less technical audience. The report emphasizes a short candidate list, interpretation, and limitations, and explicitly recommends independent replication before biomarker claims.
+The expression count model does **not** claim to reproduce the full DESeq2, edgeR, or limma-voom empirical-Bayes/dispersion machinery. Final publication-level findings can still be cross-checked with specialized packages; 4C Cohort Explorer is intended for transparent cohort discovery, robustness assessment, and follow-up prioritization.

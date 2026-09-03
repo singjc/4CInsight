@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod cohort;
 pub mod corrected;
 pub mod diagnostics;

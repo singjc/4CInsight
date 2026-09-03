@@ -1,178 +1,321 @@
 # 4C Cohort Explorer analysis guide
 
-This guide is the plain-language companion to the app. It explains what each analysis layer is for, what the main plots mean, and where the main methods come from.
+This guide explains the current unified **Cohort Analysis** workflow in plain language. The application is intended for cohort QC, robust discovery, candidate prioritization, and transparent sensitivity analysis. It does **not** by itself establish a clinically validated biomarker.
 
 ## Big picture
 
-The app is organized as a simple progression:
+Cohort Analysis now has one primary statistical workflow:
 
 ```text
-Merge & map samples
-        ↓
-Exploratory discovery
-        ↓
-Corrected / standard analysis
-        ↓
-Focused candidate signals
+Define cohort → review mapping & QC → choose analysis settings → Run analysis
+                                                        ↓
+                                            inspect unified results
+                                                        ↓
+                                  simplified report OR full report
 ```
 
-### 1. Merge & map samples
+The **corrected / standard analysis is the primary inferential engine**. Cross-modal sample QC, exploratory expression checks, and PBMC/confounding diagnostics are supporting QC or sensitivity evidence. Candidate prioritization is a presentation layer derived from the corrected result. A collaborator-supplied filtered metadata table defines a cohort/subset; it does not select a different statistical methodology.
 
-This step brings together the different files (gene expression, transcript expression, BCR, BCR isotype, TCR alpha, TCR beta, immune infiltrate) and matches them to the metadata table.
+Both HTML report styles and the technical table export are generated from the **same frozen completed analysis run**. Exporting a different report does not rerun statistics or change sample inclusion.
 
-The **Merge & Export** workspace can also use an optional metadata file to decide which gene/transcript workbooks should be included in a merged matrix. Choose the metadata sample-ID column, then enable metadata filtering to use the metadata rows themselves as the inclusion list. If needed, add a second value filter such as phenotype/cohort/status and check only the values to retain. Filtering is off by default, and unmatched/ambiguous files are shown rather than causing the merge to fail.
+## 1. Cohort & metadata
 
-Why it matters:
+Start by choosing the project folder and loading the primary sample metadata table.
 
-- it checks whether the sample IDs line up,
-- it identifies unmatched or ambiguous files,
-- and it creates a transparent audit trail before any statistics are run.
+The app recursively detects the supported data types and merged expression matrices. Sample IDs are matched with the same punctuation-insensitive normalization used throughout the project, and the sample-ID metadata column can be selected explicitly.
 
-### 2. Exploratory discovery
+### Optional filtered metadata subset
 
-This is the first-pass screening layer.
+A collaborator may provide a smaller metadata table, for example a curated one-sample-per-person subset. In the unified workflow this is treated as a **cohort definition**:
 
-Use it when you want to know:
+- the filtered table determines which metadata rows/samples are eligible for that run;
+- the same corrected/standard methods are used;
+- the run records which metadata file and sample-ID column defined the cohort;
+- full and simplified reports describe that cohort provenance.
 
-- Do the groups look different at all?
-- Which genes or repertoire summaries look most different?
-- Are there obvious outliers or broad patterns?
+A filtered subset is therefore not an independent “focused methodology.”
 
-Key idea:
+## 2. Sample mapping & QC
 
-- Each feature is compared between groups on its own.
-- The main outputs are an effect size, a p value, and a false-discovery-rate adjusted q value.
-- Gene and transcript analyses also include volcano-style plots and detection-shift summaries.
+### Mapping and coverage audit
 
-Good for:
+Before interpreting a comparison, review how metadata samples map to the detected files and modalities. The audit keeps visible:
 
-- quick discovery,
-- spotting large effects,
-- deciding whether a comparison is promising.
+- matched files,
+- unmatched files,
+- ambiguous matches,
+- metadata-only samples,
+- duplicate modality files,
+- modality coverage for each sample.
 
-#### Sample outlier QC
+Unavailable or malformed individual modalities are reported without aborting other usable analyses.
 
-The Exploratory layer also contains a cross-modal sample outlier screen. It asks a different question from differential analysis: **does one sample look unusually different from comparable samples within a data type?**
+### Cross-modal sample outlier QC
 
-The default is to detect outliers **within the case and control groups separately**. This is important because a real disease-wide shift should not automatically cause the entire case group to be labelled as an outlier.
+Cross-modal outlier screening asks a different question from differential analysis: **does a sample look unusually different from comparable samples within one or more data types?**
 
-Each enabled modality contributes a sample-level QC representation:
+Supported representations include:
 
-- gene/transcript expression: PCA of top-variable expression features,
-- BCR/TCR: PCA of repertoire summary metrics,
-- BCR isotype: CLR-composition PCA,
-- immune infiltrate: PCA of standardized immune signatures.
+- **Gene expression:** PCA of top-variable expression features, preferentially `log2(TPM+1)`.
+- **Transcript expression:** PCA of top-variable transcript features.
+- **BCR/TCR:** PCA of robust-standardized repertoire QC metrics.
+- **BCR isotype:** CLR-transformed composition PCA.
+- **Immune infiltrate:** PCA of robust-standardized ssGSEA signatures.
 
-The app then combines modality-specific flags using one of several rules: any modality, at least N modalities, majority, or all available modalities. A sample flagged in one modality may indicate an assay-specific problem; a sample flagged repeatedly across several modalities is stronger evidence of a broad sample/source/processing issue.
+Detection can be done within case/control groups or across all samples. **Within-group detection is the recommended default** when a real disease-wide biological shift is possible, because a case/control difference should not by itself cause an entire group to be labelled abnormal.
 
-**Do not automatically delete every flagged sample.** Review the sample-level plot, metadata/provenance, longitudinal context, and whether the sample is unusual in one assay or many assays. If exclusions are used, the recommended interpretation is a **sensitivity analysis**: compare the inclusive corrected result with the outlier-filtered result and ask whether the biological conclusion survives.
+The app can combine per-modality flags using:
 
-Main caveats:
+- any selected modality,
+- at least N modalities,
+- a majority of available selected modalities,
+- all available selected modalities,
+- plus a configurable minimum number of available modalities for consensus rules.
 
-- repeated samples from the same person are still separate observations here,
-- covariates are not adjusted,
-- repertoire composition and sequencing depth are handled more carefully only in the corrected layer.
+### Automatic flags are not automatic exclusions
 
-### 3. Corrected / standard analysis
+A new outlier audit creates **flags only**. It does not automatically select consensus-flagged samples for deletion.
 
-This is the more rigorous layer and is usually the main layer to report.
+Review the sample-level plots, metadata/provenance, longitudinal context, and whether an abnormality is assay-specific or cross-modal. A reviewer can explicitly retain an automatically flagged sample or mark another sample for exclusion when the provenance/QC evidence supports that decision.
 
-Use it when you want:
+If reviewed exclusions are applied to the analysis, the run freezes:
 
-- methods that are closer to standard cohort analysis,
-- subject-aware or covariate-aware testing,
-- depth-aware repertoire analyses,
-- compositional analyses for V/J/isotype usage,
-- ordination and clustering summaries,
+- outlier scope and robust-distance threshold,
+- consensus rule and minimum-modality requirement,
+- automatic consensus flags,
+- manual retain/exclude overrides,
+- exact applied exclusion list,
+- case/control counts before and after filtering,
+- per-modality coordinates, robust distances, and flags.
+
+Changing the live QC settings after the run does not rewrite this frozen provenance.
+
+## 3. Analysis settings
+
+### Comparison
+
+Choose the metadata-defined case/control comparison. Current built-in presets include:
+
+- **HYP vs True_HC**;
+- **HYP+ME/CFS vs ME/CFS-only**.
+
+The active primary or filtered metadata table defines which rows are eligible.
+
+### Modalities
+
+Any available combination can be selected:
+
+- gene expression,
+- transcript expression,
+- BCR,
+- BCR isotype,
+- TCR alpha,
+- TCR beta,
+- immune infiltrate,
 - pathway over-representation analysis.
 
-#### Gene and transcript expression
+The workflow is fault tolerant: failure or absence of one modality is recorded as a warning while successful modalities remain available.
 
-The corrected layer uses count-aware modelling and multiple-testing correction. When a subject column is provided, it also produces a subject-collapsed sensitivity view so repeated measures do not dominate the interpretation.
+### Repeated measures and covariates
 
-#### BCR and TCR repertoires
+A subject/patient column can be supplied for repeated sampling. Optional metadata covariates can also be selected. These settings are part of the frozen run configuration.
 
-Two kinds of questions are separated:
+### Repertoire and pathway settings
 
-1. **How diverse is the repertoire?**
-   These summaries are more fairly compared with matched-depth rarefaction.
-2. **How is the repertoire composed?**
-   Composition questions (isotype, V gene, J gene, V–J pairs) are handled with compositional methods, ordination, and PERMANOVA.
+The existing repertoire controls remain available, including:
 
-#### Immune infiltrate
+- exact matched-depth rarefaction settings,
+- PERMANOVA permutations,
+- V/D/J/V–J ambiguity policy,
+- BCR-isotype `Undetermined` exclusion/renormalization sensitivity.
 
-Immune cell-type scores are analyzed as a feature matrix so group shifts, ordination structure, and clustering can be reviewed alongside the other modalities.
+For pathway analysis, either choose a cached public MSigDB human symbol GMT collection or a custom GMT. The report preserves the collection/path provenance used for the run.
 
-#### Pathways
+## 4. Run analysis: primary corrected / standard engine
 
-Pathway analysis asks whether a biological pathway is over-represented among the differentially expressed genes. This helps turn long gene lists into broader biological themes.
+There is one obvious **Run analysis** action. It calls the existing corrected statistical implementations rather than a new parallel engine.
 
-### 4. Focused candidate signals
+### Gene and transcript expression
 
-This layer is designed for simpler, more presentation-friendly comparisons.
+The corrected expression layer uses:
 
-Typical use case:
+- positive-count median-ratio normalization,
+- a negative-binomial log-link count model with log size-factor offset,
+- feature-wise dispersion,
+- optional metadata covariates,
+- subject-clustered sandwich standard errors when repeated sampling is configured,
+- Benjamini–Hochberg FDR,
+- a subject-collapsed sensitivity analysis,
+- PCA on variable normalized features,
+- average-linkage hierarchical clustering/dendrograms.
 
-- a collaborator supplies a filtered metadata table,
-- one sample per individual is retained,
-- the cohort definition is simplified,
-- and the goal is to produce a short list of promising preliminary signals.
+Transcript analysis additionally retains the within-gene CLR/Simes/BH differential-transcript-usage screen.
 
-The focused workflow:
+Important caveat: this native model does **not** claim to reproduce the exact empirical-Bayes/dispersion-shrinkage machinery of DESeq2, edgeR, or limma-voom.
 
-1. takes the filtered metadata table,
-2. reruns the corrected analysis on that simplified cohort,
-3. extracts a shortlist of candidate genes, pathways, transcripts, and other signals,
-4. optionally checks whether the candidate direction is consistent with the broader exploratory screen.
+### BCR and TCR repertoires
 
-Interpretation:
+The corrected repertoire analyses retain:
 
-- these are **not validated biomarkers**,
-- they are **preliminary candidates** that are easier to present and prioritize for follow-up.
+- exact without-replacement matched-depth Monte-Carlo rarefaction,
+- diversity and repertoire-summary metrics,
+- subject-aware private/longitudinal/public clonotype fractions,
+- Morisita-Horn and Jaccard distances,
+- PCoA,
+- subject-blocked permutation PERMANOVA,
+- CLR/Aitchison compositional analyses,
+- V/D/J/V–J ambiguity policies,
+- average-linkage dendrograms,
+- TCR amino-acid convergence read fraction when nucleotide sequences are available.
 
+### BCR isotype
 
-## PBMC / confounding diagnostics
+Dedicated isotype analysis uses CLR/Aitchison composition methods and retains the optional sensitivity analysis that excludes `Undetermined` and renormalizes the remaining fractions.
 
-Use this layer when a striking disease-associated gene program may actually reflect sample source, cell composition, processing history, family/batch concentration, or only a few extreme samples.
+### Immune infiltrate
 
-The diagnostics intentionally **do not replace the disease model**. They ask whether the leading signals are stable when the data are examined from a QC/provenance perspective.
+Immune ssGSEA signatures retain covariate-adjusted feature models, standardized-signature PCA, and clustering/dendrogram views.
+
+### Pathways
+
+Optional GMT-driven over-representation analysis is derived from the corrected gene result using:
+
+- the tested-gene universe,
+- hypergeometric testing,
+- odds ratios,
+- overlap genes,
+- BH FDR.
+
+Related pathways can share many genes, so several significant pathways may represent one broader biological program rather than independent discoveries.
+
+## Supporting descriptive direction checks
+
+An optional TPM-based exploratory expression calculation can be attached to the run for **direction concordance only**. It is useful for saying that a shortlisted feature points in the same or opposite direction in a simple descriptive screen.
+
+This support calculation:
+
+- does not replace the corrected model,
+- does not change corrected p/q values,
+- is not an independent validation dataset,
+- should not be counted as a second statistical vote.
+
+## PBMC / confounding sensitivity diagnostics
+
+PBMC/source/composition diagnostics are an optional robustness stage of the same completed run. They are especially useful when a striking expression program may reflect wrong sample source, unusual PBMC composition, processing history, family/batch concentration, low counts, or only a few extreme samples.
 
 ### Sample-level checks
 
+The diagnostics can include:
+
 - whole-transcriptome PCA using top-variable `log2(TPM+1)` genes,
-- robust PC1/PC2 outlier scores,
+- robust transcriptome outlier scores,
 - library raw-count and gene-detection summaries,
 - immune-signature PCA when immune-infiltrate files are available,
-- a descriptive myeloid-high / lymphoid-low signature imbalance score,
+- a descriptive myeloid-high / lymphoid-low signature-imbalance score,
+- known non-PBMC/wrong-source sample IDs,
+- reviewer-supplied suspect sample IDs,
 - metadata context such as subject, batch/collection period, and family.
 
-An outlier flag is a **reason to investigate**, not proof that a sample should be removed. Known tissue/source information and longitudinal consistency should carry more weight than an automated PCA threshold alone.
+An outlier flag remains a **reason to investigate**, not proof that a sample is invalid. Known tissue/source information and longitudinal consistency should carry more weight than one automated threshold alone.
 
-### Suspect-vs-ordinary screen
+### Suspect-vs-ordinary source-effect screen
 
-You can paste a list of unusual samples and compare them directly against the remaining ordinary expression samples **without using disease status**. If the same genes dominate both the disease analysis and this source-effect screen, the disease result may be strongly entangled with source/composition.
+Reviewer-supplied unusual samples can be compared against ordinary expression samples without using disease status. Strong overlap between this source-effect signal and the disease result is evidence that disease and source/composition may be entangled.
 
 ### Candidate robustness checks
 
-For leading corrected genes the app reports:
+For leading corrected genes the diagnostics can report:
 
-- raw-count and TPM medians in each group,
-- percent detected,
-- fraction of samples with counts at least 5 and 10,
-- how much of the group signal comes from the top two samples,
+- raw-count and TPM medians,
+- detection fractions,
+- fractions with counts at least 5 and 10,
+- top-two-sample contribution,
 - leave-one-sample-out effect range,
-- optional leave-batch/family/year-out effect range,
+- optional leave-batch/family/year-level-out effect range,
 - a regularized-effect diagnostic,
-- the original corrected effect,
-- the QC-restricted effect after sensitivity-only exclusions,
-- the immune-PC-adjusted effect,
-- and the effect in the suspect-vs-ordinary screen.
+- original corrected effect,
+- QC-restricted corrected effect,
+- immune-PC-adjusted corrected effect,
+- suspect-vs-ordinary source effect.
 
-A strong preliminary disease candidate should ideally retain direction and a similar effect across these views rather than disappearing after one problematic sample, one historical batch, or the major immune-composition axes are accounted for.
+The candidate shortlist can inherit the existing robustness classification and flags from these diagnostics.
+
+A stronger preliminary disease candidate should usually retain direction and a similar effect across reasonable sensitivity views rather than disappearing after one sample, one historical group, or the major immune-composition axes are accounted for.
 
 ### Longitudinal QC
 
-When a subject/patient column is available, repeated samples from the same person are summarized by their maximum whole-transcriptome PCA distance. A historical sample that sits far away from later samples from the same individual can be an especially useful clue about collection/processing or major composition differences.
+When a subject/patient column is available, repeated samples can be summarized by their maximum whole-transcriptome PCA distance. A historical sample far from later samples from the same person can be an especially useful clue about collection/processing or major composition differences.
+
+## 5. Unified results
+
+One completed run owns the result/provenance required by all views and exports. The GUI groups the output into:
+
+- Overview / key findings,
+- Gene,
+- Transcript,
+- BCR,
+- BCR isotype,
+- TCR alpha,
+- TCR beta,
+- Immune,
+- Pathways,
+- QC / robustness.
+
+### Candidate prioritization
+
+The shortlist of genes, pathways, transcripts, and other modality signals is derived from the primary corrected results. Ranking remains transparent, based on corrected statistical support and effect magnitude rather than an opaque biomarker score.
+
+Optional descriptive direction concordance and robustness classifications are annotations to that shortlist. They do not create a separate inferential analysis.
+
+Use language such as:
+
+- **preliminary signal**,
+- **candidate gene**,
+- **candidate pathway**,
+- **promising feature for follow-up**.
+
+Avoid describing a result as a **validated biomarker** without independent validation.
+
+## Reports and exports
+
+### Simplified key-findings report
+
+The simplified report is intended for presentations and collaborator-facing summaries. It contains only the most decision-relevant material, such as:
+
+- comparison and analyzed sample counts,
+- concise QC statement,
+- main takeaway,
+- strongest preliminary candidate genes,
+- strongest pathway themes,
+- strongest non-expression modality signals,
+- a small number of main plots,
+- concise confidence/limitations language.
+
+It is a view of the frozen completed run, not a rerun of a “focused” engine.
+
+### Full detailed report
+
+The full report is the technical/audit record and can include:
+
+- cohort definition and metadata provenance,
+- mapping/coverage audit,
+- exact reviewed exclusions and reasons,
+- automatic/manual QC decisions,
+- per-modality outlier evidence,
+- all selected corrected modality results,
+- expression/repertoire/immune ordinations and dendrograms,
+- DTU and composition analyses,
+- PERMANOVA/repertoire summaries,
+- pathway source and enrichment results,
+- PBMC/confounding diagnostics,
+- QC-restricted and composition-adjusted sensitivity models,
+- candidate robustness diagnostics,
+- warnings and unavailable modalities,
+- methods, assumptions, and limitations.
+
+### Technical tables
+
+The technical export writes the mapping/QC provenance and selected corrected/diagnostic/candidate tables from the same completed run. No export silently changes sample inclusion.
 
 ## How to read the main plots
 
@@ -180,32 +323,33 @@ When a subject/patient column is available, repeated samples from the same perso
 
 - Left/right = negative/positive effect.
 - Higher = stronger statistical support.
-- The most interesting points are usually the ones that combine a large effect with a small q value.
+- The most interesting points usually combine a meaningful effect size with a small q value.
 
 ### Detection-shift plot
 
-Shows whether a gene is detected in a larger fraction of one group than the other. This helps highlight sparse or group-specific signals.
+Shows whether a gene is detected in a larger fraction of one group than the other. This can reveal sparse or group-specific support that mean effects alone may hide.
 
 ### PCA / PCoA
 
-These are maps of the samples. Samples that sit near each other are more similar. Coloring by status, subject, or another metadata column helps show whether the main structure follows disease status, family, timepoint, batch, or something else.
+These are low-dimensional maps of sample structure. Samples plotted close together are more similar in the chosen feature/distance space. Coloring by group, subject, batch, timepoint, or another metadata field can show whether the dominant structure follows biology or a possible confounder.
 
 ### Dendrogram
 
-A dendrogram shows hierarchical clustering as a tree. It is another way to ask whether samples group primarily by disease status or by another source of structure.
+A dendrogram shows hierarchical clustering as a tree. It asks a similar sample-structure question to PCA/PCoA but can make nested groups or repeated-subject clustering easier to see.
 
 ### Pathway ORA plot
 
-Each point is a pathway. Higher points indicate stronger statistical support. Several related pathways can all appear together because they may share many genes and represent one broader biological theme.
+Each point is a pathway. Stronger statistical support appears higher in the plot, while odds ratio/overlap summarize enrichment strength. Closely related pathways frequently share genes and should be interpreted as broader themes rather than independent replications.
 
 ## Suggested interpretation strategy
 
-For a lay audience:
-
-1. Start with the **focused** results to show a short, easy-to-follow shortlist.
-2. Use the **corrected / standard** layer as the statistical backbone.
-3. Use the **exploratory** layer to explain how the signals first emerged.
-4. Treat all candidates as **preliminary** until validated in a larger or independent cohort.
+1. Confirm that the cohort definition and sample mapping are correct.
+2. Review cross-modal QC flags and provenance; do not remove samples merely because they are unusual.
+3. Use the corrected/standard results as the statistical backbone.
+4. Use PBMC/source/composition and leave-one/leave-level sensitivity diagnostics to test whether leading effects are robust.
+5. Use the key-findings shortlist to communicate the strongest preliminary signals without overstating them.
+6. Use the simplified report for presentation and the full report for technical audit; both come from the same run.
+7. Prioritize independent replication or a pre-specified follow-up cohort before making biomarker claims.
 
 ## Key references
 
@@ -230,20 +374,4 @@ For a lay audience:
 
 ## Practical note
 
-The app is intended to help with discovery and interpretation. It does not replace external validation, domain-specific clinical interpretation, or a full study-design discussion.
-
-## QC-filtered analysis provenance
-
-When sample outlier QC is used to remove reviewed samples from a corrected or focused analysis, the app records the exact QC decision at the time the analysis starts. The exported tables and HTML report include:
-
-- the outlier-detection scope and robust-distance threshold,
-- the cross-modal consensus rule,
-- the number of modalities available for each sample,
-- which modalities flagged each sample,
-- the per-modality PCA/ordination coordinates and robust distances,
-- whether a sample was an automatic consensus flag,
-- whether it was actually excluded after review,
-- manual overrides (consensus flags that were retained or samples manually excluded), and
-- case/control sample counts before and after QC filtering.
-
-This distinction is important: an automatic outlier flag is a QC signal, not proof that a sample is biologically invalid. Corrected/focused reports therefore document the **reviewed exclusion set actually used**, while exploratory reports can show the audit without pretending that the exploratory result was filtered.
+4C Cohort Explorer is intended to help with transparent discovery, QC, robustness assessment, and interpretation. It does not replace independent validation, domain-specific clinical interpretation, or a full study-design discussion.

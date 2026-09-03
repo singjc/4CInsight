@@ -1,3 +1,8 @@
+use cfs_expression_merger::analysis::{
+    CohortAnalysisSettingsSnapshot, CohortDefinitionSnapshot, CohortModalitySelection,
+    CorrectedAnalysisBundle, UnifiedCohortAnalysisRun, run_unified_cohort_analysis,
+    write_unified_analysis_tables,
+};
 use cfs_expression_merger::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, CohortComparison, CohortMapping,
     CohortModality, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
@@ -38,6 +43,7 @@ use cfs_expression_merger::outliers::{
 use cfs_expression_merger::report::{
     CohortReportInputs, CorrectedReportInputs, FocusedReportInputs, generate_cohort_html_report,
     generate_corrected_html_report, generate_focused_candidate_html_report,
+    generate_unified_detailed_html_report, generate_unified_simplified_html_report,
 };
 use cfs_expression_merger::{
     ColumnOrder, DataKind, EntityCatalogEntry, EntityProfilePoint, MergeConfig, MergeSummary,
@@ -137,6 +143,20 @@ enum CorrectedResultView {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnifiedResultView {
+    Overview,
+    Gene,
+    Transcript,
+    Bcr,
+    BcrIsotype,
+    TcrAlpha,
+    TcrBeta,
+    Immune,
+    Pathway,
+    QcRobustness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusedResultView {
     Overview,
     Genes,
@@ -217,28 +237,6 @@ struct CohortAnalysisBundle {
 }
 
 #[derive(Debug, Clone)]
-struct CorrectedAnalysisBundle {
-    comparison: CohortComparison,
-    spec: CorrectedModelSpec,
-    gene: Option<CorrectedExpressionResult>,
-    gene_error: Option<String>,
-    transcript: Option<CorrectedExpressionResult>,
-    transcript_error: Option<String>,
-    bcr: Option<CorrectedRepertoireResult>,
-    bcr_error: Option<String>,
-    bcr_isotype: Option<CorrectedIsotypeResult>,
-    bcr_isotype_error: Option<String>,
-    tcr_alpha: Option<CorrectedRepertoireResult>,
-    tcr_alpha_error: Option<String>,
-    tcr_beta: Option<CorrectedRepertoireResult>,
-    tcr_beta_error: Option<String>,
-    immune: Option<CorrectedImmuneResult>,
-    immune_error: Option<String>,
-    pathway: Option<CorrectedPathwayResult>,
-    pathway_error: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 struct FocusedAnalysisBundle {
     corrected: CorrectedAnalysisBundle,
     candidates: FocusedCandidateSummary,
@@ -262,6 +260,7 @@ enum CohortWorkerMessage {
     CorrectedDone(CorrectedAnalysisBundle),
     FocusedDone(FocusedAnalysisBundle),
     DiagnosticsDone(PbmcDiagnosticsResult),
+    UnifiedDone(Result<UnifiedCohortAnalysisRun, String>),
     OutlierDone(Result<CrossModalOutlierResult, String>),
 }
 
@@ -343,6 +342,10 @@ struct MergeApp {
     cohort_analysis_mode: CohortAnalysisMode,
     corrected_results: Option<CorrectedAnalysisBundle>,
     corrected_result_view: CorrectedResultView,
+    unified_results: Option<UnifiedCohortAnalysisRun>,
+    unified_result_view: UnifiedResultView,
+    cohort_use_filtered_metadata: bool,
+    unified_run_diagnostics: bool,
     corrected_subject_column: Option<String>,
     corrected_covariates: HashSet<String>,
     corrected_ambiguous_policy: AmbiguousCallPolicy,
@@ -677,6 +680,10 @@ impl MergeApp {
             cohort_analysis_mode: CohortAnalysisMode::Exploratory,
             corrected_results: None,
             corrected_result_view: CorrectedResultView::Gene,
+            unified_results: None,
+            unified_result_view: UnifiedResultView::Overview,
+            cohort_use_filtered_metadata: false,
+            unified_run_diagnostics: true,
             corrected_subject_column: None,
             corrected_covariates: HashSet::new(),
             corrected_ambiguous_policy: AmbiguousCallPolicy::Exclude,
@@ -2434,7 +2441,7 @@ impl MergeApp {
     }
 
     fn render_cohort_tab(&mut self, ui: &mut egui::Ui) {
-        self.card(ui, "1. Cohort project & metadata", |this, ui| {
+        self.card(ui, "1. Cohort & metadata", |this, ui| {
             ui.label(
                 egui::RichText::new(
                     "Scan the dataset root once. The app detects gene/transcript expression, BCR, BCR isotype, TCR alpha/beta, immune-infiltrate files, merged expression tables, and metadata candidates.",
@@ -2570,6 +2577,9 @@ impl MergeApp {
                             meta.id_column = selected_id;
                         }
                         this.corrected_results = None;
+                        this.unified_results = None;
+                        this.outlier_results = None;
+                        this.outlier_excluded_ids.clear();
                         this.rebuild_cohort_mapping();
                     }
                 }
@@ -2580,82 +2590,813 @@ impl MergeApp {
         });
 
         ui.add_space(10.0);
+        self.render_cohort_subset_card(ui);
+        ui.add_space(10.0);
         self.render_cohort_mapping_card(ui);
         ui.add_space(10.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Analysis layer:").strong());
-            ui.selectable_value(
-                &mut self.cohort_analysis_mode,
-                CohortAnalysisMode::Exploratory,
-                "Exploratory discovery",
-            )
-            .on_hover_text("Original first-pass screens: all mapped samples are observations; non-parametric tests and effect sizes are used without repeated-measure/covariate adjustment.");
-            ui.selectable_value(
-                &mut self.cohort_analysis_mode,
-                CohortAnalysisMode::Corrected,
-                "Corrected / standard",
-            )
-            .on_hover_text("Subject-aware and covariate-adjusted analyses, matched-depth repertoire diversity, compositional CLR/Aitchison analyses, ordination, and restricted-permutation PERMANOVA.");
-            ui.selectable_value(
-                &mut self.cohort_analysis_mode,
-                CohortAnalysisMode::Focused,
-                "Focused candidate signals",
-            )
-            .on_hover_text("Use a collaborator-supplied filtered metadata list, run the corrected analysis on that direct one-sample-per-individual comparison, and produce a short ranked set of preliminary genes, pathways, and other candidate signals. Optional exploratory expression screening is used only as a direction-concordance check.");
-            ui.selectable_value(
-                &mut self.cohort_analysis_mode,
-                CohortAnalysisMode::Diagnostics,
-                "PBMC / confounding diagnostics",
-            )
-            .on_hover_text("Audit sample-source and cell-composition structure, identify transcriptomic/immune-signature outliers, compare user-marked unusual samples against ordinary samples, and test whether leading gene signals survive QC restriction and immune-composition adjustment.");
-            ui.selectable_value(
-                &mut self.cohort_analysis_mode,
-                CohortAnalysisMode::Docs,
-                "Docs",
-            )
-            .on_hover_text("Shows a lay-friendly description of the exploratory, corrected / standard, and focused workflows, together with interpretation notes and references.");
-        });
-        ui.add_space(8.0);
-        match self.cohort_analysis_mode {
-            CohortAnalysisMode::Exploratory => {
-                self.render_cohort_comparison_card(ui);
-                ui.add_space(10.0);
-                self.render_outlier_qc_card(ui);
-                if self.cohort_results.is_some() {
-                    ui.add_space(10.0);
-                    self.render_cohort_results_card(ui);
-                }
-            }
-            CohortAnalysisMode::Corrected => {
-                self.render_corrected_analysis_card(ui);
-                if self.corrected_results.is_some() {
-                    ui.add_space(10.0);
-                    self.render_corrected_results_card(ui);
-                }
-            }
-            CohortAnalysisMode::Focused => {
-                self.render_focused_analysis_card(ui);
-                if self.focused_results.is_some() {
-                    ui.add_space(10.0);
-                    self.render_focused_results_card(ui);
-                }
-            }
-            CohortAnalysisMode::Diagnostics => {
-                self.render_diagnostics_analysis_card(ui);
-                if self.diagnostics_results.is_some() {
-                    ui.add_space(10.0);
-                    self.render_diagnostics_results_card(ui);
-                }
-            }
-            CohortAnalysisMode::Docs => {
-                self.render_analysis_docs_card(ui);
-            }
+        self.render_outlier_qc_card(ui);
+        ui.add_space(10.0);
+        self.render_unified_analysis_settings_card(ui);
+        if self.unified_results.is_some() {
+            ui.add_space(10.0);
+            self.render_unified_results_card(ui);
         }
     }
 
+    fn active_cohort_inputs(&self) -> Option<(MetadataTable, PathBuf, CohortMapping, bool)> {
+        if self.cohort_use_filtered_metadata {
+            let metadata = self.focused_metadata.clone()?;
+            let path = self.focused_metadata_path.clone()?;
+            let mapping = self.focused_mapping.clone().or_else(|| {
+                self.cohort_scan
+                    .as_ref()
+                    .map(|scan| build_mapping(scan, &metadata))
+            })?;
+            Some((metadata, path, mapping, true))
+        } else {
+            let metadata = self.cohort_metadata.clone()?;
+            let path = self.cohort_metadata_path.clone()?;
+            let mapping = self.cohort_mapping.clone().or_else(|| {
+                self.cohort_scan
+                    .as_ref()
+                    .map(|scan| build_mapping(scan, &metadata))
+            })?;
+            Some((metadata, path, mapping, false))
+        }
+    }
+
+    fn render_cohort_subset_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "1b. Optional cohort subset", |this, ui| {
+            ui.label(
+                egui::RichText::new(
+                    "A collaborator-supplied filtered metadata table can define which samples belong to this run. It changes the cohort/subset only; it does not switch statistical methodology.",
+                )
+                .weak(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                let mut use_subset = this.cohort_use_filtered_metadata;
+                if ui
+                    .checkbox(&mut use_subset, "Use filtered metadata subset for this analysis")
+                    .changed()
+                {
+                    this.cohort_use_filtered_metadata = use_subset;
+                    this.unified_results = None;
+                    this.outlier_results = None;
+                    this.outlier_excluded_ids.clear();
+                }
+                if ui.button("Choose filtered metadata…").clicked() {
+                    let mut dialog = FileDialog::new()
+                        .add_filter("Metadata", &["xlsx", "xls", "csv", "tsv", "txt"]);
+                    if let Some(root) = &this.cohort_root {
+                        dialog = dialog.set_directory(root);
+                    }
+                    if let Some(path) = dialog.pick_file() {
+                        this.load_focused_metadata_path(path);
+                        this.cohort_use_filtered_metadata = this.focused_metadata.is_some();
+                        this.unified_results = None;
+                        this.outlier_results = None;
+                        this.outlier_excluded_ids.clear();
+                    }
+                }
+                if this.focused_metadata.is_some() && ui.button("Clear filtered subset").clicked() {
+                    this.focused_metadata = None;
+                    this.focused_metadata_path = None;
+                    this.focused_mapping = None;
+                    this.cohort_use_filtered_metadata = false;
+                    this.unified_results = None;
+                    this.outlier_results = None;
+                    this.outlier_excluded_ids.clear();
+                }
+            });
+            if let Some(path) = &this.focused_metadata_path {
+                ui.label(format!(
+                    "Filtered metadata: {}",
+                    path.file_name().and_then(|x| x.to_str()).unwrap_or("metadata")
+                ));
+            }
+            if this.focused_metadata.is_some() {
+                let (mut selected_id, columns, current_id) = this
+                    .focused_metadata
+                    .as_ref()
+                    .map(|m| (m.id_column.clone(), m.columns.clone(), m.id_column.clone()))
+                    .unwrap_or_default();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Filtered metadata sample ID column:");
+                    egui::ComboBox::from_id_salt("unified_filtered_metadata_id_column")
+                        .selected_text(&selected_id)
+                        .show_ui(ui, |ui| {
+                            for column in &columns {
+                                ui.selectable_value(&mut selected_id, column.clone(), column);
+                            }
+                        });
+                });
+                if selected_id != current_id {
+                    if let Some(metadata) = &mut this.focused_metadata {
+                        metadata.id_column = selected_id;
+                    }
+                    this.rebuild_focused_mapping();
+                    this.unified_results = None;
+                    this.outlier_results = None;
+                    this.outlier_excluded_ids.clear();
+                }
+                if let Some(mapping) = &this.focused_mapping {
+                    ui.label(format!(
+                        "Filtered subset mapping: {} matched files, {} unmatched files, {} metadata-only samples.",
+                        mapping.matched_files, mapping.unmatched_files, mapping.metadata_only_samples
+                    ));
+                }
+            }
+            if this.cohort_use_filtered_metadata && this.focused_metadata.is_none() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(225, 120, 110),
+                    "Filtered-subset mode is selected, but no filtered metadata table is loaded.",
+                );
+            }
+        });
+    }
+
+    fn render_unified_analysis_settings_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "3. Analysis settings", |this, ui| {
+            ui.label(
+                egui::RichText::new(
+                    "The corrected / standard analysis is the primary inferential engine. Supporting descriptive checks, candidate prioritization, and optional PBMC/confounding sensitivity diagnostics are attached to the same completed run.",
+                )
+                .weak(),
+            );
+
+            let active = this.active_cohort_inputs();
+            if let Some((metadata, path, _, uses_subset)) = active.as_ref() {
+                ui.label(format!(
+                    "Cohort source: {}{} | {} metadata rows",
+                    path.file_name().and_then(|x| x.to_str()).unwrap_or("metadata"),
+                    if *uses_subset { " (filtered subset)" } else { "" },
+                    metadata.rows.len()
+                ));
+            }
+
+            let old_preset = this.cohort_preset;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Comparison:").strong());
+                ui.selectable_value(
+                    &mut this.cohort_preset,
+                    ComparisonPreset::HypVsTrueHc,
+                    "HYP vs True_HC",
+                );
+                ui.selectable_value(
+                    &mut this.cohort_preset,
+                    ComparisonPreset::HypMecfsVsMecfsOnly,
+                    "HYP+ME/CFS vs ME/CFS-only",
+                );
+            });
+            if old_preset != this.cohort_preset {
+                this.unified_results = None;
+                this.outlier_results = None;
+                this.outlier_excluded_ids.clear();
+            }
+            if let Some((metadata, _, _, _)) = active.as_ref() {
+                match build_comparison(metadata, this.cohort_preset) {
+                    Ok(comparison) => {
+                        ui.label(format!(
+                            "Defined cohort: {} case / {} control metadata rows",
+                            comparison.case_metadata_rows, comparison.control_metadata_rows
+                        ));
+                    }
+                    Err(error) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(225, 120, 110),
+                            format!("Comparison cannot be built: {error:#}"),
+                        );
+                    }
+                }
+            }
+
+            ui.separator();
+            ui.label(egui::RichText::new("Modalities").strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut this.cohort_run_gene, "Gene expression");
+                ui.checkbox(&mut this.cohort_run_transcript, "Transcript expression");
+                ui.checkbox(&mut this.cohort_run_bcr, "BCR");
+                ui.checkbox(&mut this.cohort_run_bcr_isotype, "BCR isotype");
+                ui.checkbox(&mut this.cohort_run_tcr_alpha, "TCR alpha");
+                ui.checkbox(&mut this.cohort_run_tcr_beta, "TCR beta");
+                ui.checkbox(&mut this.cohort_run_immune, "Immune infiltrate");
+                ui.checkbox(&mut this.corrected_run_pathway, "Pathway ORA");
+            });
+            if this.corrected_run_pathway {
+                this.render_gmt_source_selector(ui, "unified");
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Pathway foreground: BH q ≤");
+                    ui.add(
+                        egui::DragValue::new(&mut this.corrected_pathway_q)
+                            .range(0.001..=0.25)
+                            .speed(0.005),
+                    );
+                    ui.label("and |adjusted log2FC| ≥");
+                    ui.add(
+                        egui::DragValue::new(&mut this.corrected_pathway_effect)
+                            .range(0.0..=5.0)
+                            .speed(0.1),
+                    );
+                });
+            }
+
+            let columns = active
+                .as_ref()
+                .map(|(metadata, _, _, _)| metadata.columns.clone())
+                .unwrap_or_default();
+            if !columns.is_empty() {
+                ui.separator();
+                ui.label(egui::RichText::new("Repeated measures & covariates").strong());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Subject / patient ID:");
+                    let selected = this
+                        .corrected_subject_column
+                        .clone()
+                        .unwrap_or_else(|| "(none)".to_string());
+                    egui::ComboBox::from_id_salt("unified_subject_column")
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut this.corrected_subject_column, None, "(none)");
+                            for column in &columns {
+                                if active
+                                    .as_ref()
+                                    .is_some_and(|(metadata, _, _, _)| column == &metadata.id_column)
+                                {
+                                    continue;
+                                }
+                                ui.selectable_value(
+                                    &mut this.corrected_subject_column,
+                                    Some(column.clone()),
+                                    column,
+                                );
+                            }
+                        });
+                });
+                egui::CollapsingHeader::new(format!(
+                    "Covariates ({})",
+                    this.corrected_covariates.len()
+                ))
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for column in &columns {
+                            if active
+                                .as_ref()
+                                .is_some_and(|(metadata, _, _, _)| column == &metadata.id_column)
+                                || this.corrected_subject_column.as_ref() == Some(column)
+                            {
+                                continue;
+                            }
+                            let mut selected = this.corrected_covariates.contains(column);
+                            if ui.checkbox(&mut selected, column).changed() {
+                                if selected {
+                                    this.corrected_covariates.insert(column.clone());
+                                } else {
+                                    this.corrected_covariates.remove(column);
+                                }
+                            }
+                        }
+                    });
+                });
+            }
+
+            egui::CollapsingHeader::new("Repertoire / model details")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Ambiguous V/D/J calls:");
+                        egui::ComboBox::from_id_salt("unified_ambiguous_policy")
+                            .selected_text(this.corrected_ambiguous_policy.display_name())
+                            .show_ui(ui, |ui| {
+                                for policy in AmbiguousCallPolicy::ALL {
+                                    ui.selectable_value(
+                                        &mut this.corrected_ambiguous_policy,
+                                        policy,
+                                        policy.display_name(),
+                                    );
+                                }
+                            });
+                    });
+                    ui.checkbox(
+                        &mut this.corrected_exclude_undetermined,
+                        "Renormalize BCR-isotype analysis after excluding Undetermined",
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("PERMANOVA permutations:");
+                        ui.add(
+                            egui::DragValue::new(&mut this.corrected_permutations)
+                                .range(99..=4999)
+                                .speed(100),
+                        );
+                        ui.label("Rarefaction replicates:");
+                        ui.add(
+                            egui::DragValue::new(&mut this.corrected_rarefaction_reps)
+                                .range(1..=20),
+                        );
+                        ui.label("Rarefaction cap:");
+                        ui.add(
+                            egui::DragValue::new(&mut this.corrected_rarefaction_cap)
+                                .range(1_000..=500_000)
+                                .speed(5_000),
+                        );
+                    });
+                });
+
+            ui.separator();
+            ui.label(egui::RichText::new("QC, sensitivity & candidate summary").strong());
+            ui.checkbox(
+                &mut this.outlier_apply_to_corrected,
+                "Apply reviewed sample exclusions to this run",
+            )
+            .on_hover_text("Automatic outlier flags remain review prompts. Only samples checked in the QC audit are excluded, and the exact frozen audit/exclusion state is attached to the completed run.");
+            if this.outlier_apply_to_corrected {
+                ui.label(format!(
+                    "{} reviewed sample(s) currently selected for exclusion.",
+                    this.outlier_excluded_ids.len()
+                ));
+            }
+            ui.checkbox(
+                &mut this.focused_run_exploratory_concordance,
+                "Add exploratory TPM direction-concordance support",
+            )
+            .on_hover_text("This descriptive check is attached to candidate prioritization only; it is not independent validation and does not change the corrected p/q values.");
+            ui.checkbox(
+                &mut this.unified_run_diagnostics,
+                "Run PBMC / confounding sensitivity diagnostics",
+            )
+            .on_hover_text("Adds source/composition QC, candidate robustness, QC-restricted and immune-adjusted sensitivity evidence to the same completed run when gene expression is available.");
+
+            if this.unified_run_diagnostics {
+                egui::CollapsingHeader::new("PBMC / confounding diagnostic settings")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        if !columns.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                diagnostics_column_combo(
+                                    ui,
+                                    "unified_diag_batch",
+                                    "Batch / collection period:",
+                                    &columns,
+                                    &mut this.diagnostics_batch_column,
+                                );
+                                diagnostics_column_combo(
+                                    ui,
+                                    "unified_diag_family",
+                                    "Family:",
+                                    &columns,
+                                    &mut this.diagnostics_family_column,
+                                );
+                                diagnostics_column_combo(
+                                    ui,
+                                    "unified_diag_sensitivity",
+                                    "Leave-level-out column:",
+                                    &columns,
+                                    &mut this.diagnostics_sensitivity_column,
+                                );
+                            });
+                        }
+                        ui.label("Known non-PBMC / wrong-source sample IDs:");
+                        ui.text_edit_multiline(&mut this.diagnostics_known_non_pbmc_text);
+                        ui.label("Other suspect / unusual sample IDs:");
+                        ui.text_edit_multiline(&mut this.diagnostics_suspect_ids_text);
+                        ui.checkbox(
+                            &mut this.diagnostics_exclude_suspects,
+                            "Exclude user-entered suspect IDs in QC sensitivity only",
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Automatic transcriptome/immune outlier calls remain flags in the unified workflow and are not auto-excluded. Use the reviewed cross-modal QC list above when an outlier should be removed from the primary run.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Robust outlier threshold:");
+                            ui.add(
+                                egui::DragValue::new(&mut this.diagnostics_outlier_z)
+                                    .range(2.5..=10.0)
+                                    .speed(0.25),
+                            );
+                            ui.label("Top candidate genes to diagnose:");
+                            ui.add(
+                                egui::DragValue::new(&mut this.diagnostics_top_candidates)
+                                    .range(10..=250)
+                                    .speed(5),
+                            );
+                        });
+                    });
+            }
+
+            egui::CollapsingHeader::new("Key-findings shortlist settings")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Top genes:");
+                        ui.add(egui::DragValue::new(&mut this.focused_settings.top_genes).range(1..=100));
+                        ui.label("Top transcripts:");
+                        ui.add(egui::DragValue::new(&mut this.focused_settings.top_transcripts).range(0..=100));
+                        ui.label("Top pathways:");
+                        ui.add(egui::DragValue::new(&mut this.focused_settings.top_pathways).range(0..=100));
+                        ui.label("Top other signals:");
+                        ui.add(egui::DragValue::new(&mut this.focused_settings.top_other).range(0..=100));
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Minimum candidate gene |adjusted log2FC|:");
+                        ui.add(
+                            egui::DragValue::new(&mut this.focused_settings.min_gene_abs_log2fc)
+                                .range(0.0..=5.0)
+                                .speed(0.1),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "These settings change only the presentation shortlist. They do not change the primary corrected tests.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                });
+
+            ui.add_space(8.0);
+            let has_modality = this.cohort_run_gene
+                || this.cohort_run_transcript
+                || this.cohort_run_bcr
+                || this.cohort_run_bcr_isotype
+                || this.cohort_run_tcr_alpha
+                || this.cohort_run_tcr_beta
+                || this.cohort_run_immune
+                || this.corrected_run_pathway;
+            let ready = active.is_some() && has_modality && !this.cohort_running;
+            if ui
+                .add_enabled(ready, egui::Button::new("Run analysis"))
+                .on_hover_text("Runs the selected corrected analyses and attaches the frozen QC state, optional supporting direction checks, sensitivity diagnostics, and candidate summary to one completed result.")
+                .clicked()
+            {
+                this.start_unified_analysis();
+            }
+            if this.cohort_running {
+                ui.add(
+                    egui::ProgressBar::new(this.cohort_progress)
+                        .show_percentage()
+                        .animate(true),
+                );
+            }
+            if !this.cohort_status.is_empty() {
+                ui.label(egui::RichText::new(&this.cohort_status).small().weak());
+            }
+        });
+    }
+
+    fn render_unified_results_card(&mut self, ui: &mut egui::Ui) {
+        self.card(ui, "5. Unified results & export", |this, ui| {
+            let Some(run) = this.unified_results.clone() else {
+                return;
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} — {} case / {} control",
+                        run.primary.comparison.name,
+                        run.case_n(),
+                        run.control_n()
+                    ))
+                    .strong(),
+                );
+                if ui
+                    .button("Export simplified key-findings report…")
+                    .on_hover_text("Presentation-friendly HTML generated from this exact completed run; no statistics are rerun.")
+                    .clicked()
+                {
+                    let safe = run
+                        .primary
+                        .comparison
+                        .name
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                        .collect::<String>();
+                    let mut dialog = FileDialog::new()
+                        .add_filter("HTML report", &["html"])
+                        .set_file_name(format!("4c_key_findings_{safe}.html"));
+                    if let Some(root) = &this.cohort_root {
+                        dialog = dialog.set_directory(root);
+                    }
+                    if let Some(path) = dialog.save_file() {
+                        match generate_unified_simplified_html_report(&path, &run) {
+                            Ok(()) => {
+                                this.cohort_status = format!(
+                                    "Generated simplified key-findings report: {}",
+                                    path.display()
+                                )
+                            }
+                            Err(error) => {
+                                this.cohort_status =
+                                    format!("Could not generate simplified report: {error:#}")
+                            }
+                        }
+                    }
+                }
+                if ui
+                    .button("Export full detailed report…")
+                    .on_hover_text("Technical/audit HTML with mapping, frozen QC provenance, all selected modality results, sensitivities, pathway provenance, warnings, methods, and limitations from this exact run.")
+                    .clicked()
+                {
+                    let safe = run
+                        .primary
+                        .comparison
+                        .name
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                        .collect::<String>();
+                    let mut dialog = FileDialog::new()
+                        .add_filter("HTML report", &["html"])
+                        .set_file_name(format!("4c_full_report_{safe}.html"));
+                    if let Some(root) = &this.cohort_root {
+                        dialog = dialog.set_directory(root);
+                    }
+                    if let Some(path) = dialog.save_file() {
+                        match generate_unified_detailed_html_report(&path, &run) {
+                            Ok(()) => {
+                                this.cohort_status =
+                                    format!("Generated full detailed report: {}", path.display())
+                            }
+                            Err(error) => {
+                                this.cohort_status =
+                                    format!("Could not generate full report: {error:#}")
+                            }
+                        }
+                    }
+                }
+                if ui.button("Export all result tables…").clicked() {
+                    let mut dialog = FileDialog::new();
+                    if let Some(root) = &this.cohort_root {
+                        dialog = dialog.set_directory(root);
+                    }
+                    if let Some(folder) = dialog.pick_folder() {
+                        match write_unified_analysis_tables(&folder, &run) {
+                            Ok(path) => {
+                                this.cohort_status =
+                                    format!("Saved unified result tables to {}", path.display())
+                            }
+                            Err(error) => {
+                                this.cohort_status =
+                                    format!("Could not save unified result tables: {error:#}")
+                            }
+                        }
+                    }
+                }
+            });
+
+            if let Some(qc) = run.qc_snapshot.as_ref() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 170, 80),
+                    if qc.applied_to_analysis {
+                        format!(
+                            "Frozen QC provenance: {} reviewed exclusion(s) applied (case {} → {}, control {} → {}).",
+                            qc.excluded_ids.len(),
+                            qc.original_case_n,
+                            qc.filtered_case_n,
+                            qc.original_control_n,
+                            qc.filtered_control_n
+                        )
+                    } else {
+                        "Frozen QC audit attached; no reviewed exclusions were applied to the primary analysis."
+                            .to_string()
+                    },
+                );
+            }
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 190, 90),
+                "Candidate rankings are preliminary signals for follow-up, not validated biomarkers.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.label("PCA / PCoA / dendrogram color:")
+                    .on_hover_text("Color unsupervised sample-level views by analysis group, subject, or a metadata field from the cohort definition used for this run.");
+                egui::ComboBox::from_id_salt("unified_ordination_color_by")
+                    .selected_text(&this.corrected_ordination_color_by)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut this.corrected_ordination_color_by,
+                            "Analysis group".to_string(),
+                            "Analysis group",
+                        );
+                        ui.selectable_value(
+                            &mut this.corrected_ordination_color_by,
+                            "Subject / patient".to_string(),
+                            "Subject / patient",
+                        );
+                        let metadata = if this.cohort_use_filtered_metadata {
+                            this.focused_metadata.as_ref()
+                        } else {
+                            this.cohort_metadata.as_ref()
+                        };
+                        if let Some(metadata) = metadata {
+                            for column in &metadata.columns {
+                                ui.selectable_value(
+                                    &mut this.corrected_ordination_color_by,
+                                    column.clone(),
+                                    column,
+                                );
+                            }
+                        }
+                    });
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::Overview, "Overview");
+                if run.primary.gene.is_some() || run.primary.gene_error.is_some() {
+                    ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::Gene, "Gene");
+                }
+                if run.primary.transcript.is_some() || run.primary.transcript_error.is_some() {
+                    ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::Transcript, "Transcript");
+                }
+                if run.primary.bcr.is_some() || run.primary.bcr_error.is_some() {
+                    ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::Bcr, "BCR");
+                }
+                if run.primary.bcr_isotype.is_some() || run.primary.bcr_isotype_error.is_some() {
+                    ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::BcrIsotype, "BCR isotype");
+                }
+                if run.primary.tcr_alpha.is_some() || run.primary.tcr_alpha_error.is_some() {
+                    ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::TcrAlpha, "TCR alpha");
+                }
+                if run.primary.tcr_beta.is_some() || run.primary.tcr_beta_error.is_some() {
+                    ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::TcrBeta, "TCR beta");
+                }
+                if run.primary.immune.is_some() || run.primary.immune_error.is_some() {
+                    ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::Immune, "Immune");
+                }
+                if run.primary.pathway.is_some() || run.primary.pathway_error.is_some() {
+                    ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::Pathway, "Pathways");
+                }
+                ui.selectable_value(
+                    &mut this.unified_result_view,
+                    UnifiedResultView::QcRobustness,
+                    "QC / robustness",
+                );
+            });
+            ui.separator();
+
+            match this.unified_result_view {
+                UnifiedResultView::Overview => {
+                    let fdr_genes = run
+                        .candidates
+                        .genes
+                        .iter()
+                        .filter(|row| row.q_value.is_finite() && row.q_value <= 0.05)
+                        .count();
+                    ui.heading("Key findings from the completed run");
+                    ui.label(format!(
+                        "{} shortlisted genes ({} FDR-supported), {} pathways, and {} other modality signals.",
+                        run.candidates.genes.len(),
+                        fdr_genes,
+                        run.candidates.pathways.len(),
+                        run.candidates.other.len()
+                    ));
+                    if let Some(top) = run.candidates.genes.first() {
+                        ui.label(format!(
+                            "Top ranked gene candidate: {} — adjusted log2FC {:.2}, BH q {:.2e}{}.",
+                            top.gene,
+                            top.adjusted_log2fc,
+                            top.q_value,
+                            top.robustness
+                                .as_ref()
+                                .map(|label| format!(", robustness: {label}"))
+                                .unwrap_or_default()
+                        ));
+                    }
+                    if let Some(top) = run.candidates.pathways.first() {
+                        ui.label(format!(
+                            "Top ranked pathway: {} — odds ratio {:.2}, BH q {:.2e}.",
+                            top.pathway, top.odds_ratio, top.q_value
+                        ));
+                    }
+                    if !run.warnings.is_empty() {
+                        ui.add_space(6.0);
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 170, 80),
+                            format!("{} run warning(s) recorded; review QC / robustness or the full report.", run.warnings.len()),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Top candidate genes").strong());
+                    fixed_table_viewport(ui, "unified_candidate_genes", 360.0, 1450.0, |ui| {
+                        egui::Grid::new("unified_candidate_genes_grid").striped(true).show(ui, |ui| {
+                            for heading in ["Rank", "Gene", "Adj log2FC", "BH q", "TPM direction", "Pathway support", "Robustness", "Evidence"] {
+                                ui.label(egui::RichText::new(heading).strong());
+                            }
+                            ui.end_row();
+                            for row in run.candidates.genes.iter().take(15) {
+                                ui.label(row.rank.to_string());
+                                ui.monospace(&row.gene);
+                                ui.label(format!("{:.3}", row.adjusted_log2fc));
+                                ui.label(format!("{:.2e}", row.q_value));
+                                ui.label(match row.direction_concordant { Some(true) => "same", Some(false) => "opposite", None => "—" });
+                                ui.label(row.pathway_support_count.to_string());
+                                ui.label(row.robustness.as_deref().unwrap_or("—"));
+                                ui.label(&row.evidence);
+                                ui.end_row();
+                            }
+                        });
+                    });
+                }
+                UnifiedResultView::Gene => {
+                    if let Some(result) = run.primary.gene.as_ref() {
+                        this.render_corrected_expression(ui, result, "unified_gene");
+                    } else {
+                        ui.label(run.primary.gene_error.as_deref().unwrap_or("Gene analysis not requested."));
+                    }
+                }
+                UnifiedResultView::Transcript => {
+                    if let Some(result) = run.primary.transcript.as_ref() {
+                        this.render_corrected_expression(ui, result, "unified_transcript");
+                    } else {
+                        ui.label(run.primary.transcript_error.as_deref().unwrap_or("Transcript analysis not requested."));
+                    }
+                }
+                UnifiedResultView::Bcr => {
+                    if let Some(result) = run.primary.bcr.as_ref() {
+                        this.render_corrected_repertoire(ui, result, "unified_bcr");
+                    } else {
+                        ui.label(run.primary.bcr_error.as_deref().unwrap_or("BCR analysis not requested."));
+                    }
+                }
+                UnifiedResultView::BcrIsotype => {
+                    if let Some(result) = run.primary.bcr_isotype.as_ref() {
+                        this.render_corrected_isotype(ui, result, "unified_bcr_isotype");
+                    } else {
+                        ui.label(run.primary.bcr_isotype_error.as_deref().unwrap_or("BCR-isotype analysis not requested."));
+                    }
+                }
+                UnifiedResultView::TcrAlpha => {
+                    if let Some(result) = run.primary.tcr_alpha.as_ref() {
+                        this.render_corrected_repertoire(ui, result, "unified_tcr_alpha");
+                    } else {
+                        ui.label(run.primary.tcr_alpha_error.as_deref().unwrap_or("TCR-alpha analysis not requested."));
+                    }
+                }
+                UnifiedResultView::TcrBeta => {
+                    if let Some(result) = run.primary.tcr_beta.as_ref() {
+                        this.render_corrected_repertoire(ui, result, "unified_tcr_beta");
+                    } else {
+                        ui.label(run.primary.tcr_beta_error.as_deref().unwrap_or("TCR-beta analysis not requested."));
+                    }
+                }
+                UnifiedResultView::Immune => {
+                    if let Some(result) = run.primary.immune.as_ref() {
+                        this.render_corrected_immune(ui, result, "unified_immune");
+                    } else {
+                        ui.label(run.primary.immune_error.as_deref().unwrap_or("Immune analysis not requested."));
+                    }
+                }
+                UnifiedResultView::Pathway => {
+                    if let Some(result) = run.primary.pathway.as_ref() {
+                        this.render_corrected_pathway(ui, result, "unified_pathway");
+                    } else {
+                        ui.label(run.primary.pathway_error.as_deref().unwrap_or("Pathway analysis not requested."));
+                    }
+                }
+                UnifiedResultView::QcRobustness => {
+                    if let Some(qc) = run.qc_snapshot.as_ref() {
+                        ui.heading("Frozen sample QC provenance");
+                        ui.label(format!(
+                            "Outlier scope: {} | threshold {:.2} | rule: {} | exclusions applied: {}",
+                            qc.audit.config.scope.display_name(),
+                            qc.audit.config.robust_distance_threshold,
+                            qc.audit.config.consensus_rule.display_name(),
+                            qc.excluded_ids.len()
+                        ));
+                        if !qc.excluded_ids.is_empty() {
+                            ui.label(format!("Excluded samples: {}", qc.excluded_ids.join(", ")));
+                        }
+                    } else {
+                        ui.label("No frozen cross-modal outlier audit was attached to this run.");
+                    }
+                    if let Some(result) = run.diagnostics.as_ref() {
+                        ui.separator();
+                        ui.heading("PBMC / confounding sensitivity diagnostics");
+                        this.render_diagnostics_overview(ui, result);
+                        this.render_diagnostics_candidates(ui, result);
+                    } else if let Some(error) = run.diagnostics_error.as_deref() {
+                        ui.colored_label(egui::Color32::from_rgb(225, 120, 110), error);
+                    }
+                    if !run.warnings.is_empty() {
+                        ui.separator();
+                        egui::CollapsingHeader::new(format!("Run warnings ({})", run.warnings.len()))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for warning in &run.warnings {
+                                    ui.label(format!("• {warning}"));
+                                }
+                            });
+                    }
+                }
+            }
+        });
+    }
+
     fn render_cohort_mapping_card(&mut self, ui: &mut egui::Ui) {
-        self.card(ui, "2. Sample mapping & coverage audit", |this, ui| {
-            let Some(mapping) = this.cohort_mapping.clone() else {
+        self.card(ui, "2. Sample mapping & QC", |this, ui| {
+            let mapping = if this.cohort_use_filtered_metadata { this.focused_mapping.clone() } else { this.cohort_mapping.clone() };
+            let Some(mapping) = mapping else {
                 ui.label(
                     egui::RichText::new(
                         "Load both a project and metadata to audit cross-modality sample mapping.",
@@ -2921,7 +3662,7 @@ impl MergeApp {
     }
 
     fn render_outlier_qc_card(&mut self, ui: &mut egui::Ui) {
-        self.card(ui, "Sample outlier QC", |this, ui| {
+        self.card(ui, "2b. Cross-modal sample QC", |this, ui| {
             ui.label(
                 egui::RichText::new(
                     "Outlier screening is an unsupervised QC step. It flags samples that are unusually distant from comparable samples within one or more data types. A flag is evidence to review a sample, not proof that the biology is invalid.",
@@ -2930,7 +3671,7 @@ impl MergeApp {
             );
             ui.colored_label(
                 egui::Color32::from_rgb(230, 190, 90),
-                "Recommended: detect outliers within case/control groups, inspect them, then run corrected/focused analyses both with and without exclusions as a sensitivity check.",
+                "Recommended: detect outliers within case/control groups and inspect the flagged samples. Automatic flags do not exclude samples; reviewed exclusions are applied explicitly in Analysis settings and frozen into the completed run.",
             );
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
@@ -2954,7 +3695,7 @@ impl MergeApp {
             );
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label("Cross-modal exclusion rule:");
+                ui.label("Cross-modal consensus flagging rule:");
                 egui::ComboBox::from_id_salt("outlier_consensus_rule")
                     .selected_text(this.outlier_config.consensus_rule.display_name())
                     .show_ui(ui, |ui| {
@@ -2981,7 +3722,7 @@ impl MergeApp {
                 if this.cohort_run_tcr_beta { ui.label("TCR beta"); }
                 if this.cohort_run_immune { ui.label("Immune"); }
             });
-            let ready = this.cohort_scan.is_some() && this.cohort_metadata.is_some() && !this.cohort_running;
+            let ready = this.cohort_scan.is_some() && this.active_cohort_inputs().is_some() && !this.cohort_running;
             if ui.add_enabled(ready, egui::Button::new("Run sample outlier QC"))
                 .on_hover_text("Build sample-level unsupervised representations for the currently enabled modalities, flag modality-specific outliers, and combine those flags using the selected consensus rule.")
                 .clicked()
@@ -2989,15 +3730,14 @@ impl MergeApp {
                 this.start_outlier_qc();
             }
             ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut this.outlier_apply_to_corrected, "Apply selected exclusions to corrected / standard runs")
-                    .on_hover_text("When enabled, samples checked in the outlier audit are removed from the case/control comparison before the corrected analysis is run. The exploratory result remains unchanged so you can compare inclusive vs filtered analyses.");
-                ui.checkbox(&mut this.outlier_apply_to_focused, "Apply selected exclusions to focused runs")
-                    .on_hover_text("When enabled, the focused metadata comparison excludes any checked sample IDs that are present in the focused cohort.");
-            });
-            if this.outlier_apply_to_corrected || this.outlier_apply_to_focused {
-                ui.label(egui::RichText::new(format!("{} sample(s) currently selected for outlier exclusion.", this.outlier_excluded_ids.len())).small().weak());
-            }
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} sample(s) currently marked by the reviewer for possible exclusion. Whether these reviewed exclusions are applied is controlled in Analysis settings.",
+                    this.outlier_excluded_ids.len()
+                ))
+                .small()
+                .weak(),
+            );
 
             let Some(result) = this.outlier_results.clone() else { return; };
             ui.separator();
@@ -4178,7 +4918,12 @@ impl MergeApp {
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut this.corrected_ordination_color_by, "Analysis group".to_string(), "Analysis group");
                         ui.selectable_value(&mut this.corrected_ordination_color_by, "Subject / patient".to_string(), "Subject / patient");
-                        if let Some(meta) = &this.cohort_metadata {
+                        let metadata = if this.cohort_use_filtered_metadata {
+                            this.focused_metadata.as_ref()
+                        } else {
+                            this.cohort_metadata.as_ref()
+                        };
+                        if let Some(meta) = metadata {
                             for column in &meta.columns {
                                 ui.selectable_value(&mut this.corrected_ordination_color_by, column.clone(), column);
                             }
@@ -4723,7 +5468,12 @@ impl MergeApp {
         {
             return HashMap::new();
         }
-        let Some(meta) = &self.cohort_metadata else {
+        let metadata = if self.cohort_use_filtered_metadata {
+            self.focused_metadata.as_ref()
+        } else {
+            self.cohort_metadata.as_ref()
+        };
+        let Some(meta) = metadata else {
             return HashMap::new();
         };
         let Some(id_idx) = meta.column_index(&meta.id_column) else {
@@ -6294,9 +7044,13 @@ impl MergeApp {
     }
 
     fn start_outlier_qc(&mut self) {
-        let (Some(scan), Some(metadata)) = (self.cohort_scan.clone(), self.cohort_metadata.clone())
-        else {
-            self.cohort_status = "Load a project and metadata first.".to_string();
+        let Some(scan) = self.cohort_scan.clone() else {
+            self.cohort_status = "Load a project first.".to_string();
+            return;
+        };
+        let Some((metadata, _, _, _)) = self.active_cohort_inputs() else {
+            self.cohort_status =
+                "Load metadata for the selected cohort definition first.".to_string();
             return;
         };
         let comparison = match build_comparison(&metadata, self.cohort_preset) {
@@ -6359,6 +7113,177 @@ impl MergeApp {
             )
             .map_err(|e| format!("{e:#}"));
             let _ = tx.send(CohortWorkerMessage::OutlierDone(result));
+        });
+    }
+
+    fn start_unified_analysis(&mut self) {
+        let Some(scan) = self.cohort_scan.clone() else {
+            self.cohort_status = "Load a cohort project first.".to_string();
+            return;
+        };
+        let Some((metadata, metadata_path, mapping, uses_subset)) = self.active_cohort_inputs()
+        else {
+            self.cohort_status =
+                "Load metadata for the selected cohort definition first.".to_string();
+            return;
+        };
+        let original_comparison = match build_comparison(&metadata, self.cohort_preset) {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                self.cohort_status = format!("Could not build comparison: {error:#}");
+                return;
+            }
+        };
+
+        let mut comparison = original_comparison.clone();
+        let mut qc_snapshot = None;
+        if let Some(audit) = self.outlier_results.as_ref() {
+            if audit.comparison_name == original_comparison.name {
+                if self.outlier_apply_to_corrected && !self.outlier_excluded_ids.is_empty() {
+                    comparison = filter_comparison_excluding(
+                        &original_comparison,
+                        &self.outlier_excluded_ids,
+                    );
+                    if comparison.case_ids.len() < 2 || comparison.control_ids.len() < 2 {
+                        self.cohort_status = "Reviewed QC exclusions leave fewer than two samples in one comparison group; revise the exclusion list before running the analysis.".to_string();
+                        return;
+                    }
+                    qc_snapshot = Some(build_outlier_filter_snapshot(
+                        audit,
+                        &self.outlier_excluded_ids,
+                        &original_comparison,
+                        &comparison,
+                        true,
+                    ));
+                } else {
+                    qc_snapshot = Some(build_outlier_filter_snapshot(
+                        audit,
+                        &HashSet::new(),
+                        &original_comparison,
+                        &original_comparison,
+                        false,
+                    ));
+                }
+            }
+        } else if self.outlier_apply_to_corrected && !self.outlier_excluded_ids.is_empty() {
+            self.cohort_status = "Reviewed exclusions are selected but the cross-modal QC audit is unavailable. Rerun sample outlier QC so the exclusion provenance can be frozen into this analysis.".to_string();
+            return;
+        }
+
+        let subject_column = self
+            .corrected_subject_column
+            .clone()
+            .filter(|column| metadata.columns.contains(column));
+        let mut covariates = self
+            .corrected_covariates
+            .iter()
+            .filter(|column| {
+                metadata.columns.contains(*column)
+                    && Some(*column) != subject_column.as_ref()
+                    && *column != &metadata.id_column
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        covariates.sort();
+        let spec = CorrectedModelSpec {
+            subject_column: subject_column.clone(),
+            covariates,
+            permutations: self.corrected_permutations,
+            rarefaction_reps: self.corrected_rarefaction_reps,
+            rarefaction_cap: self.corrected_rarefaction_cap,
+            ambiguous_policy: self.corrected_ambiguous_policy,
+            exclude_undetermined_isotype: self.corrected_exclude_undetermined,
+            ..CorrectedModelSpec::default()
+        };
+        let diagnostics = if self.unified_run_diagnostics {
+            Some(PbmcDiagnosticsConfig {
+                subject_column: subject_column.clone(),
+                batch_column: self
+                    .diagnostics_batch_column
+                    .clone()
+                    .filter(|column| metadata.columns.contains(column)),
+                family_column: self
+                    .diagnostics_family_column
+                    .clone()
+                    .filter(|column| metadata.columns.contains(column)),
+                sensitivity_column: self
+                    .diagnostics_sensitivity_column
+                    .clone()
+                    .filter(|column| metadata.columns.contains(column)),
+                known_non_pbmc_ids: parse_sample_id_text(&self.diagnostics_known_non_pbmc_text),
+                suspect_ids: parse_sample_id_text(&self.diagnostics_suspect_ids_text),
+                exclude_suspects_in_sensitivity: self.diagnostics_exclude_suspects,
+                auto_exclude_transcriptome_outliers: false,
+                auto_exclude_immune_outliers: false,
+                top_candidates: self.diagnostics_top_candidates,
+                outlier_z_threshold: self.diagnostics_outlier_z,
+                ..PbmcDiagnosticsConfig::default()
+            })
+        } else {
+            None
+        };
+        let modalities = CohortModalitySelection {
+            gene: self.cohort_run_gene,
+            transcript: self.cohort_run_transcript,
+            bcr: self.cohort_run_bcr,
+            bcr_isotype: self.cohort_run_bcr_isotype,
+            tcr_alpha: self.cohort_run_tcr_alpha,
+            tcr_beta: self.cohort_run_tcr_beta,
+            immune: self.cohort_run_immune,
+            pathway: self.corrected_run_pathway,
+        };
+        if !modalities.any_primary() {
+            self.cohort_status = "Enable at least one analysis modality.".to_string();
+            return;
+        }
+        let cohort = CohortDefinitionSnapshot {
+            project_root: scan.root.clone(),
+            metadata_path,
+            metadata_id_column: metadata.id_column.clone(),
+            uses_filtered_metadata_subset: uses_subset,
+            comparison_preset: self.cohort_preset,
+            comparison: comparison.clone(),
+            mapping,
+        };
+        let settings = CohortAnalysisSettingsSnapshot {
+            modalities,
+            corrected: spec,
+            pathway_gmt_path: self.corrected_gmt_path.clone(),
+            pathway_q_threshold: self.corrected_pathway_q,
+            pathway_effect_threshold: self.corrected_pathway_effect,
+            exploratory_direction_check: self.focused_run_exploratory_concordance,
+            candidate: self.focused_settings.clone(),
+            pbmc_diagnostics: diagnostics,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        self.cohort_receiver = Some(rx);
+        self.cohort_running = true;
+        self.cohort_progress = 0.0;
+        self.cohort_status = format!("Running unified {}…", comparison.name);
+        self.unified_results = None;
+        self.corrected_results = None;
+        self.focused_results = None;
+        self.diagnostics_results = None;
+        self.corrected_outlier_snapshot = None;
+        std::thread::spawn(move || {
+            let result = run_unified_cohort_analysis(
+                &scan,
+                &metadata,
+                cohort,
+                settings,
+                qc_snapshot,
+                |done, total, message| {
+                    let fraction = if total == 0 {
+                        0.0
+                    } else {
+                        done as f32 / total as f32
+                    };
+                    let _ = tx.send(CohortWorkerMessage::Progress(fraction, message.to_string()));
+                },
+            )
+            .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(CohortWorkerMessage::UnifiedDone(result));
         });
     }
 
@@ -6668,6 +7593,7 @@ impl MergeApp {
                 self.corrected_results = None;
                 self.focused_results = None;
                 self.diagnostics_results = None;
+                self.unified_results = None;
                 self.outlier_results = None;
                 self.corrected_outlier_snapshot = None;
                 self.focused_outlier_snapshot = None;
@@ -6697,6 +7623,7 @@ impl MergeApp {
                 self.cohort_results = None;
                 self.corrected_results = None;
                 self.diagnostics_results = None;
+                self.unified_results = None;
                 self.outlier_results = None;
                 self.corrected_outlier_snapshot = None;
                 self.focused_outlier_snapshot = None;
@@ -6728,11 +7655,15 @@ impl MergeApp {
                 self.focused_metadata = Some(meta);
                 self.focused_results = None;
                 self.focused_outlier_snapshot = None;
+                self.unified_results = None;
+                self.outlier_results = None;
+                self.outlier_excluded_ids.clear();
                 self.rebuild_focused_mapping();
-                self.cohort_status =
-                    format!("Focused metadata loaded: {rows} rows; matching on '{id_column}'.");
+                self.cohort_status = format!(
+                    "Filtered cohort metadata loaded: {rows} rows; matching on '{id_column}'."
+                );
             }
-            Err(e) => self.cohort_status = format!("Focused metadata load failed: {e:#}"),
+            Err(e) => self.cohort_status = format!("Filtered cohort metadata load failed: {e:#}"),
         }
     }
 
@@ -7339,6 +8270,7 @@ impl MergeApp {
         let mut corrected_done = None;
         let mut focused_done = None;
         let mut diagnostics_done = None;
+        let mut unified_done = None;
         let mut outlier_done = None;
         if let Some(rx) = &self.cohort_receiver {
             while let Ok(message) = rx.try_recv() {
@@ -7351,6 +8283,7 @@ impl MergeApp {
                     CohortWorkerMessage::CorrectedDone(bundle) => corrected_done = Some(bundle),
                     CohortWorkerMessage::FocusedDone(bundle) => focused_done = Some(bundle),
                     CohortWorkerMessage::DiagnosticsDone(result) => diagnostics_done = Some(result),
+                    CohortWorkerMessage::UnifiedDone(result) => unified_done = Some(result),
                     CohortWorkerMessage::OutlierDone(result) => outlier_done = Some(result),
                 }
             }
@@ -7518,6 +8451,38 @@ impl MergeApp {
                 "PBMC/confounding diagnostics complete: {flagged} sample(s) flagged for review; {candidates} candidate gene robustness profile(s)."
             );
         }
+        if let Some(result) = unified_done {
+            self.cohort_running = false;
+            self.cohort_progress = 1.0;
+            self.cohort_receiver = None;
+            match result {
+                Ok(run) => {
+                    let gene_count = run.candidates.genes.len();
+                    let pathway_count = run.candidates.pathways.len();
+                    let warning_count = run.warnings.len();
+                    self.corrected_results = Some(run.primary.clone());
+                    self.corrected_outlier_snapshot = run.qc_snapshot.clone();
+                    self.focused_results = Some(run.candidates.clone());
+                    self.focused_outlier_snapshot = run.qc_snapshot.clone();
+                    self.diagnostics_results = run.diagnostics.clone();
+                    self.diagnostics_selected_gene = None;
+                    self.unified_result_view = UnifiedResultView::Overview;
+                    self.unified_results = Some(run);
+                    self.cohort_status = if warning_count == 0 {
+                        format!(
+                            "Analysis complete: {gene_count} candidate gene(s), {pathway_count} candidate pathway(s)."
+                        )
+                    } else {
+                        format!(
+                            "Analysis complete with {warning_count} warning(s): {gene_count} candidate gene(s), {pathway_count} candidate pathway(s)."
+                        )
+                    };
+                }
+                Err(error) => {
+                    self.cohort_status = format!("Unified analysis failed: {error}");
+                }
+            }
+        }
         if let Some(result) = outlier_done {
             self.cohort_running = false;
             self.cohort_progress = 1.0;
@@ -7525,11 +8490,11 @@ impl MergeApp {
             match result {
                 Ok(audit) => {
                     let n = audit.consensus_ids.len();
-                    self.outlier_excluded_ids = audit.consensus_ids.iter().cloned().collect();
+                    self.outlier_excluded_ids.clear();
                     self.outlier_plot_modality = 0;
                     self.outlier_results = Some(audit);
                     self.cohort_status = format!(
-                        "Sample outlier QC complete: {n} sample(s) meet the selected cross-modal rule. Review the audit before applying exclusions."
+                        "Sample outlier QC complete: {n} sample(s) meet the selected cross-modal rule. They are flags only; no sample was selected for exclusion automatically."
                     );
                 }
                 Err(error) => {
@@ -7550,7 +8515,7 @@ impl MergeApp {
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("Tip:").strong());
-                ui.label("Use the top-level Docs tab for a standalone guide, or open the Docs layer inside Cohort Analysis to keep the guide beside your results.");
+                ui.label("Use the top-level Docs tab for a standalone guide. Cohort Analysis now keeps setup, QC, the primary corrected analysis, robustness diagnostics, and key findings in one workflow.");
             });
             ui.add_space(10.0);
             this.render_docs_workflow_overview(ui);
@@ -7584,24 +8549,24 @@ impl MergeApp {
         ui.add_space(6.0);
         let steps = [
             (
-                "1. Merge & map",
-                "Bring together the expression and repertoire files, then match them to the sample metadata.",
+                "1. Cohort & metadata",
+                "Load the project and primary metadata, or optionally use a collaborator-supplied filtered metadata table as the cohort definition for this run.",
             ),
             (
-                "2. Exploratory",
-                "Fast first-pass screens that look for noticeable differences and help you spot patterns worth checking more carefully.",
+                "2. Sample mapping & QC",
+                "Audit sample-to-file coverage, run cross-modal outlier flagging, review any automatic flags, and record manual retain/exclude decisions without silently deleting samples.",
             ),
             (
-                "3. PBMC / confounding diagnostics",
-                "Check whether unusual sample source, immune composition, historical batch/family structure, low counts, or a few extreme samples could explain the apparent disease signal.",
+                "3. Analysis settings",
+                "Choose modalities, repeated-measure handling, covariates, repertoire settings, pathways, and optional PBMC/confounding sensitivity diagnostics.",
             ),
             (
-                "4. Corrected / standard",
-                "More rigorous analyses that account for repeated samples, covariates, compositional data, sequencing depth, and multi-sample structure.",
+                "4. Run analysis",
+                "One action runs the corrected/standard inferential engine and attaches the frozen QC provenance, supporting descriptive checks, diagnostics, candidate summary, and warnings.",
             ),
             (
-                "5. Focused candidates",
-                "A simplified one-sample-per-person comparison that produces a short, presentation-friendly list of preliminary candidate genes, pathways, and other signals.",
+                "5. Results & export",
+                "Inspect modality results and QC/robustness together, then export either a presentation-friendly key-findings report or a full technical report from the exact same completed run.",
             ),
         ];
         for (idx, (title, body)) in steps.iter().enumerate() {
@@ -7633,128 +8598,111 @@ impl MergeApp {
     }
 
     fn docs_section_overview(&self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("What the three analysis layers are for")
+        egui::CollapsingHeader::new("How the unified Cohort Analysis workflow is organized")
             .default_open(true)
             .show(ui, |ui| {
-                ui.label("The app has three inferential analysis layers plus a dedicated PBMC/confounding diagnostic layer because they answer different questions.");
+                ui.label("Cohort Analysis now has one primary inferential workflow rather than several competing analysis modes.");
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("Exploratory discovery").strong());
-                ui.label("Use this when you want a quick first look. It is useful for asking: 'Do any genes, repertoire summaries, or immune features look different between the groups?' It aims to be easy to run and easy to interpret, but it is deliberately conservative about claiming too much.");
+                ui.label(egui::RichText::new("Primary evidence: corrected / standard analysis").strong());
+                ui.label("The corrected methods remain the main statistical evidence for gene/transcript expression, BCR/TCR, BCR isotype, immune signatures, and pathways.");
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("Corrected / standard").strong());
-                ui.label("Use this when you want the more routine, study-style analysis. It keeps the same biological questions, but applies methods that are better aligned with repeated sampling, compositional repertoire data, sequencing-depth differences, and optional covariates.");
+                ui.label(egui::RichText::new("Supporting evidence: QC, descriptive checks, and sensitivity diagnostics").strong());
+                ui.label("Cross-modal outlier screening, exploratory direction checks, and PBMC/confounding diagnostics help interpret robustness and sample quality. They do not become separate competing sources of evidence.");
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("Focused candidate signals").strong());
-                ui.label("Use this when the audience wants a shorter and more direct story. A filtered metadata table is used to define a simpler comparison, and the app builds a shortlist of preliminary candidates that are easier to present and discuss.");
+                ui.label(egui::RichText::new("Presentation layer: key findings").strong());
+                ui.label("Candidate genes, pathways, transcripts, and other signals are shortlisted from the completed corrected analysis. A filtered metadata table changes the cohort definition, not the statistical methodology.");
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("Important principle").strong());
-                ui.label("None of these layers claim that a feature is a validated biomarker on their own. The goal is to identify signals that are descriptive, statistically supported, biologically interpretable, and worth further validation.");
+                ui.label("Both the simplified and full reports are rendered from the same frozen completed run. Neither report style reruns statistics, and neither should describe preliminary candidates as validated biomarkers.");
             });
     }
 
     fn docs_section_exploratory(&self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Exploratory discovery: what it does and how to read it")
+        egui::CollapsingHeader::new("Supporting descriptive checks and cross-modal sample QC")
             .default_open(true)
             .show(ui, |ui| {
-                ui.label("Plain-language summary: exploratory analysis is the app's screening step. It asks whether the case and control groups look different enough to deserve follow-up.");
+                ui.label("Plain-language summary: exploratory calculations are now supporting context rather than a separate Cohort Analysis mode.");
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("What is analysed").strong());
-                ui.label("• Gene expression and transcript expression: abundance measurements such as TPM or Total Reads/Raw Counts, depending on the selected workflow.");
-                ui.label("• BCR / TCR / immune features: descriptive summaries such as diversity, clonality, top-clone fraction, repertoire composition, and inferred immune-cell signatures.");
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("Core idea").strong());
-                ui.label("Each feature is compared between the groups independently. The main outputs are an effect estimate, a p value, and a Benjamini–Hochberg false-discovery-rate adjusted q value. For expression, the app also shows a volcano-style view and a detection-shift plot.");
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("Why this layer is useful").strong());
-                ui.label("• Fast first pass across many features.");
-                ui.label("• Helps spot large differences, obvious outliers, and broad biological themes.");
-                ui.label("• Useful when discussing data quality and whether a planned comparison is promising before moving into more formal modelling.");
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("Sample outlier QC").strong());
-                ui.label("The exploratory workspace also has an unsupervised cross-modal outlier audit. Each selected data type produces a sample-level PCA representation and robust distance score. You can flag a sample if it is unusual in any one modality, in at least N modalities, in a majority, or in all available modalities.");
-                ui.label("Within-group detection is the recommended default so a real case/control-wide biological shift is less likely to be removed simply because one group differs from the other. Automatic flags should be reviewed before exclusion; outlier-filtered corrected/focused runs are best treated as sensitivity analyses alongside the inclusive result.");
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("What to be careful about").strong());
-                ui.label("• Repeated samples from the same person are still treated as separate observations in this layer.");
-                ui.label("• Covariates such as age, sex, batch, or family structure are not adjusted here.");
-                ui.label("• For repertoire data, sequencing depth and compositional constraints can strongly influence naive summaries.");
+                ui.label(egui::RichText::new("Cross-modal sample outlier QC").strong());
+                ui.label("Each enabled data type can produce an unsupervised sample representation and robust distance score. The audit can flag a sample when it is unusual in any modality, in at least N modalities, in a majority, or in all available selected modalities.");
+                ui.label("Within-group detection is the recommended default so a real case/control-wide biological shift is less likely to be mislabeled as an outlier.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Review before exclusion").strong());
+                ui.label("Automatic outliers are flags only. A new QC run does not automatically select samples for exclusion. Reviewers may explicitly retain consensus-flagged samples or select other samples for exclusion when provenance/QC evidence supports that decision.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Exploratory direction support").strong());
+                ui.label("When enabled, simple TPM-based expression comparisons are used only to annotate whether candidate directions agree with a descriptive screen. They do not change corrected p values, q values, or effect estimates and are not independent validation.");
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("What a reader should conclude").strong());
-                ui.label("Treat exploratory hits as 'signals to investigate next', not as final proof.");
+                ui.label("Use these views to understand sample structure and robustness. The primary inferential interpretation still comes from the corrected/standard results.");
             });
     }
 
     fn docs_section_diagnostics(&self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("PBMC / confounding diagnostics: checking whether a striking signal is really a sample-source effect")
+        egui::CollapsingHeader::new("QC / robustness sensitivity diagnostics")
             .default_open(true)
             .show(ui, |ui| {
-                ui.label("Plain-language summary: use this layer when a gene program looks unexpectedly strong for PBMCs, appears in only a small subset of samples, or may coincide with tissue/source, processing year, family, or unusual immune composition.");
+                ui.label("Plain-language summary: PBMC/source/composition diagnostics are an optional sensitivity stage attached to the same completed analysis run.");
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("What it checks").strong());
-                ui.label("• Whole-transcriptome PCA and robust sample-outlier scores.");
+                ui.label("• Whole-transcriptome PCA and robust sample-outlier structure.");
                 ui.label("• Library/detection summaries and immune-signature structure when immune-infiltrate files are available.");
-                ui.label("• A user-defined unusual-sample vs ordinary-sample expression screen that ignores disease status.");
-                ui.label("• Low-count, top-two-sample contribution, leave-one-sample-out, and leave-batch/family-out diagnostics for leading genes.");
-                ui.label("• A QC-restricted disease sensitivity model and an immune-PC-adjusted disease model.");
+                ui.label("• Known wrong-source/non-PBMC samples and reviewer-supplied suspect samples.");
+                ui.label("• Low-count support, top-two-sample contribution, leave-one-sample-out, and optional leave-batch/family-level-out stability for leading genes.");
+                ui.label("• QC-restricted and immune-PC-adjusted corrected sensitivity models.");
                 ui.label("• Longitudinal within-person PCA consistency when a subject column is available.");
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("How to interpret it").strong());
-                ui.label("An automated outlier flag is not proof that a sample is invalid. The strongest evidence of confounding comes from several independent clues agreeing: known wrong tissue/source, a global transcriptome shift, unusual immune-signature structure, historical batch/family concentration, and a disease effect that disappears after those samples/axes are accounted for.");
+                ui.label("A statistical outlier flag alone is not proof that a sample is invalid. Confidence is higher when provenance, global sample structure, immune composition, historical/family structure, and sensitivity analyses point in the same direction.");
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("What a robust candidate should look like").strong());
-                ui.label("A promising disease-associated gene should usually remain directionally similar after QC restriction and immune-composition adjustment, should not depend on one or two samples, and should not reverse when one batch/family level is omitted.");
+                ui.label("A promising disease-associated feature should usually remain directionally/effect-size stable across reasonable QC and composition sensitivity checks and should not depend on one or two samples.");
             });
     }
 
     fn docs_section_corrected(&self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Corrected / standard: what it adds")
+        egui::CollapsingHeader::new("Primary corrected / standard analysis")
             .default_open(true)
             .show(ui, |ui| {
-                ui.label("Plain-language summary: this is the more rigorous analysis layer. It uses methods that are closer to what readers expect in a standard cohort study.");
+                ui.label("Plain-language summary: this is the primary inferential engine used by the unified workflow.");
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("Gene and transcript expression").strong());
-                ui.label("Counts are analysed using a count-aware framework. The app normalizes samples, fits a feature-by-feature model, reports the estimated case-versus-control effect, and adjusts for multiple testing. When a subject column is supplied, it also produces a subject-collapsed sensitivity result so repeated samples do not dominate the conclusion.");
+                ui.label("Positive-count median-ratio normalization and negative-binomial log-link models provide adjusted case/control effects, optional metadata covariates, subject-clustered inference for repeated sampling, multiple-testing correction, subject-collapsed sensitivity analysis, PCA, and dendrograms. Transcript analysis also retains the within-gene CLR/Simes/BH DTU screen.");
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("BCR and TCR repertoires").strong());
-                ui.label("The corrected layer distinguishes between two different kinds of repertoire questions.");
-                ui.label("• Diversity / richness questions are handled with matched-depth rarefaction so samples are compared more fairly.");
-                ui.label("• Composition questions (for example isotype, V-gene, J-gene, or V–J usage) are handled with compositional analyses based on CLR/Aitchison ideas, plus multivariate tests such as PERMANOVA and ordination/clustering plots.");
+                ui.label("Matched-depth exact-without-replacement rarefaction supports depth-fair diversity summaries, while CLR/Aitchison analyses, Morisita-Horn/Jaccard ordinations, subject-blocked PERMANOVA, and dendrograms address composition and multi-sample structure.");
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("Immune-infiltrate signatures").strong());
-                ui.label("Immune cell-type scores are analysed as a standardized feature matrix, so you can inspect group shifts, ordination, clustering, and ranked effects in a way that is consistent with the other modalities.");
+                ui.label(egui::RichText::new("BCR isotype and immune signatures").strong());
+                ui.label("BCR-isotype composition uses CLR/Aitchison methods with the existing Undetermined sensitivity option. Immune signatures retain covariate-adjusted feature models, PCA, and clustering.");
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("Pathway analysis").strong());
-                ui.label("After the corrected expression analysis, the app can test whether certain pathways are over-represented among the differentially expressed genes. This helps move from long gene lists to broader biological themes.");
+                ui.label(egui::RichText::new("Pathways").strong());
+                ui.label("Optional GMT-driven over-representation analysis is derived from the corrected gene analysis using the tested-gene universe, odds ratios, overlap genes, and BH FDR. Public MSigDB collections and custom GMT files remain supported.");
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("Why this layer is usually the main results layer").strong());
-                ui.label("• Better aligned with repeated sampling and optional covariate adjustment.");
-                ui.label("• Uses depth-aware or composition-aware methods where those issues matter.");
-                ui.label("• Adds ordination and dendrogram views that are useful for seeing whether samples cluster by biology or by some other factor.");
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("What a reader should conclude").strong());
-                ui.label("This is the strongest statistical layer in the app, but it still supports discovery rather than final clinical validation. Results should be interpreted together with sample size, cohort design, and external biological plausibility.");
+                ui.label(egui::RichText::new("Important model caveat").strong());
+                ui.label("The native expression model does not claim to reproduce the exact empirical-Bayes/dispersion-shrinkage machinery of DESeq2, edgeR, or limma-voom. This application supports discovery and robustness assessment rather than final clinical biomarker validation.");
             });
     }
 
     fn docs_section_focused(&self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Focused candidate signals: how it is different")
+        egui::CollapsingHeader::new("Key findings and report detail levels")
             .default_open(true)
             .show(ui, |ui| {
-                ui.label("Plain-language summary: the focused workflow is designed for a simpler, presentation-friendly comparison. It is especially useful when a collaborator supplies a filtered metadata table with one sample per person or another deliberately narrowed subset.");
+                ui.label("Plain-language summary: candidate prioritization is now a presentation layer derived from the primary corrected result, not a separate analysis mode.");
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("How the focused workflow works").strong());
-                ui.label("1. Start from the filtered metadata table that defines the direct comparison.");
-                ui.label("2. Re-run the corrected analysis on that simpler cohort definition.");
-                ui.label("3. Summarize a short list of candidate genes, pathways, transcripts, and other signals.");
-                ui.label("4. Optionally check whether the simpler shortlist is directionally consistent with the broader exploratory screen.");
+                ui.label(egui::RichText::new("Filtered collaborator metadata").strong());
+                ui.label("A filtered metadata table can define a narrower cohort (for example one selected sample per person). The same corrected methodology is then run on that defined cohort.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Candidate shortlist").strong());
+                ui.label("The app ranks a concise set of genes, pathways, transcripts, and other modality signals using the completed corrected results. Optional exploratory direction concordance and PBMC/confounding robustness labels are annotations, not extra statistical votes.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Simplified report").strong());
+                ui.label("Shows the comparison, sample/QC summary, main takeaway, strongest candidate signals, a small number of useful plots, and concise limitations. It explicitly describes candidates as preliminary rather than validated biomarkers.");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Full detailed report").strong());
+                ui.label("Adds the mapping audit, frozen QC decisions and modality evidence, all selected corrected results, sensitivity analyses, pathway provenance, detailed plots/tables, warnings, assumptions, and limitations.");
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("Why it helps").strong());
-                ui.label("• Easier for a general audience to follow.");
-                ui.label("• Reduces the visual and statistical complexity that comes from many longitudinal samples or mixed subcohorts.");
-                ui.label("• Highlights the best-supported preliminary candidates for discussion and follow-up.");
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("What a reader should conclude").strong());
-                ui.label("Focused candidates are not 'approved biomarkers'. They are a pragmatic shortlist of promising preliminary signals that look both biologically interesting and statistically supported in the simplified comparison.");
+                ui.label(egui::RichText::new("Same run, different presentation").strong());
+                ui.label("Exporting a different report style never reruns the analysis or changes sample inclusion. The report is a view of the completed run object.");
             });
     }
 

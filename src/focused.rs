@@ -1,15 +1,16 @@
-//! Focused one-sample-per-individual candidate prioritization.
+//! Candidate prioritization derived from corrected cohort-analysis results.
 //!
-//! The focused workflow is intentionally a presentation-oriented layer on top of
-//! the corrected analysis results. Corrected statistics remain the primary
-//! evidence. Optional exploratory expression results are used only as a
-//! method-concordance check and never as an independent validation dataset.
+//! This module is intentionally a presentation-oriented layer on top of the
+//! corrected analysis results. Corrected statistics remain the primary evidence.
+//! Optional exploratory expression results are used only as a direction-
+//! concordance check and never as an independent validation dataset.
 
 use crate::cohort::{FeatureTestResult, GeneComparisonResult};
 use crate::corrected::{
     AdjustedFeatureResult, CorrectedExpressionResult, CorrectedImmuneResult,
     CorrectedIsotypeResult, CorrectedPathwayResult, CorrectedRepertoireResult,
 };
+use crate::diagnostics::PbmcDiagnosticsResult;
 use anyhow::{Context, Result};
 use csv::WriterBuilder;
 use std::collections::HashMap;
@@ -53,6 +54,8 @@ pub struct FocusedGeneCandidate {
     pub pathway_support_count: usize,
     pub pathway_support: String,
     pub evidence: String,
+    pub robustness: Option<String>,
+    pub robustness_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +237,8 @@ fn shortlist_expression(
                 pathway_support_count: support.len(),
                 pathway_support: support_display,
                 evidence: evidence_label(r.q_value, r.p_value),
+                robustness: None,
+                robustness_flags: Vec::new(),
             }
         })
         .collect()
@@ -398,11 +403,11 @@ pub fn build_focused_candidate_summary(
 
     let mut notes = vec![
         "Corrected/standard results are the primary evidence used for prioritization. Exploratory expression results, when requested, are shown only as a direction-concordance check and are not independent validation.".to_string(),
-        "Candidate labels are deliberately preliminary. A ranked signal can be useful for follow-up even when it does not meet FDR <= 0.05, especially in a small focused cohort, but it should not be presented as a validated biomarker.".to_string(),
-        "Because the focused metadata is expected to contain one sample per individual, repeated-measure clustering is not required. Related family members can still violate strict independence and should be considered in later validation.".to_string(),
+        "Candidate labels are deliberately preliminary. A ranked signal can be useful for follow-up even when it does not meet FDR <= 0.05, especially in a small cohort, but it should not be presented as a validated biomarker.".to_string(),
+        "Candidate prioritization does not alter the statistical model or sample-dependence assumptions. Repeated-measure, family, batch, and other dependence should be interpreted according to the corrected analysis settings used for the same run.".to_string(),
     ];
     if genes.is_empty() {
-        notes.push("No gene passed the configured minimum absolute adjusted log2 fold-change for the focused shortlist.".to_string());
+        notes.push("No gene passed the configured minimum absolute adjusted log2 fold-change for the configured shortlist.".to_string());
     }
     if pathway.is_none() {
         notes.push("No pathway collection was analyzed; pathway support is therefore unavailable for gene prioritization.".to_string());
@@ -420,6 +425,23 @@ pub fn build_focused_candidate_summary(
         pathways,
         other,
         notes,
+    }
+}
+
+pub fn annotate_focused_candidate_robustness(
+    summary: &mut FocusedCandidateSummary,
+    diagnostics: &PbmcDiagnosticsResult,
+) {
+    let by_gene = diagnostics
+        .candidate_stability
+        .iter()
+        .map(|row| (row.gene.to_ascii_uppercase(), row))
+        .collect::<HashMap<_, _>>();
+    for candidate in &mut summary.genes {
+        if let Some(row) = by_gene.get(&candidate.gene.to_ascii_uppercase()) {
+            candidate.robustness = Some(row.classification.clone());
+            candidate.robustness_flags = row.flags.clone();
+        }
     }
 }
 
@@ -446,6 +468,8 @@ pub fn write_focused_candidate_tables(
         "pathway_support_count",
         "pathway_support",
         "evidence",
+        "robustness",
+        "robustness_flags",
     ])?;
     for r in &summary.genes {
         w.write_record([
@@ -467,6 +491,8 @@ pub fn write_focused_candidate_tables(
             r.pathway_support_count.to_string(),
             r.pathway_support.clone(),
             r.evidence.clone(),
+            r.robustness.clone().unwrap_or_default(),
+            r.robustness_flags.join("; "),
         ])?;
     }
     w.flush()?;
@@ -573,7 +599,7 @@ pub fn write_focused_candidate_tables(
 
     let note_path = folder.join("focused_candidate_notes.txt");
     let mut text = format!(
-        "Focused candidate-signal analysis\n===============================\n\nMetadata: {}\nComparison: {} vs {}\nCase samples: {}\nControl samples: {}\nMinimum gene |adjusted log2FC|: {:.3}\n\n",
+        "Candidate-prioritization summary\n==============================\n\nMetadata: {}\nComparison: {} vs {}\nCase samples: {}\nControl samples: {}\nMinimum gene |adjusted log2FC|: {:.3}\n\n",
         summary.metadata_path.display(),
         summary.case_label,
         summary.control_label,
@@ -589,6 +615,52 @@ pub fn write_focused_candidate_tables(
     fs::write(&note_path, text)?;
 
     Ok(folder.to_path_buf())
+}
+
+/// Write the candidate-prioritization layer using unified user-facing key-findings names.
+/// The underlying rows are identical to the legacy focused export; only filenames/notes
+/// are presentation-oriented for the unified Cohort Analysis workflow.
+pub fn write_key_findings_tables(
+    folder: &Path,
+    summary: &FocusedCandidateSummary,
+) -> Result<PathBuf> {
+    let output = write_focused_candidate_tables(folder, summary)?;
+    for (legacy, unified) in [
+        ("focused_candidate_genes.csv", "key_candidate_genes.csv"),
+        (
+            "focused_candidate_pathways.csv",
+            "key_candidate_pathways.csv",
+        ),
+        (
+            "focused_candidate_transcripts.csv",
+            "key_candidate_transcripts.csv",
+        ),
+        (
+            "focused_candidate_other_signals.csv",
+            "key_other_signals.csv",
+        ),
+        ("focused_candidate_notes.txt", "key_findings_notes.txt"),
+    ] {
+        let from = output.join(legacy);
+        if from.exists() {
+            let to = output.join(unified);
+            if to.exists() {
+                fs::remove_file(&to).with_context(|| {
+                    format!(
+                        "Could not replace existing unified key-findings file {}",
+                        to.display()
+                    )
+                })?;
+            }
+            fs::rename(&from, &to).with_context(|| {
+                format!(
+                    "Could not rename {} for unified key-findings export",
+                    from.display()
+                )
+            })?;
+        }
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
