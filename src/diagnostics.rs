@@ -12,6 +12,7 @@ use crate::corrected::{
     CorrectedExpressionResult, CorrectedModelSpec, OrdinationPoint, OrdinationResult,
     parse_immune_file, run_corrected_expression, write_adjusted_tests, write_ordination,
 };
+use crate::metadata::row_matching_ids;
 use anyhow::{Context, Result, anyhow, bail};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -257,9 +258,9 @@ where
             .as_deref()
             .map(|c| metadata_value(metadata, meta_row, c))
             .unwrap_or_default();
-        let group = if comparison.case_ids.contains(&key) {
+        let group = if comparison.is_case_id(&key) {
             comparison.case_label.clone()
-        } else if comparison.control_ids.contains(&key) {
+        } else if comparison.is_control_id(&key) {
             comparison.control_label.clone()
         } else {
             "Outside comparison".to_string()
@@ -619,9 +620,9 @@ fn pca_from_rows(
         .enumerate()
         .map(|(i, sample)| {
             let key = normalize_sample_id(sample);
-            let group = if comparison.case_ids.contains(&key) {
+            let group = if comparison.is_case_id(&key) {
                 "Case"
-            } else if comparison.control_ids.contains(&key) {
+            } else if comparison.is_control_id(&key) {
                 "Control"
             } else {
                 "Outside comparison"
@@ -844,17 +845,19 @@ fn build_immune_diagnostics(
 }
 
 fn filter_metadata(metadata: &MetadataTable, exclude: &HashSet<String>) -> Result<MetadataTable> {
-    let id_idx = metadata
-        .column_index(&metadata.id_column)
-        .ok_or_else(|| anyhow!("Metadata ID column is missing"))?;
+    if metadata.column_index(&metadata.id_column).is_none() {
+        bail!("Metadata ID column is missing");
+    }
     let rows = metadata
         .rows
         .iter()
-        .filter(|row| {
-            let id = normalize_sample_id(row.get(id_idx).map(String::as_str).unwrap_or_default());
-            !exclude.contains(&id)
+        .enumerate()
+        .filter(|(row_idx, _)| {
+            !row_matching_ids(metadata, *row_idx)
+                .iter()
+                .any(|id| exclude.contains(id))
         })
-        .cloned()
+        .map(|(_, row)| row.clone())
         .collect::<Vec<_>>();
     Ok(MetadataTable {
         path: metadata.path.clone(),
@@ -868,19 +871,22 @@ fn augment_metadata_with_immune_pcs(
     metadata: &MetadataTable,
     pcs: &HashMap<String, (f64, f64)>,
 ) -> Result<MetadataTable> {
-    let id_idx = metadata
-        .column_index(&metadata.id_column)
-        .ok_or_else(|| anyhow!("Metadata ID column is missing"))?;
+    if metadata.column_index(&metadata.id_column).is_none() {
+        bail!("Metadata ID column is missing");
+    }
     let mut columns = metadata.columns.clone();
     columns.push("QC_Immune_PC1".to_string());
     columns.push("QC_Immune_PC2".to_string());
     let rows = metadata
         .rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(row_idx, row)| {
             let mut out = row.clone();
-            let id = normalize_sample_id(row.get(id_idx).map(String::as_str).unwrap_or_default());
-            if let Some((pc1, pc2)) = pcs.get(&id) {
+            let matched = row_matching_ids(metadata, row_idx)
+                .iter()
+                .find_map(|id| pcs.get(id));
+            if let Some((pc1, pc2)) = matched {
                 out.push(pc1.to_string());
                 out.push(pc2.to_string());
             } else {
@@ -928,6 +934,7 @@ fn build_source_effect_screen(
         control_metadata_rows: control_ids.len(),
         case_ids,
         control_ids,
+        id_to_canonical: HashMap::new(),
     };
     Ok(Some(run_gene_comparison(
         merged_gene_tsv,
@@ -999,9 +1006,9 @@ fn build_candidate_stability(
         let mut points = Vec::new();
         for (i, col) in columns.iter().enumerate() {
             let key = normalize_sample_id(&col.sample_id);
-            let group = if comparison.case_ids.contains(&key) {
+            let group = if comparison.is_case_id(&key) {
                 Some("Case")
-            } else if comparison.control_ids.contains(&key) {
+            } else if comparison.is_control_id(&key) {
                 Some("Control")
             } else {
                 None
@@ -1488,14 +1495,16 @@ pub fn write_pbmc_diagnostics_tables(
 }
 
 fn unique_metadata_rows(metadata: &MetadataTable) -> HashMap<String, usize> {
-    let Some(id_idx) = metadata.column_index(&metadata.id_column) else {
+    if metadata.column_index(&metadata.id_column).is_none() {
         return HashMap::new();
-    };
+    }
     let mut temp: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, row) in metadata.rows.iter().enumerate() {
-        let id = normalize_sample_id(row.get(id_idx).map(String::as_str).unwrap_or_default());
-        if !id.is_empty() {
-            temp.entry(id).or_default().push(i);
+    for i in 0..metadata.rows.len() {
+        for id in row_matching_ids(metadata, i) {
+            let entry = temp.entry(id).or_default();
+            if !entry.contains(&i) {
+                entry.push(i);
+            }
         }
     }
     temp.into_iter()

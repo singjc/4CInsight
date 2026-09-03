@@ -1,8 +1,9 @@
 use crate::analysis::UnifiedCohortAnalysisRun;
 use crate::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, BcrSampleSummary, CohortComparison,
-    CohortMapping, CohortModality, FeatureTestResult, GeneComparisonResult, ImmuneComparisonResult,
-    MappingStatus, TcrComparisonResult, TcrSampleSummary,
+    CohortComparisonDefinition, CohortMapping, CohortModality, FeatureTestResult,
+    GeneComparisonResult, ImmuneComparisonResult, MappingStatus, TcrComparisonResult,
+    TcrSampleSummary,
 };
 use crate::corrected::{
     AdjustedFeatureResult, CorrectedExpressionResult, CorrectedImmuneResult,
@@ -1258,7 +1259,7 @@ fn fmt_sci(value: f64) -> String {
 mod tests {
     use super::*;
     use crate::cohort::{CohortComparison, FeatureTestResult, GeneComparisonResult};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn writes_cohort_html_report_with_gene_plot() {
@@ -1268,6 +1269,7 @@ mod tests {
             control_label: "True_HC".to_string(),
             case_ids: HashSet::new(),
             control_ids: HashSet::new(),
+            id_to_canonical: HashMap::new(),
             case_metadata_rows: 3,
             control_metadata_rows: 3,
         };
@@ -1998,10 +2000,30 @@ pub fn generate_unified_detailed_html_report(
     } else {
         run.settings.corrected.covariates.join(", ")
     };
+    let comparison_definition = match &run.cohort.comparison_definition {
+        CohortComparisonDefinition::Preset(preset) => {
+            format!("Built-in preset: {}", preset.display_name())
+        }
+        CohortComparisonDefinition::MetadataValues(spec) => format!(
+            "Custom metadata comparison using '{}' (case values: {}; control values: {})",
+            spec.column,
+            spec.case_values
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            spec.control_values
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
     let mut overview = ReportSection::new("Run overview and provenance");
     overview.add_content(html! {
         h2 { "Unified Cohort Analysis" }
         p { strong { "Comparison: " } (run.primary.comparison.case_label) " vs " (run.primary.comparison.control_label) }
+        p { strong { "Comparison definition: " } (comparison_definition) }
         p { strong { "Completed analysis samples: " } (run.case_n()) " case / " (run.control_n()) " control" }
         p { strong { "Project root: " } code { (run.cohort.project_root.to_string_lossy()) } }
         p { strong { "Metadata: " } code { (run.cohort.metadata_path.to_string_lossy()) } " (ID column: " (run.cohort.metadata_id_column) ")" }

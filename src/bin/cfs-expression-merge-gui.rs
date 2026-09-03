@@ -4,14 +4,15 @@ use cfs_expression_merger::analysis::{
     write_unified_analysis_tables,
 };
 use cfs_expression_merger::cohort::{
-    BcrComparisonResult, BcrIsotypeComparisonResult, CohortComparison, CohortMapping,
-    CohortModality, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
-    ImmuneComparisonResult, MappingStatus, MetadataTable, ProjectScan, TcrComparisonResult,
-    build_comparison, build_mapping, load_metadata, normalize_sample_id, run_bcr_comparison,
-    run_bcr_isotype_comparison, run_gene_comparison, run_immune_infiltrate_comparison,
-    run_tcr_comparison, run_transcript_comparison, scan_project, write_bcr_isotype_values,
-    write_bcr_sample_summaries, write_feature_tests, write_immune_values, write_mapping_audit,
-    write_mapping_audit_csv, write_tcr_sample_summaries,
+    BcrComparisonResult, BcrIsotypeComparisonResult, CohortComparison, CohortComparisonDefinition,
+    CohortMapping, CohortModality, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
+    ImmuneComparisonResult, MappingStatus, MetadataComparisonSpec, MetadataTable, ProjectScan,
+    TcrComparisonResult, build_comparison, build_comparison_definition, build_mapping,
+    load_metadata, normalize_sample_id, run_bcr_comparison, run_bcr_isotype_comparison,
+    run_gene_comparison, run_immune_infiltrate_comparison, run_tcr_comparison,
+    run_transcript_comparison, scan_project, write_bcr_isotype_values, write_bcr_sample_summaries,
+    write_feature_tests, write_immune_values, write_mapping_audit, write_mapping_audit_csv,
+    write_tcr_sample_summaries,
 };
 use cfs_expression_merger::corrected::{
     AdjustedFeatureResult, AmbiguousCallPolicy, CorrectedCompositionResult,
@@ -33,6 +34,11 @@ use cfs_expression_merger::focused::{
 use cfs_expression_merger::gmt_catalog::{
     GMT_CATALOG, MSIGDB_LICENSE_URL, MSIGDB_RELEASE_URL, MSIGDB_VERSION,
     cache_path as gmt_cache_path, download_public_gmt,
+};
+use cfs_expression_merger::metadata::{
+    STANDARD_METADATA_FIELDS, add_missing_standard_columns, canonical_sample_id,
+    new_standard_metadata, row_matching_ids, unique_values as metadata_unique_values,
+    validate_standard_metadata, write_metadata_tsv,
 };
 use cfs_expression_merger::outliers::{
     CrossModalOutlierResult, OutlierConfig, OutlierConsensusRule, OutlierFilterSnapshot,
@@ -57,7 +63,7 @@ use egui_plot::{
     Bar, BarChart, BoxElem, BoxPlot, BoxSpread, HoverPosition, Legend, Line, Plot, Points,
 };
 use rfd::FileDialog;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -81,8 +87,15 @@ fn main() -> eframe::Result {
 enum AppTab {
     Merge,
     Explore,
+    Metadata,
     Cohort,
     Docs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnifiedComparisonMode {
+    BuiltIn,
+    CustomMetadata,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,6 +346,17 @@ struct MergeApp {
     cohort_metadata: Option<MetadataTable>,
     cohort_mapping: Option<CohortMapping>,
     cohort_preset: ComparisonPreset,
+    unified_comparison_mode: UnifiedComparisonMode,
+    custom_comparison_column: Option<String>,
+    custom_case_values: HashSet<String>,
+    custom_control_values: HashSet<String>,
+    custom_comparison_name: String,
+    custom_case_label: String,
+    custom_control_label: String,
+    metadata_builder_path: Option<PathBuf>,
+    metadata_builder: Option<MetadataTable>,
+    metadata_builder_selected_row: usize,
+    metadata_builder_status: String,
     cohort_status: String,
     cohort_progress: f32,
     cohort_running: bool,
@@ -671,6 +695,17 @@ impl MergeApp {
             cohort_metadata: None,
             cohort_mapping: None,
             cohort_preset: ComparisonPreset::HypVsTrueHc,
+            unified_comparison_mode: UnifiedComparisonMode::BuiltIn,
+            custom_comparison_column: None,
+            custom_case_values: HashSet::new(),
+            custom_control_values: HashSet::new(),
+            custom_comparison_name: String::new(),
+            custom_case_label: String::new(),
+            custom_control_label: String::new(),
+            metadata_builder_path: None,
+            metadata_builder: None,
+            metadata_builder_selected_row: 0,
+            metadata_builder_status: "Create a standardized metadata table from the cohort scan or load an existing table to curate it.".to_string(),
             cohort_status: "Choose the dataset root to scan all supported data types.".to_string(),
             cohort_progress: 0.0,
             cohort_running: false,
@@ -762,6 +797,7 @@ impl eframe::App for MergeApp {
                 .show(ui, |ui| match self.active_tab {
                     AppTab::Merge => self.render_merge_tab(ui),
                     AppTab::Explore => self.render_explore_tab(ui),
+                    AppTab::Metadata => self.render_metadata_tab(ui),
                     AppTab::Cohort => self.render_cohort_tab(ui),
                     AppTab::Docs => self.render_docs_tab(ui),
                 });
@@ -959,6 +995,13 @@ impl MergeApp {
                                 };
                                 (text, self.files.len())
                             }
+                            AppTab::Metadata => (
+                                "Sample metadata",
+                                self.metadata_builder
+                                    .as_ref()
+                                    .map(|meta| meta.rows.len())
+                                    .unwrap_or(0),
+                            ),
                             AppTab::Cohort => (
                                 "Cohort project",
                                 self.cohort_scan
@@ -999,9 +1042,15 @@ impl MergeApp {
                     self.start_catalog_load();
                 }
             }
+            let metadata = ui
+                .selectable_label(self.active_tab == AppTab::Metadata, "Metadata Builder")
+                .on_hover_text("Create, curate, validate, and export a standardized multi-omics sample metadata TSV with cohort/covariate fields and modality aliases.");
+            if metadata.clicked() {
+                self.active_tab = AppTab::Metadata;
+            }
             let cohort = ui
                 .selectable_label(self.active_tab == AppTab::Cohort, "Cohort Analysis")
-                .on_hover_text("Scan a complete cohort dataset, join sample metadata, audit unmatched samples, and run exploratory, corrected, and focused analyses across the available modalities.");
+                .on_hover_text("Scan a complete cohort dataset, join sample metadata, define built-in or custom metadata comparisons, review QC, and run the unified multi-modal analysis.");
             if cohort.clicked() {
                 self.active_tab = AppTab::Cohort;
             }
@@ -1016,6 +1065,407 @@ impl MergeApp {
 
     fn render_docs_tab(&mut self, ui: &mut egui::Ui) {
         self.render_analysis_docs_card(ui);
+    }
+
+    fn render_metadata_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Metadata Builder / Curator");
+        ui.label(
+            egui::RichText::new(
+                "Create or curate one standardized sample table for cohort definition, repeated-measure metadata, covariates, batch/source provenance, and cross-modality sample aliases. The saved TSV can be loaded directly into Cohort Analysis.",
+            )
+            .weak(),
+        );
+        ui.add_space(8.0);
+
+        self.card(ui, "1. Create or load metadata", |this, ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("New blank standard table").clicked() {
+                    this.metadata_builder = Some(new_standard_metadata(&[]));
+                    this.metadata_builder_path = None;
+                    this.metadata_builder_selected_row = 0;
+                    this.metadata_builder_status = "Created a blank standard metadata table.".to_string();
+                }
+                if ui.button("Scan project folder & create table…").clicked() {
+                    let mut dialog = FileDialog::new();
+                    if let Some(dir) = &this.last_directory {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(root) = dialog.pick_folder() {
+                        match scan_project(&root) {
+                            Ok(scan) => {
+                                let mut seen = BTreeMap::<String, String>::new();
+                                for file in &scan.files {
+                                    seen.entry(normalize_sample_id(&file.sample_id))
+                                        .or_insert_with(|| file.sample_id.clone());
+                                }
+                                let samples = seen.into_values().collect::<Vec<_>>();
+                                this.cohort_root = Some(root.clone());
+                                this.cohort_scan = Some(scan.clone());
+                                this.cohort_mapping = this.cohort_metadata.as_ref().map(|meta| build_mapping(&scan, meta));
+                                this.last_directory = Some(root);
+                                this.metadata_builder = Some(new_standard_metadata(&samples));
+                                this.metadata_builder_path = None;
+                                this.metadata_builder_selected_row = 0;
+                                this.metadata_builder_status = format!(
+                                    "Scanned the project and created standard metadata rows for {} samples.",
+                                    samples.len()
+                                );
+                            }
+                            Err(error) => {
+                                this.metadata_builder_status = format!("Could not scan project: {error:#}");
+                            }
+                        }
+                    }
+                }
+                if ui.button("Create from current cohort scan").clicked() {
+                    if let Some(scan) = &this.cohort_scan {
+                        let mut seen = BTreeMap::<String, String>::new();
+                        for file in &scan.files {
+                            seen.entry(normalize_sample_id(&file.sample_id))
+                                .or_insert_with(|| file.sample_id.clone());
+                        }
+                        let samples = seen.into_values().collect::<Vec<_>>();
+                        this.metadata_builder = Some(new_standard_metadata(&samples));
+                        this.metadata_builder_path = None;
+                        this.metadata_builder_selected_row = 0;
+                        this.metadata_builder_status = format!(
+                            "Created standard metadata rows for {} scanned samples.",
+                            samples.len()
+                        );
+                    } else {
+                        this.metadata_builder_status = "No cohort project is scanned yet. Open Cohort Analysis and scan a project first, or load an existing metadata table here.".to_string();
+                    }
+                }
+                if ui.button("Load metadata…").clicked() {
+                    let mut dialog = FileDialog::new().add_filter(
+                        "Sample metadata",
+                        &["xlsx", "xls", "csv", "tsv", "txt"],
+                    );
+                    if let Some(dir) = &this.last_directory {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(path) = dialog.pick_file() {
+                        match load_metadata(&path) {
+                            Ok(metadata) => {
+                                this.last_directory = path.parent().map(Path::to_path_buf);
+                                this.metadata_builder_path = Some(path.clone());
+                                this.metadata_builder_selected_row = 0;
+                                this.metadata_builder_status = format!(
+                                    "Loaded {} rows from {}.",
+                                    metadata.rows.len(),
+                                    path.display()
+                                );
+                                this.metadata_builder = Some(metadata);
+                            }
+                            Err(error) => {
+                                this.metadata_builder_status = format!("Could not load metadata: {error:#}");
+                            }
+                        }
+                    }
+                }
+            });
+            ui.label(egui::RichText::new(&this.metadata_builder_status).small().weak());
+            if let Some(path) = &this.metadata_builder_path {
+                ui.label(egui::RichText::new(format!("Source: {}", path.display())).small().weak());
+            }
+        });
+
+        if self.metadata_builder.is_none() {
+            return;
+        }
+
+        self.card(ui, "2. Validate schema", |this, ui| {
+            let (columns, current_id) = this.metadata_builder.as_ref()
+                .map(|m| (m.columns.clone(), m.id_column.clone()))
+                .unwrap_or_default();
+            let mut selected_id = current_id.clone();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Current sample ID column:");
+                egui::ComboBox::from_id_salt("metadata_builder_id_column")
+                    .selected_text(&selected_id)
+                    .show_ui(ui, |ui| {
+                        for column in &columns {
+                            ui.selectable_value(&mut selected_id, column.clone(), column);
+                        }
+                    });
+            });
+            if selected_id != current_id {
+                if let Some(metadata) = &mut this.metadata_builder {
+                    metadata.id_column = selected_id;
+                }
+            }
+            let report = validate_standard_metadata(this.metadata_builder.as_ref().unwrap());
+            let row_count = this.metadata_builder.as_ref().map(|m| m.rows.len()).unwrap_or(0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("{row_count} sample rows"));
+                if report.is_valid() {
+                    ui.colored_label(egui::Color32::from_rgb(105, 190, 125), "No blocking ID errors");
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(225, 120, 110),
+                        format!("{} blocking issue(s)", report.errors.len()),
+                    );
+                }
+                ui.label(format!("{} warning(s)", report.warnings.len()));
+                ui.label(format!("{} comparison-ready categorical columns", report.comparison_columns.len()));
+            });
+            if ui.button("Add any missing standard columns").clicked() {
+                if let Some(metadata) = &mut this.metadata_builder {
+                    let added = add_missing_standard_columns(metadata);
+                    this.metadata_builder_status = format!("Added {added} missing standard column(s); existing columns and values were preserved.");
+                }
+            }
+            for error in report.errors.iter().take(8) {
+                ui.colored_label(egui::Color32::from_rgb(225, 120, 110), error);
+            }
+            for warning in report.warnings.iter().take(8) {
+                ui.label(egui::RichText::new(warning).small().weak());
+            }
+            if report.errors.len() > 8 || report.warnings.len() > 8 {
+                ui.label(egui::RichText::new("Additional validation messages are omitted from this compact view.").small().weak());
+            }
+        });
+
+        self.card(ui, "3. Curate samples", |this, ui| {
+            let row_count = this
+                .metadata_builder
+                .as_ref()
+                .map(|m| m.rows.len())
+                .unwrap_or(0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Add sample row").clicked() {
+                    if let Some(metadata) = &mut this.metadata_builder {
+                        metadata
+                            .rows
+                            .push(vec![String::new(); metadata.columns.len()]);
+                        this.metadata_builder_selected_row = metadata.rows.len().saturating_sub(1);
+                    }
+                }
+                if ui
+                    .add_enabled(row_count > 0, egui::Button::new("Delete selected row"))
+                    .clicked()
+                {
+                    if let Some(metadata) = &mut this.metadata_builder {
+                        if this.metadata_builder_selected_row < metadata.rows.len() {
+                            metadata.rows.remove(this.metadata_builder_selected_row);
+                            this.metadata_builder_selected_row = this
+                                .metadata_builder_selected_row
+                                .min(metadata.rows.len().saturating_sub(1));
+                        }
+                    }
+                }
+            });
+
+            let row_labels = this
+                .metadata_builder
+                .as_ref()
+                .map(|metadata| {
+                    (0..metadata.rows.len())
+                        .map(|row| {
+                            let id = canonical_sample_id(metadata, row)
+                                .unwrap_or_default()
+                                .trim();
+                            if id.is_empty() {
+                                format!("Row {}", row + 2)
+                            } else {
+                                id.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !row_labels.is_empty() {
+                this.metadata_builder_selected_row =
+                    this.metadata_builder_selected_row.min(row_labels.len() - 1);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Selected sample:");
+                    egui::ComboBox::from_id_salt("metadata_builder_selected_row")
+                        .selected_text(&row_labels[this.metadata_builder_selected_row])
+                        .show_ui(ui, |ui| {
+                            for (idx, label) in row_labels.iter().enumerate() {
+                                ui.selectable_value(
+                                    &mut this.metadata_builder_selected_row,
+                                    idx,
+                                    label,
+                                );
+                            }
+                        });
+                });
+
+                let sections = [
+                    "Identity",
+                    "Cohort",
+                    "Collection",
+                    "Specimen",
+                    "Covariates",
+                    "Provenance",
+                    "Batch",
+                    "Modality mapping",
+                    "Review",
+                ];
+                for section in sections {
+                    egui::CollapsingHeader::new(section)
+                        .default_open(matches!(
+                            section,
+                            "Identity" | "Cohort" | "Modality mapping"
+                        ))
+                        .show(ui, |ui| {
+                            let fields = STANDARD_METADATA_FIELDS
+                                .iter()
+                                .filter(|field| field.section == section)
+                                .copied()
+                                .collect::<Vec<_>>();
+                            for field in fields {
+                                let idx = this
+                                    .metadata_builder
+                                    .as_ref()
+                                    .and_then(|m| m.column_index(field.name));
+                                let Some(idx) = idx else {
+                                    continue;
+                                };
+                                let columns_len = this
+                                    .metadata_builder
+                                    .as_ref()
+                                    .map(|m| m.columns.len())
+                                    .unwrap_or(0);
+                                if let Some(metadata) = &mut this.metadata_builder {
+                                    if this.metadata_builder_selected_row >= metadata.rows.len() {
+                                        continue;
+                                    }
+                                    metadata.rows[this.metadata_builder_selected_row]
+                                        .resize(columns_len, String::new());
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("{}:", field.name)).on_hover_text(
+                                            format!(
+                                                "{} — {}",
+                                                field.level.label(),
+                                                field.description
+                                            ),
+                                        );
+                                        ui.add_sized(
+                                            [430.0, 24.0],
+                                            egui::TextEdit::singleline(
+                                                &mut metadata.rows
+                                                    [this.metadata_builder_selected_row][idx],
+                                            ),
+                                        );
+                                    });
+                                }
+                            }
+                        });
+                }
+
+                let standard = STANDARD_METADATA_FIELDS
+                    .iter()
+                    .map(|f| f.name)
+                    .collect::<HashSet<_>>();
+                let extra = this
+                    .metadata_builder
+                    .as_ref()
+                    .map(|m| {
+                        m.columns
+                            .iter()
+                            .filter(|c| !standard.contains(c.as_str()))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if !extra.is_empty() {
+                    egui::CollapsingHeader::new("Additional loaded columns").show(ui, |ui| {
+                        for column in extra {
+                            let idx = this
+                                .metadata_builder
+                                .as_ref()
+                                .and_then(|m| m.column_index(&column));
+                            let Some(idx) = idx else {
+                                continue;
+                            };
+                            let columns_len = this
+                                .metadata_builder
+                                .as_ref()
+                                .map(|m| m.columns.len())
+                                .unwrap_or(0);
+                            if let Some(metadata) = &mut this.metadata_builder {
+                                metadata.rows[this.metadata_builder_selected_row]
+                                    .resize(columns_len, String::new());
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{column}:"));
+                                    ui.add_sized(
+                                        [430.0, 24.0],
+                                        egui::TextEdit::singleline(
+                                            &mut metadata.rows[this.metadata_builder_selected_row]
+                                                [idx],
+                                        ),
+                                    );
+                                });
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        self.card(ui, "4. Save / use metadata", |this, ui| {
+            ui.label("Saving writes a plain UTF-8 TSV. The metadata is cohort definition/provenance; automatic cross-modal QC decisions remain frozen separately for each analysis run.");
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Save standardized TSV…").clicked() {
+                    this.save_metadata_builder(false);
+                }
+                if ui.button("Save TSV & use in Cohort Analysis").clicked() {
+                    this.save_metadata_builder(true);
+                }
+            });
+        });
+    }
+
+    fn save_metadata_builder(&mut self, use_in_cohort: bool) {
+        let Some(metadata) = self.metadata_builder.clone() else {
+            return;
+        };
+        let report = validate_standard_metadata(&metadata);
+        if !report.is_valid() {
+            self.metadata_builder_status = "Fix blocking sample-ID validation errors before exporting the standardized metadata TSV.".to_string();
+            return;
+        }
+        let mut dialog = FileDialog::new()
+            .add_filter("TSV", &["tsv"])
+            .set_file_name("4C_multiomics_sample_metadata.tsv");
+        if let Some(dir) = &self.last_directory {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        match write_metadata_tsv(&metadata, &path) {
+            Ok(()) => {
+                self.last_directory = path.parent().map(Path::to_path_buf);
+                self.metadata_builder_path = Some(path.clone());
+                if let Some(builder) = &mut self.metadata_builder {
+                    builder.path = path.clone();
+                }
+                self.metadata_builder_status =
+                    format!("Saved standardized metadata to {}.", path.display());
+                if use_in_cohort {
+                    let mut active = metadata.clone();
+                    active.path = path.clone();
+                    self.cohort_metadata_path = Some(path);
+                    self.cohort_metadata = Some(active.clone());
+                    self.cohort_mapping = self
+                        .cohort_scan
+                        .as_ref()
+                        .map(|scan| build_mapping(scan, &active));
+                    self.cohort_use_filtered_metadata = false;
+                    self.unified_results = None;
+                    self.outlier_results = None;
+                    self.outlier_excluded_ids.clear();
+                    self.active_tab = AppTab::Cohort;
+                    self.cohort_status = "Standardized metadata saved and loaded as the primary Cohort Analysis metadata table.".to_string();
+                }
+            }
+            Err(error) => {
+                self.metadata_builder_status = format!("Could not save metadata TSV: {error:#}");
+            }
+        }
     }
 
     fn render_merge_tab(&mut self, ui: &mut egui::Ui) {
@@ -2625,6 +3075,50 @@ impl MergeApp {
         }
     }
 
+    fn current_comparison_definition(&self) -> Result<CohortComparisonDefinition, String> {
+        match self.unified_comparison_mode {
+            UnifiedComparisonMode::BuiltIn => {
+                Ok(CohortComparisonDefinition::Preset(self.cohort_preset))
+            }
+            UnifiedComparisonMode::CustomMetadata => {
+                let column = self.custom_comparison_column.clone().ok_or_else(|| {
+                    "Choose a metadata column for the custom comparison.".to_string()
+                })?;
+                if self.custom_case_values.is_empty() || self.custom_control_values.is_empty() {
+                    return Err("Choose at least one case value and one control value.".to_string());
+                }
+                Ok(CohortComparisonDefinition::MetadataValues(
+                    MetadataComparisonSpec {
+                        column,
+                        case_values: self
+                            .custom_case_values
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>(),
+                        control_values: self
+                            .custom_control_values
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>(),
+                        name: self.custom_comparison_name.clone(),
+                        case_label: self.custom_case_label.clone(),
+                        control_label: self.custom_control_label.clone(),
+                    },
+                ))
+            }
+        }
+    }
+
+    fn build_active_comparison(
+        &self,
+        metadata: &MetadataTable,
+    ) -> Result<(CohortComparisonDefinition, CohortComparison), String> {
+        let definition = self.current_comparison_definition()?;
+        let comparison = build_comparison_definition(metadata, &definition)
+            .map_err(|error| format!("{error:#}"))?;
+        Ok((definition, comparison))
+    }
+
     fn render_cohort_subset_card(&mut self, ui: &mut egui::Ui) {
         self.card(ui, "1b. Optional cohort subset", |this, ui| {
             ui.label(
@@ -2734,37 +3228,190 @@ impl MergeApp {
                 ));
             }
 
-            let old_preset = this.cohort_preset;
+            let mut comparison_changed = false;
             ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("Comparison:").strong());
-                ui.selectable_value(
-                    &mut this.cohort_preset,
-                    ComparisonPreset::HypVsTrueHc,
-                    "HYP vs True_HC",
-                );
-                ui.selectable_value(
-                    &mut this.cohort_preset,
-                    ComparisonPreset::HypMecfsVsMecfsOnly,
-                    "HYP+ME/CFS vs ME/CFS-only",
-                );
+                ui.label(egui::RichText::new("Comparison definition:").strong());
+                comparison_changed |= ui
+                    .selectable_value(
+                        &mut this.unified_comparison_mode,
+                        UnifiedComparisonMode::BuiltIn,
+                        "Built-in 4C presets",
+                    )
+                    .changed();
+                comparison_changed |= ui
+                    .selectable_value(
+                        &mut this.unified_comparison_mode,
+                        UnifiedComparisonMode::CustomMetadata,
+                        "Custom from metadata",
+                    )
+                    .changed();
             });
-            if old_preset != this.cohort_preset {
+
+            match this.unified_comparison_mode {
+                UnifiedComparisonMode::BuiltIn => {
+                    ui.horizontal_wrapped(|ui| {
+                        comparison_changed |= ui
+                            .selectable_value(
+                                &mut this.cohort_preset,
+                                ComparisonPreset::HypVsTrueHc,
+                                "HYP vs True_HC",
+                            )
+                            .changed();
+                        comparison_changed |= ui
+                            .selectable_value(
+                                &mut this.cohort_preset,
+                                ComparisonPreset::HypMecfsVsMecfsOnly,
+                                "HYP+ME/CFS vs ME/CFS-only",
+                            )
+                            .changed();
+                    });
+                }
+                UnifiedComparisonMode::CustomMetadata => {
+                    if let Some((metadata, _, _, _)) = active.as_ref() {
+                        let candidate_columns = metadata
+                            .columns
+                            .iter()
+                            .filter(|column| column.as_str() != metadata.id_column.as_str())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if this
+                            .custom_comparison_column
+                            .as_ref()
+                            .map_or(true, |column| !candidate_columns.contains(column))
+                        {
+                            this.custom_comparison_column = candidate_columns
+                                .iter()
+                                .find(|column| {
+                                    column.as_str() == "analysis_group"
+                                        && metadata_unique_values(metadata, column).len() >= 2
+                                })
+                                .cloned()
+                                .or_else(|| {
+                                    candidate_columns.iter().find(|column| {
+                                        let n = metadata_unique_values(metadata, column).len();
+                                        (2..=20).contains(&n)
+                                    }).cloned()
+                                });
+                            this.custom_case_values.clear();
+                            this.custom_control_values.clear();
+                        }
+
+                        let mut selected_column = this.custom_comparison_column.clone();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Grouping column:");
+                            egui::ComboBox::from_id_salt("unified_custom_comparison_column")
+                                .selected_text(selected_column.clone().unwrap_or_else(|| "(choose column)".to_string()))
+                                .show_ui(ui, |ui| {
+                                    for column in &candidate_columns {
+                                        ui.selectable_value(&mut selected_column, Some(column.clone()), column);
+                                    }
+                                });
+                        });
+                        if selected_column != this.custom_comparison_column {
+                            this.custom_comparison_column = selected_column;
+                            this.custom_case_values.clear();
+                            this.custom_control_values.clear();
+                            this.custom_comparison_name.clear();
+                            this.custom_case_label.clear();
+                            this.custom_control_label.clear();
+                            comparison_changed = true;
+                        }
+
+                        if let Some(column) = this.custom_comparison_column.clone() {
+                            let values = metadata_unique_values(metadata, &column);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Assign one or more metadata values to the case and control groups. Values not selected for either group are outside this comparison.",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                            egui::ScrollArea::vertical()
+                                .max_height(210.0)
+                                .show(ui, |ui| {
+                                    egui::Grid::new("unified_custom_comparison_values")
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            ui.label(egui::RichText::new("Value").strong());
+                                            ui.label(egui::RichText::new("n").strong());
+                                            ui.label(egui::RichText::new("Case").strong());
+                                            ui.label(egui::RichText::new("Control").strong());
+                                            ui.end_row();
+                                            for (value, count) in values.iter().take(100) {
+                                                ui.label(value);
+                                                ui.label(count.to_string());
+                                                let mut case = this.custom_case_values.contains(value);
+                                                let mut control = this.custom_control_values.contains(value);
+                                                if ui.checkbox(&mut case, "").changed() {
+                                                    comparison_changed = true;
+                                                    if case {
+                                                        this.custom_case_values.insert(value.clone());
+                                                        this.custom_control_values.remove(value);
+                                                    } else {
+                                                        this.custom_case_values.remove(value);
+                                                    }
+                                                }
+                                                if ui.checkbox(&mut control, "").changed() {
+                                                    comparison_changed = true;
+                                                    if control {
+                                                        this.custom_control_values.insert(value.clone());
+                                                        this.custom_case_values.remove(value);
+                                                    } else {
+                                                        this.custom_control_values.remove(value);
+                                                    }
+                                                }
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                            if values.len() > 100 {
+                                ui.label(egui::RichText::new("Only the first 100 distinct values are shown; choose a lower-cardinality categorical grouping field for a comparison.").small().weak());
+                            }
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Case label:");
+                                comparison_changed |= ui.text_edit_singleline(&mut this.custom_case_label).changed();
+                                ui.label("Control label:");
+                                comparison_changed |= ui.text_edit_singleline(&mut this.custom_control_label).changed();
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Comparison name (optional):");
+                                comparison_changed |= ui
+                                    .add_sized([420.0, 24.0], egui::TextEdit::singleline(&mut this.custom_comparison_name))
+                                    .changed();
+                            });
+                        }
+                    } else {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(225, 120, 110),
+                            "Load metadata before defining a custom comparison.",
+                        );
+                    }
+                }
+            }
+
+            if comparison_changed {
                 this.unified_results = None;
                 this.outlier_results = None;
                 this.outlier_excluded_ids.clear();
             }
             if let Some((metadata, _, _, _)) = active.as_ref() {
-                match build_comparison(metadata, this.cohort_preset) {
-                    Ok(comparison) => {
+                match this.build_active_comparison(metadata) {
+                    Ok((definition, comparison)) => {
+                        let source = match definition {
+                            CohortComparisonDefinition::Preset(_) => "built-in preset".to_string(),
+                            CohortComparisonDefinition::MetadataValues(spec) => {
+                                format!("metadata column '{}'", spec.column)
+                            }
+                        };
                         ui.label(format!(
-                            "Defined cohort: {} case / {} control metadata rows",
+                            "Defined cohort: {} case / {} control metadata rows ({source})",
                             comparison.case_metadata_rows, comparison.control_metadata_rows
                         ));
                     }
                     Err(error) => {
                         ui.colored_label(
                             egui::Color32::from_rgb(225, 120, 110),
-                            format!("Comparison cannot be built: {error:#}"),
+                            format!("Comparison cannot be built: {error}"),
                         );
                     }
                 }
@@ -3460,6 +4107,18 @@ impl MergeApp {
             });
 
             ui.add_space(6.0);
+            let active_metadata = if this.cohort_use_filtered_metadata {
+                this.focused_metadata.clone()
+            } else {
+                this.cohort_metadata.clone()
+            };
+            let mapping_group_column = match this.unified_comparison_mode {
+                UnifiedComparisonMode::CustomMetadata => this.custom_comparison_column.clone(),
+                UnifiedComparisonMode::BuiltIn => Some("Phenotype".to_string()),
+            };
+            let mapping_group_heading = mapping_group_column
+                .clone()
+                .unwrap_or_else(|| "Group field".to_string());
             let mapping_view_width = ui.available_width().max(320.0);
             ui.allocate_ui(egui::vec2(mapping_view_width, 470.0), |ui| {
                 egui::ScrollArea::both()
@@ -3474,7 +4133,7 @@ impl MergeApp {
                             .show(ui, |ui| {
                                 if range.start == 0 {
                                     for heading in [
-                                        "Sample", "Map", "Phenotype", "HYP", "Gene", "Tx", "BCR", "Iso",
+                                        "Sample", "Map", mapping_group_heading.as_str(), "HYP", "Gene", "Tx", "BCR", "Iso",
                                         "TCRα", "TCRβ", "Immune", "Notes",
                                     ] {
                                         ui.label(egui::RichText::new(heading).strong());
@@ -3490,7 +4149,12 @@ impl MergeApp {
                                         MappingStatus::Ambiguous => { ui.colored_label(egui::Color32::from_rgb(225, 120, 110), "ambiguous"); }
                                         MappingStatus::MetadataOnly => { ui.colored_label(egui::Color32::from_rgb(130, 165, 220), "metadata only"); }
                                     }
-                                    ui.label(&row.phenotype);
+                                    let group_value = row.metadata_row
+                                        .and_then(|metadata_row| active_metadata.as_ref().and_then(|metadata| {
+                                            mapping_group_column.as_deref().and_then(|column| metadata.value(metadata_row, column))
+                                        }))
+                                        .unwrap_or(row.phenotype.as_str());
+                                    ui.label(group_value);
                                     ui.label(&row.hyp);
                                     for modality in [
                                         CohortModality::GeneExpression,
@@ -5476,17 +6140,19 @@ impl MergeApp {
         let Some(meta) = metadata else {
             return HashMap::new();
         };
-        let Some(id_idx) = meta.column_index(&meta.id_column) else {
+        if meta.column_index(&meta.id_column).is_none() {
             return HashMap::new();
-        };
+        }
         let Some(value_idx) = meta.column_index(&self.corrected_ordination_color_by) else {
             return HashMap::new();
         };
         let mut tmp: HashMap<String, Vec<String>> = HashMap::new();
-        for row in &meta.rows {
-            let key = normalize_sample_id(row.get(id_idx).map(String::as_str).unwrap_or_default());
+        for (row_idx, row) in meta.rows.iter().enumerate() {
             let value = row.get(value_idx).map(|s| s.trim()).unwrap_or_default();
-            if !key.is_empty() && !value.is_empty() {
+            if value.is_empty() {
+                continue;
+            }
+            for key in row_matching_ids(meta, row_idx) {
                 tmp.entry(key).or_default().push(value.to_string());
             }
         }
@@ -7053,10 +7719,10 @@ impl MergeApp {
                 "Load metadata for the selected cohort definition first.".to_string();
             return;
         };
-        let comparison = match build_comparison(&metadata, self.cohort_preset) {
-            Ok(c) => c,
-            Err(e) => {
-                self.cohort_status = format!("Could not build comparison for outlier QC: {e:#}");
+        let (_, comparison) = match self.build_active_comparison(&metadata) {
+            Ok(value) => value,
+            Err(error) => {
+                self.cohort_status = format!("Could not build comparison for outlier QC: {error}");
                 return;
             }
         };
@@ -7127,13 +7793,14 @@ impl MergeApp {
                 "Load metadata for the selected cohort definition first.".to_string();
             return;
         };
-        let original_comparison = match build_comparison(&metadata, self.cohort_preset) {
-            Ok(comparison) => comparison,
-            Err(error) => {
-                self.cohort_status = format!("Could not build comparison: {error:#}");
-                return;
-            }
-        };
+        let (comparison_definition, original_comparison) =
+            match self.build_active_comparison(&metadata) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.cohort_status = format!("Could not build comparison: {error}");
+                    return;
+                }
+            };
 
         let mut comparison = original_comparison.clone();
         let mut qc_snapshot = None;
@@ -7241,7 +7908,7 @@ impl MergeApp {
             metadata_path,
             metadata_id_column: metadata.id_column.clone(),
             uses_filtered_metadata_subset: uses_subset,
-            comparison_preset: self.cohort_preset,
+            comparison_definition,
             comparison: comparison.clone(),
             mapping,
         };
@@ -8550,7 +9217,7 @@ impl MergeApp {
         let steps = [
             (
                 "1. Cohort & metadata",
-                "Load the project and primary metadata, or optionally use a collaborator-supplied filtered metadata table as the cohort definition for this run.",
+                "Load the project and primary metadata, or use Metadata Builder to create/curate the standardized sample table. A collaborator-supplied filtered table can still define an optional subset.",
             ),
             (
                 "2. Sample mapping & QC",
@@ -8558,7 +9225,7 @@ impl MergeApp {
             ),
             (
                 "3. Analysis settings",
-                "Choose modalities, repeated-measure handling, covariates, repertoire settings, pathways, and optional PBMC/confounding sensitivity diagnostics.",
+                "Choose a built-in or custom metadata-defined case/control comparison, modalities, repeated-measure handling, covariates, repertoire settings, pathways, and optional PBMC/confounding sensitivity diagnostics.",
             ),
             (
                 "4. Run analysis",
@@ -8603,6 +9270,9 @@ impl MergeApp {
             .show(ui, |ui| {
                 ui.label("Cohort Analysis now has one primary inferential workflow rather than several competing analysis modes.");
                 ui.add_space(6.0);
+                ui.label(egui::RichText::new("Metadata contract and custom comparisons").strong());
+                ui.label("The Metadata Builder can create a standardized one-row-per-sample TSV with canonical sample/subject IDs, cohort fields, covariates, batch/source provenance, and per-modality aliases. Cohort Analysis can use the historical 4C presets or construct Case and Control from values in any metadata column; the statistical engine is unchanged.");
+                ui.add_space(4.0);
                 ui.label(egui::RichText::new("Primary evidence: corrected / standard analysis").strong());
                 ui.label("The corrected methods remain the main statistical evidence for gene/transcript expression, BCR/TCR, BCR isotype, immune signatures, and pathways.");
                 ui.add_space(4.0);

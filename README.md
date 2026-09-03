@@ -4,6 +4,17 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.15.1 adds
+
+- Adds a dedicated **Metadata Builder** desktop tab for creating, curating, validating, and exporting a standardized one-row-per-sample multi-omics metadata TSV.
+- Defines a 37-field standard schema covering canonical sample/subject identity, a recommended `analysis_group`, disease/cohort labels, longitudinal collection fields, specimen/source provenance, common covariates, technical batches, QC-review notes, and optional per-modality sample-ID aliases.
+- Adds `templates/4C_multiomics_sample_metadata_template.tsv` plus `docs/sample_metadata_schema.md` as the repository-level metadata contract.
+- Adds **custom metadata comparisons** to the unified Cohort Analysis workflow. Select any metadata column, assign one or more values to Case and Control, optionally provide presentation labels/name, then run the exact same corrected/statistical engine used by the built-in comparisons.
+- Keeps the historical **HYP vs True_HC** and **HYP+ME/CFS vs ME/CFS-only** definitions as convenient built-in presets rather than hard-coded requirements.
+- Adds canonical sample alias resolution for `gene_expression_id`, `transcript_expression_id`, `bcr_id`, `bcr_isotype_id`, `tcr_alpha_id`, `tcr_beta_id`, and `immune_infiltrate_id`. Modality aliases map back to one canonical `sample_id`, so they do not inflate case/control sample counts.
+- Preserves custom/extra metadata columns and keeps them available for corrected-model covariates and ordination coloring.
+- Records the exact built-in or custom comparison definition in the frozen unified run/full report. Rows not assigned to either custom group are simply outside that comparison.
+
 ## What v0.15.0 adds
 
 - Replaces the user-facing Exploratory / Corrected / Focused / Diagnostics mode selector with **one coherent Cohort Analysis workflow**: cohort definition → sample mapping/QC → analysis settings → one **Run analysis** action → unified results/export.

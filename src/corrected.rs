@@ -20,6 +20,7 @@
 use crate::cohort::{
     CohortComparison, CohortModality, DetectedCohortFile, MetadataTable, normalize_sample_id,
 };
+use crate::metadata::row_matching_ids;
 use anyhow::{Context, Result, anyhow, bail};
 use calamine::{Data, Reader, Xlsx, open_workbook};
 use csv::ReaderBuilder;
@@ -318,14 +319,16 @@ fn build_design(
     sample_ids: &[String],
     spec: &CorrectedModelSpec,
 ) -> Result<DesignMatrix> {
-    let id_idx = metadata
-        .column_index(&metadata.id_column)
-        .ok_or_else(|| anyhow!("Metadata ID column '{}' is missing", metadata.id_column))?;
+    if metadata.column_index(&metadata.id_column).is_none() {
+        bail!("Metadata ID column '{}' is missing", metadata.id_column);
+    }
     let mut row_by_id: HashMap<String, Vec<usize>> = HashMap::new();
-    for (row_idx, row) in metadata.rows.iter().enumerate() {
-        let id = normalize_sample_id(row.get(id_idx).map(String::as_str).unwrap_or_default());
-        if !id.is_empty() {
-            row_by_id.entry(id).or_default().push(row_idx);
+    for row_idx in 0..metadata.rows.len() {
+        for id in row_matching_ids(metadata, row_idx) {
+            let entry = row_by_id.entry(id).or_default();
+            if !entry.contains(&row_idx) {
+                entry.push(row_idx);
+            }
         }
     }
 
@@ -342,8 +345,8 @@ fn build_design(
         if rows.len() != 1 {
             continue;
         }
-        let is_case = comparison.case_ids.contains(&key);
-        let is_control = comparison.control_ids.contains(&key);
+        let is_case = comparison.is_case_id(&key);
+        let is_control = comparison.is_control_id(&key);
         if !is_case && !is_control {
             continue;
         }
@@ -989,7 +992,7 @@ where
     for (idx, header) in headers.iter().enumerate().skip(2) {
         if let Some(sample) = header.strip_suffix(&suffix) {
             let key = normalize_sample_id(sample);
-            if comparison.case_ids.contains(&key) || comparison.control_ids.contains(&key) {
+            if comparison.is_case_id(&key) || comparison.is_control_id(&key) {
                 header_cols.entry(key).or_insert((sample.to_string(), idx));
             }
         }
@@ -1547,9 +1550,9 @@ where
     let mut parsed = Vec::new();
     let total = chosen.len();
     for (i, (key, file)) in chosen.iter().enumerate() {
-        let group = if comparison.case_ids.contains(key) {
+        let group = if comparison.is_case_id(key) {
             comparison.case_label.clone()
-        } else if comparison.control_ids.contains(key) {
+        } else if comparison.is_control_id(key) {
             comparison.control_label.clone()
         } else {
             continue;
@@ -1779,9 +1782,9 @@ where
     let mut maps = Vec::new();
     let total = chosen.len();
     for (i, (key, file)) in chosen.iter().enumerate() {
-        let group = if comparison.case_ids.contains(key) {
+        let group = if comparison.is_case_id(key) {
             comparison.case_label.clone()
-        } else if comparison.control_ids.contains(key) {
+        } else if comparison.is_control_id(key) {
             comparison.control_label.clone()
         } else {
             continue;
@@ -1870,9 +1873,9 @@ where
     let total = chosen.len();
     let mut maps = Vec::new();
     for (i, (key, file)) in chosen.iter().enumerate() {
-        let group = if comparison.case_ids.contains(key) {
+        let group = if comparison.is_case_id(key) {
             comparison.case_label.clone()
-        } else if comparison.control_ids.contains(key) {
+        } else if comparison.is_control_id(key) {
             comparison.control_label.clone()
         } else {
             continue;

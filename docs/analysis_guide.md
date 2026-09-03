@@ -24,6 +24,33 @@ Start by choosing the project folder and loading the primary sample metadata tab
 
 The app recursively detects the supported data types and merged expression matrices. Sample IDs are matched with the same punctuation-insensitive normalization used throughout the project, and the sample-ID metadata column can be selected explicitly.
 
+### Standard metadata and Metadata Builder
+
+The **Metadata Builder** top-level tab can create or curate a standard UTF-8 TSV before analysis. The standard table uses one row per biological sample and includes:
+
+- required canonical `sample_id`;
+- recommended `subject_id` for repeated samples;
+- recommended `analysis_group` as a general-purpose custom comparison field;
+- cohort/diagnosis/phenotype and longitudinal fields;
+- sample source/tissue/specimen provenance;
+- demographic/family/site fields that may be relevant covariates;
+- collection/processing/library/sequencing batch fields;
+- optional modality-specific sample aliases;
+- curator QC/provenance notes.
+
+The builder can start from the samples discovered in the current cohort scan, add missing standard fields to an older metadata table without deleting extra columns, validate normalized sample-ID uniqueness, and save the result directly into Cohort Analysis. See `docs/sample_metadata_schema.md` and `templates/4C_multiomics_sample_metadata_template.tsv`.
+
+If an upstream modality uses a different identifier from the canonical sample ID, populate its alias column (for example `gene_expression_id` or `bcr_id`). The alias resolves back to the canonical biological sample and therefore does not create an extra observation.
+
+### Comparison definition
+
+The unified workflow no longer requires one of the two historical 4C comparisons. Under **Analysis settings → Comparison definition**, choose either:
+
+- **Built-in 4C presets** — `HYP vs True_HC` or `HYP+ME/CFS vs ME/CFS-only`; or
+- **Custom from metadata** — choose any metadata column and assign one or more distinct values to Case and Control.
+
+For example, `analysis_group` could compare `Disease` against `Healthy`, `treatment` could compare `Drug` against `Placebo`, or `timepoint` could compare `Post` against `Baseline`. Metadata rows assigned to neither side are outside that particular comparison. This selection only defines the samples/groups; the corrected/standard statistical methodology is unchanged.
+
 ### Optional filtered metadata subset
 
 A collaborator may provide a smaller metadata table, for example a curated one-sample-per-person subset. In the unified workflow this is treated as a **cohort definition**:

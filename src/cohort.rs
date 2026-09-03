@@ -1,3 +1,4 @@
+use crate::metadata::{canonical_sample_id, row_matching_ids};
 use anyhow::{Context, Result, anyhow, bail};
 use calamine::{Data, Reader, Xlsx, open_workbook};
 use csv::ReaderBuilder;
@@ -146,15 +147,78 @@ impl ComparisonPreset {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataComparisonSpec {
+    pub column: String,
+    pub case_values: BTreeSet<String>,
+    pub control_values: BTreeSet<String>,
+    pub name: String,
+    pub case_label: String,
+    pub control_label: String,
+}
+
+impl MetadataComparisonSpec {
+    pub fn display_name(&self) -> String {
+        if self.name.trim().is_empty() {
+            format!(
+                "{} vs {} ({})",
+                self.case_label, self.control_label, self.column
+            )
+        } else {
+            self.name.trim().to_string()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CohortComparisonDefinition {
+    Preset(ComparisonPreset),
+    MetadataValues(MetadataComparisonSpec),
+}
+
+impl CohortComparisonDefinition {
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Preset(preset) => preset.display_name().to_string(),
+            Self::MetadataValues(spec) => spec.display_name(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CohortComparison {
     pub name: String,
     pub case_label: String,
     pub control_label: String,
+    /// Canonical normalized sample IDs, one per metadata row.
     pub case_ids: HashSet<String>,
+    /// Canonical normalized sample IDs, one per metadata row.
     pub control_ids: HashSet<String>,
+    /// Optional normalized alias -> canonical sample ID mapping. This lets a
+    /// modality-specific file ID resolve to the biological sample without
+    /// inflating case/control sample counts.
+    pub id_to_canonical: HashMap<String, String>,
     pub case_metadata_rows: usize,
     pub control_metadata_rows: usize,
+}
+
+impl CohortComparison {
+    pub fn canonical_id(&self, sample_id: &str) -> String {
+        let key = normalize_sample_id(sample_id);
+        self.id_to_canonical.get(&key).cloned().unwrap_or(key)
+    }
+
+    pub fn is_case_id(&self, sample_id: &str) -> bool {
+        self.case_ids.contains(&self.canonical_id(sample_id))
+    }
+
+    pub fn is_control_id(&self, sample_id: &str) -> bool {
+        self.control_ids.contains(&self.canonical_id(sample_id))
+    }
+
+    pub fn contains_id(&self, sample_id: &str) -> bool {
+        self.is_case_id(sample_id) || self.is_control_id(sample_id)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -399,7 +463,7 @@ pub fn load_metadata(path: &Path) -> Result<MetadataTable> {
     if columns.is_empty() {
         bail!("Metadata file has no header row");
     }
-    let id_column = ["4C_ID", "sample_id", "Sample_ID", "Sample", "sample"]
+    let id_column = ["sample_id", "4C_ID", "Sample_ID", "Sample", "sample"]
         .iter()
         .find(|candidate| columns.iter().any(|col| col == **candidate))
         .map(|x| (*x).to_string())
@@ -458,21 +522,31 @@ fn read_metadata_delimited(path: &Path, delimiter: u8) -> Result<(Vec<String>, V
 }
 
 pub fn build_mapping(scan: &ProjectScan, metadata: &MetadataTable) -> CohortMapping {
-    let id_col = metadata.column_index(&metadata.id_column).unwrap_or(0);
     let mut meta_index: HashMap<String, Vec<usize>> = HashMap::new();
-    for (row_idx, row) in metadata.rows.iter().enumerate() {
-        let key = normalize_sample_id(row.get(id_col).map(String::as_str).unwrap_or_default());
-        if !key.is_empty() {
-            meta_index.entry(key).or_default().push(row_idx);
+    for row_idx in 0..metadata.rows.len() {
+        for key in row_matching_ids(metadata, row_idx) {
+            let entry = meta_index.entry(key).or_default();
+            if !entry.contains(&row_idx) {
+                entry.push(row_idx);
+            }
         }
     }
 
     let mut grouped: BTreeMap<String, (String, BTreeMap<CohortModality, usize>)> = BTreeMap::new();
     for file in &scan.files {
-        let key = normalize_sample_id(&file.sample_id);
+        let raw_key = normalize_sample_id(&file.sample_id);
+        let resolved = meta_index
+            .get(&raw_key)
+            .filter(|rows| rows.len() == 1)
+            .and_then(|rows| canonical_sample_id(metadata, rows[0]))
+            .filter(|id| !normalize_sample_id(id).is_empty());
+        let key = resolved
+            .map(normalize_sample_id)
+            .unwrap_or_else(|| raw_key.clone());
+        let display_id = resolved.unwrap_or(file.sample_id.as_str()).to_string();
         let entry = grouped
             .entry(key)
-            .or_insert_with(|| (file.sample_id.clone(), BTreeMap::new()));
+            .or_insert_with(|| (display_id, BTreeMap::new()));
         *entry.1.entry(file.modality).or_insert(0) += 1;
     }
 
@@ -517,17 +591,17 @@ pub fn build_mapping(scan: &ProjectScan, metadata: &MetadataTable) -> CohortMapp
         .map(|row| normalize_sample_id(&row.sample_id))
         .collect();
     let mut metadata_only_samples = 0usize;
-    for (key, matches) in &meta_index {
-        if file_keys.contains(key) || matches.len() != 1 {
+    for row_idx in 0..metadata.rows.len() {
+        let aliases = row_matching_ids(metadata, row_idx);
+        if aliases.iter().any(|key| file_keys.contains(key)) {
             continue;
         }
-        let row_idx = matches[0];
-        let sample_id = metadata
-            .rows
-            .get(row_idx)
-            .and_then(|row| row.get(id_col))
-            .cloned()
-            .unwrap_or_default();
+        let sample_id = canonical_sample_id(metadata, row_idx)
+            .unwrap_or_default()
+            .to_string();
+        if normalize_sample_id(&sample_id).is_empty() {
+            continue;
+        }
         let phenotype = metadata
             .value(row_idx, "Phenotype")
             .unwrap_or_default()
@@ -561,17 +635,138 @@ pub fn build_comparison(
     metadata: &MetadataTable,
     preset: ComparisonPreset,
 ) -> Result<CohortComparison> {
-    let id_col = metadata
-        .column_index(&metadata.id_column)
-        .ok_or_else(|| anyhow!("Metadata ID column '{}' is missing", metadata.id_column))?;
     let phenotype_col = metadata.column_index("Phenotype").ok_or_else(|| {
         anyhow!("Metadata must contain a Phenotype column for the built-in comparisons")
     })?;
     let hyp_col = metadata.column_index("HYP");
 
+    build_comparison_from_rows(
+        metadata,
+        preset.display_name(),
+        match preset {
+            ComparisonPreset::HypVsTrueHc => "HYP",
+            ComparisonPreset::HypMecfsVsMecfsOnly => "HYP+ME/CFS",
+        },
+        match preset {
+            ComparisonPreset::HypVsTrueHc => "True_HC",
+            ComparisonPreset::HypMecfsVsMecfsOnly => "ME/CFS-only",
+        },
+        |row| {
+            let phenotype = row
+                .get(phenotype_col)
+                .map(String::as_str)
+                .unwrap_or_default()
+                .trim();
+            let hyp = hyp_col
+                .and_then(|idx| row.get(idx))
+                .map(String::as_str)
+                .unwrap_or_default();
+            match preset {
+                ComparisonPreset::HypVsTrueHc => {
+                    (is_yes(hyp), phenotype.eq_ignore_ascii_case("True_HC"))
+                }
+                ComparisonPreset::HypMecfsVsMecfsOnly => (
+                    phenotype.eq_ignore_ascii_case("HYP+ME/CFS"),
+                    phenotype.eq_ignore_ascii_case("ME/CFS") && !is_yes(hyp),
+                ),
+            }
+        },
+    )
+}
+
+pub fn build_custom_comparison(
+    metadata: &MetadataTable,
+    spec: &MetadataComparisonSpec,
+) -> Result<CohortComparison> {
+    if spec.case_values.is_empty() || spec.control_values.is_empty() {
+        bail!("Select at least one case value and one control value for the custom comparison");
+    }
+    let overlapping = spec
+        .case_values
+        .iter()
+        .filter(|case| {
+            spec.control_values
+                .iter()
+                .any(|control| control.eq_ignore_ascii_case(case))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !overlapping.is_empty() {
+        bail!(
+            "Custom case/control values overlap: {}",
+            overlapping.join(", ")
+        );
+    }
+    let column_idx = metadata
+        .column_index(&spec.column)
+        .ok_or_else(|| anyhow!("Metadata comparison column '{}' is missing", spec.column))?;
+    let case_label = if spec.case_label.trim().is_empty() {
+        spec.case_values
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" + ")
+    } else {
+        spec.case_label.trim().to_string()
+    };
+    let control_label = if spec.control_label.trim().is_empty() {
+        spec.control_values
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" + ")
+    } else {
+        spec.control_label.trim().to_string()
+    };
+    let name = if spec.name.trim().is_empty() {
+        format!("{case_label} vs {control_label}")
+    } else {
+        spec.name.trim().to_string()
+    };
+    build_comparison_from_rows(metadata, &name, &case_label, &control_label, |row| {
+        let value = row
+            .get(column_idx)
+            .map(String::as_str)
+            .unwrap_or_default()
+            .trim();
+        let is_case = spec
+            .case_values
+            .iter()
+            .any(|x| x.eq_ignore_ascii_case(value));
+        let is_control = spec
+            .control_values
+            .iter()
+            .any(|x| x.eq_ignore_ascii_case(value));
+        (is_case, is_control)
+    })
+}
+
+pub fn build_comparison_definition(
+    metadata: &MetadataTable,
+    definition: &CohortComparisonDefinition,
+) -> Result<CohortComparison> {
+    match definition {
+        CohortComparisonDefinition::Preset(preset) => build_comparison(metadata, *preset),
+        CohortComparisonDefinition::MetadataValues(spec) => build_custom_comparison(metadata, spec),
+    }
+}
+
+fn build_comparison_from_rows<F>(
+    metadata: &MetadataTable,
+    name: &str,
+    case_label: &str,
+    control_label: &str,
+    mut classify: F,
+) -> Result<CohortComparison>
+where
+    F: FnMut(&Vec<String>) -> (bool, bool),
+{
+    if metadata.column_index(&metadata.id_column).is_none() {
+        bail!("Metadata ID column '{}' is missing", metadata.id_column);
+    }
     let mut id_counts: HashMap<String, usize> = HashMap::new();
-    for row in &metadata.rows {
-        let id = normalize_sample_id(row.get(id_col).map(String::as_str).unwrap_or_default());
+    for row_idx in 0..metadata.rows.len() {
+        let id = normalize_sample_id(canonical_sample_id(metadata, row_idx).unwrap_or_default());
         if !id.is_empty() {
             *id_counts.entry(id).or_insert(0) += 1;
         }
@@ -579,60 +774,62 @@ pub fn build_comparison(
 
     let mut case_ids = HashSet::new();
     let mut control_ids = HashSet::new();
+    let mut id_to_canonical = HashMap::new();
     let mut case_rows = 0usize;
     let mut control_rows = 0usize;
-
-    for row in &metadata.rows {
-        let id = normalize_sample_id(row.get(id_col).map(String::as_str).unwrap_or_default());
+    for (row_idx, row) in metadata.rows.iter().enumerate() {
+        let id = normalize_sample_id(canonical_sample_id(metadata, row_idx).unwrap_or_default());
         if id.is_empty() || id_counts.get(&id).copied().unwrap_or(0) != 1 {
             continue;
         }
-        let phenotype = row
-            .get(phenotype_col)
-            .map(String::as_str)
-            .unwrap_or_default()
-            .trim();
-        let hyp = hyp_col
-            .and_then(|idx| row.get(idx))
-            .map(String::as_str)
-            .unwrap_or_default();
-
-        let (is_case, is_control) = match preset {
-            ComparisonPreset::HypVsTrueHc => {
-                (is_yes(hyp), phenotype.eq_ignore_ascii_case("True_HC"))
-            }
-            ComparisonPreset::HypMecfsVsMecfsOnly => (
-                phenotype.eq_ignore_ascii_case("HYP+ME/CFS"),
-                phenotype.eq_ignore_ascii_case("ME/CFS") && !is_yes(hyp),
-            ),
+        let (is_case, is_control) = classify(row);
+        if is_case == is_control {
+            continue;
+        }
+        let target = if is_case {
+            &mut case_ids
+        } else {
+            &mut control_ids
         };
-        if is_case && !is_control {
-            case_ids.insert(id);
+        target.insert(id.clone());
+        id_to_canonical.insert(id.clone(), id.clone());
+        for alias in row_matching_ids(metadata, row_idx) {
+            if let Some(previous) = id_to_canonical.insert(alias.clone(), id.clone()) {
+                if previous != id {
+                    bail!(
+                        "Metadata alias '{alias}' maps to more than one canonical sample ('{previous}' and '{id}')"
+                    );
+                }
+            }
+        }
+        if is_case {
             case_rows += 1;
-        } else if is_control && !is_case {
-            control_ids.insert(id);
+        } else {
             control_rows += 1;
         }
     }
-
-    let (case_label, control_label) = match preset {
-        ComparisonPreset::HypVsTrueHc => ("HYP", "True_HC"),
-        ComparisonPreset::HypMecfsVsMecfsOnly => ("HYP+ME/CFS", "ME/CFS-only"),
-    };
-    if case_ids.is_empty() || control_ids.is_empty() {
+    let overlap = case_ids
+        .intersection(&control_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !overlap.is_empty() {
         bail!(
-            "Comparison '{}' produced {} case and {} control metadata rows",
-            preset.display_name(),
-            case_rows,
-            control_rows
+            "Comparison '{name}' has canonical sample identifiers assigned to both groups: {}",
+            overlap.join(", ")
+        );
+    }
+    if case_rows == 0 || control_rows == 0 {
+        bail!(
+            "Comparison '{name}' produced {case_rows} case and {control_rows} control metadata rows"
         );
     }
     Ok(CohortComparison {
-        name: preset.display_name().to_string(),
+        name: name.to_string(),
         case_label: case_label.to_string(),
         control_label: control_label.to_string(),
         case_ids,
         control_ids,
+        id_to_canonical,
         case_metadata_rows: case_rows,
         control_metadata_rows: control_rows,
     })
@@ -660,9 +857,9 @@ where
     for (idx, header) in headers.iter().enumerate().skip(2) {
         if let Some(sample) = header.strip_suffix(&metric_suffix) {
             let key = normalize_sample_id(sample);
-            if comparison.case_ids.contains(&key) {
+            if comparison.is_case_id(&key) {
                 case_cols.push(idx);
-            } else if comparison.control_ids.contains(&key) {
+            } else if comparison.is_control_id(&key) {
                 ctrl_cols.push(idx);
             } else {
                 unmatched_columns += 1;
@@ -795,9 +992,9 @@ where
 
     for (i, file) in bcr_files.iter().enumerate() {
         let key = normalize_sample_id(&file.sample_id);
-        let group = if comparison.case_ids.contains(&key) {
+        let group = if comparison.is_case_id(&key) {
             comparison.case_label.clone()
-        } else if comparison.control_ids.contains(&key) {
+        } else if comparison.is_control_id(&key) {
             comparison.control_label.clone()
         } else {
             skipped_not_in_groups += 1;
@@ -897,9 +1094,9 @@ where
     let mut maps = Vec::new();
     for (i, file) in iso_files.iter().enumerate() {
         let key = normalize_sample_id(&file.sample_id);
-        let group = if comparison.case_ids.contains(&key) {
+        let group = if comparison.is_case_id(&key) {
             comparison.case_label.clone()
-        } else if comparison.control_ids.contains(&key) {
+        } else if comparison.is_control_id(&key) {
             comparison.control_label.clone()
         } else {
             skipped_not_in_groups += 1;
@@ -983,9 +1180,9 @@ where
 
     for (i, file) in selected.iter().enumerate() {
         let key = normalize_sample_id(&file.sample_id);
-        let group = if comparison.case_ids.contains(&key) {
+        let group = if comparison.is_case_id(&key) {
             comparison.case_label.clone()
-        } else if comparison.control_ids.contains(&key) {
+        } else if comparison.is_control_id(&key) {
             comparison.control_label.clone()
         } else {
             skipped_not_in_groups += 1;
@@ -1077,9 +1274,9 @@ where
 
     for (i, file) in selected.iter().enumerate() {
         let key = normalize_sample_id(&file.sample_id);
-        let group = if comparison.case_ids.contains(&key) {
+        let group = if comparison.is_case_id(&key) {
             comparison.case_label.clone()
-        } else if comparison.control_ids.contains(&key) {
+        } else if comparison.is_control_id(&key) {
             comparison.control_label.clone()
         } else {
             skipped_not_in_groups += 1;
@@ -2126,6 +2323,83 @@ mod tests {
             build_comparison(&metadata, ComparisonPreset::HypMecfsVsMecfsOnly).unwrap();
         assert_eq!(specificity.case_ids.len(), 1);
         assert_eq!(specificity.control_ids.len(), 1);
+    }
+
+    #[test]
+    fn mapping_collapses_modality_aliases_to_canonical_sample() {
+        let metadata = MetadataTable {
+            path: PathBuf::from("metadata.tsv"),
+            columns: vec![
+                "sample_id".to_string(),
+                "gene_expression_id".to_string(),
+                "bcr_id".to_string(),
+            ],
+            rows: vec![vec!["S1".into(), "RNA_A".into(), "BCR_A".into()]],
+            id_column: "sample_id".to_string(),
+        };
+        let scan = ProjectScan {
+            root: PathBuf::from("."),
+            files: vec![
+                DetectedCohortFile {
+                    path: PathBuf::from("RNA_A.xlsx"),
+                    modality: CohortModality::GeneExpression,
+                    sample_id: "RNA_A".to_string(),
+                },
+                DetectedCohortFile {
+                    path: PathBuf::from("BCR_A.xlsx"),
+                    modality: CohortModality::Bcr,
+                    sample_id: "BCR_A".to_string(),
+                },
+            ],
+            merged_gene_tsv: None,
+            merged_transcript_tsv: None,
+            metadata_candidates: Vec::new(),
+        };
+
+        let mapping = build_mapping(&scan, &metadata);
+        assert_eq!(mapping.rows.len(), 1);
+        assert_eq!(mapping.rows[0].sample_id, "S1");
+        assert_eq!(mapping.matched_files, 2);
+        assert_eq!(mapping.metadata_only_samples, 0);
+        assert_eq!(
+            mapping.rows[0].counts.get(&CohortModality::GeneExpression),
+            Some(&1)
+        );
+        assert_eq!(mapping.rows[0].counts.get(&CohortModality::Bcr), Some(&1));
+    }
+
+    #[test]
+    fn builds_custom_metadata_comparison_and_resolves_modality_aliases() {
+        let metadata = MetadataTable {
+            path: PathBuf::from("metadata.tsv"),
+            columns: vec![
+                "sample_id".to_string(),
+                "analysis_group".to_string(),
+                "gene_expression_id".to_string(),
+            ],
+            rows: vec![
+                vec!["S1".into(), "Case".into(), "RNA_A".into()],
+                vec!["S2".into(), "Case".into(), "RNA_B".into()],
+                vec!["S3".into(), "Control".into(), "RNA_C".into()],
+                vec!["S4".into(), "Other".into(), "RNA_D".into()],
+            ],
+            id_column: "sample_id".to_string(),
+        };
+        let spec = MetadataComparisonSpec {
+            column: "analysis_group".to_string(),
+            case_values: ["Case".to_string()].into_iter().collect(),
+            control_values: ["Control".to_string()].into_iter().collect(),
+            name: "Custom case vs control".to_string(),
+            case_label: "Cases".to_string(),
+            control_label: "Controls".to_string(),
+        };
+        let comparison = build_custom_comparison(&metadata, &spec).unwrap();
+        assert_eq!(comparison.case_ids.len(), 2);
+        assert_eq!(comparison.control_ids.len(), 1);
+        assert!(comparison.is_case_id("RNA_A"));
+        assert!(comparison.is_control_id("RNA_C"));
+        assert!(!comparison.contains_id("RNA_D"));
+        assert_eq!(comparison.canonical_id("RNA_B"), "S2");
     }
 
     #[test]

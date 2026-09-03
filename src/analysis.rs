@@ -5,7 +5,9 @@
 //! candidate-prioritization output produced by one completed Cohort Analysis
 //! run so every presentation/export can describe the exact same analysis.
 
-use crate::cohort::{CohortComparison, CohortMapping, ComparisonPreset, GeneComparisonResult};
+use crate::cohort::{
+    CohortComparison, CohortComparisonDefinition, CohortMapping, GeneComparisonResult,
+};
 use crate::corrected::{
     CorrectedExpressionResult, CorrectedImmuneResult, CorrectedIsotypeResult, CorrectedModelSpec,
     CorrectedPathwayResult, CorrectedRepertoireResult,
@@ -46,7 +48,7 @@ pub struct CohortDefinitionSnapshot {
     pub metadata_path: PathBuf,
     pub metadata_id_column: String,
     pub uses_filtered_metadata_subset: bool,
-    pub comparison_preset: ComparisonPreset,
+    pub comparison_definition: CohortComparisonDefinition,
     pub comparison: CohortComparison,
     pub mapping: CohortMapping,
 }
@@ -771,9 +773,29 @@ pub fn write_unified_analysis_tables(
         write_pbmc_diagnostics_tables(&outdir.join("pbmc_confounding_diagnostics"), diagnostics)?;
     }
 
+    let comparison_definition = match &run.cohort.comparison_definition {
+        CohortComparisonDefinition::Preset(preset) => {
+            format!("Built-in preset: {}", preset.display_name())
+        }
+        CohortComparisonDefinition::MetadataValues(spec) => format!(
+            "Custom metadata column '{}' | case values: {} | control values: {}",
+            spec.column,
+            spec.case_values
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            spec.control_values
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
     let mut summary = format!(
-        "4C Cohort Explorer unified analysis\nComparison: {}\nCase: {}\nControl: {}\nMetadata: {}\nFiltered metadata subset: {}\nSubject column: {}\nCovariates: {}\n",
+        "4C Cohort Explorer unified analysis\nComparison: {}\nComparison definition: {}\nCase: {}\nControl: {}\nMetadata: {}\nFiltered metadata subset: {}\nSubject column: {}\nCovariates: {}\n",
         run.primary.comparison.name,
+        comparison_definition,
         run.primary.comparison.case_label,
         run.primary.comparison.control_label,
         run.cohort.metadata_path.display(),

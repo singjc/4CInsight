@@ -140,11 +140,22 @@ pub fn build_outlier_filter_snapshot(
     filtered: &CohortComparison,
     applied_to_analysis: bool,
 ) -> OutlierFilterSnapshot {
-    let allowed_ids = original
-        .case_ids
+    let mut audit_subset = audit.clone();
+    audit_subset
+        .samples
+        .retain(|row| original.contains_id(&row.sample_id));
+    audit_subset
+        .consensus_ids
+        .retain(|id| original.contains_id(id));
+    for modality in &mut audit_subset.modalities {
+        modality
+            .points
+            .retain(|point| original.contains_id(&point.sample_id));
+    }
+
+    let reviewed_canonical = reviewed_exclusions
         .iter()
-        .chain(original.control_ids.iter())
-        .cloned()
+        .map(|id| original.canonical_id(id))
         .collect::<HashSet<_>>();
     let filtered_ids = filtered
         .case_ids
@@ -152,24 +163,12 @@ pub fn build_outlier_filter_snapshot(
         .chain(filtered.control_ids.iter())
         .cloned()
         .collect::<HashSet<_>>();
-    let mut audit_subset = audit.clone();
-    audit_subset
-        .samples
-        .retain(|row| allowed_ids.contains(&row.sample_id));
-    audit_subset
-        .consensus_ids
-        .retain(|id| allowed_ids.contains(id));
-    for modality in &mut audit_subset.modalities {
-        modality
-            .points
-            .retain(|point| allowed_ids.contains(&normalize_sample_id(&point.sample_id)));
-    }
-    let mut excluded_ids = original
-        .case_ids
-        .iter()
-        .chain(original.control_ids.iter())
-        .filter(|id| reviewed_exclusions.contains(*id) && !filtered_ids.contains(*id))
-        .cloned()
+    let mut excluded_ids = reviewed_canonical
+        .into_iter()
+        .filter(|id| {
+            (original.case_ids.contains(id) || original.control_ids.contains(id))
+                && !filtered_ids.contains(id)
+        })
         .collect::<Vec<_>>();
     excluded_ids.sort();
     excluded_ids.dedup();
@@ -466,10 +465,16 @@ pub fn filter_comparison_excluding(
     if excluded_ids.is_empty() {
         return comparison.clone();
     }
+    let canonical_excluded = excluded_ids
+        .iter()
+        .map(|id| comparison.canonical_id(id))
+        .collect::<HashSet<_>>();
     let mut case_ids = comparison.case_ids.clone();
     let mut control_ids = comparison.control_ids.clone();
-    case_ids.retain(|id| !excluded_ids.contains(id));
-    control_ids.retain(|id| !excluded_ids.contains(id));
+    case_ids.retain(|id| !canonical_excluded.contains(id));
+    control_ids.retain(|id| !canonical_excluded.contains(id));
+    let mut id_to_canonical = comparison.id_to_canonical.clone();
+    id_to_canonical.retain(|_, canonical| !canonical_excluded.contains(canonical));
     CohortComparison {
         name: format!("{} — outlier-filtered", comparison.name),
         case_label: comparison.case_label.clone(),
@@ -478,6 +483,7 @@ pub fn filter_comparison_excluding(
         control_metadata_rows: control_ids.len(),
         case_ids,
         control_ids,
+        id_to_canonical,
     }
 }
 
@@ -540,10 +546,18 @@ where
     if modalities.is_empty() {
         bail!("No selected modality could produce an outlier representation");
     }
+    // Canonicalize modality-specific aliases before cross-modal consensus so
+    // one biological sample is counted once even when upstream assays use
+    // different IDs.
+    for modality in &mut modalities {
+        for point in &mut modality.points {
+            point.sample_id = comparison.canonical_id(&point.sample_id);
+        }
+    }
     let mut by_sample: BTreeMap<String, (String, usize, Vec<String>)> = BTreeMap::new();
     for modality in &modalities {
         for point in &modality.points {
-            let key = normalize_sample_id(&point.sample_id);
+            let key = comparison.canonical_id(&point.sample_id);
             let entry = by_sample
                 .entry(key)
                 .or_insert((point.group.clone(), 0, Vec::new()));
@@ -608,9 +622,9 @@ fn consensus_flag(flagged: usize, available: usize, config: &OutlierConfig) -> b
 
 fn group_for_sample(sample: &str, comparison: &CohortComparison) -> Option<String> {
     let key = normalize_sample_id(sample);
-    if comparison.case_ids.contains(&key) {
+    if comparison.is_case_id(&key) {
         Some(comparison.case_label.clone())
-    } else if comparison.control_ids.contains(&key) {
+    } else if comparison.is_control_id(&key) {
         Some(comparison.control_label.clone())
     } else {
         None
@@ -1188,6 +1202,33 @@ mod tests {
     }
 
     #[test]
+    fn alias_exclusion_removes_the_canonical_sample() {
+        let original = CohortComparison {
+            name: "Case vs Control".to_string(),
+            case_label: "Case".to_string(),
+            control_label: "Control".to_string(),
+            case_ids: ["S1".to_string(), "S2".to_string()].into_iter().collect(),
+            control_ids: ["S3".to_string(), "S4".to_string()].into_iter().collect(),
+            id_to_canonical: [
+                ("S1".to_string(), "S1".to_string()),
+                ("RNA1".to_string(), "S1".to_string()),
+                ("S2".to_string(), "S2".to_string()),
+                ("S3".to_string(), "S3".to_string()),
+                ("S4".to_string(), "S4".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            case_metadata_rows: 2,
+            control_metadata_rows: 2,
+        };
+        let reviewed = ["RNA1".to_string()].into_iter().collect::<HashSet<_>>();
+        let filtered = filter_comparison_excluding(&original, &reviewed);
+        assert!(!filtered.case_ids.contains("S1"));
+        assert_eq!(filtered.case_ids.len(), 1);
+        assert!(!filtered.is_case_id("RNA1"));
+    }
+
+    #[test]
     fn filter_snapshot_records_exact_reviewed_exclusions() {
         let case_ids = ["A".to_string(), "B".to_string()].into_iter().collect();
         let control_ids = ["C".to_string(), "D".to_string()].into_iter().collect();
@@ -1197,6 +1238,7 @@ mod tests {
             control_label: "Control".to_string(),
             case_ids,
             control_ids,
+            id_to_canonical: HashMap::new(),
             case_metadata_rows: 2,
             control_metadata_rows: 2,
         };

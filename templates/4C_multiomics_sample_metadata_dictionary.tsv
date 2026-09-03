@@ -1,0 +1,38 @@
+column	requirement	section	description
+sample_id	required	Identity	Canonical unique sample identifier used across the project.
+subject_id	recommended	Identity	Participant/patient identifier for repeated-measure and subject-clustered analyses.
+analysis_group	recommended	Cohort	Preferred standardized categorical grouping field for custom comparisons.
+cohort	optional	Cohort	Study cohort or recruitment stratum.
+diagnosis	optional	Cohort	Primary diagnosis or disease label.
+disease_subtype	optional	Cohort	Optional disease subtype / phenotype subclassification.
+Phenotype	legacy compatibility	Cohort	Legacy 4C phenotype field retained for the built-in HYP comparisons.
+HYP	legacy compatibility	Cohort	Legacy 4C yes/no HYP field retained for the built-in HYP comparisons.
+timepoint	recommended	Collection	Longitudinal timepoint or visit label.
+collection_date	optional	Collection	Collection date, preferably ISO YYYY-MM-DD.
+sample_source	recommended	Specimen	Source material, e.g. PBMC, whole blood, tumor tissue.
+tissue	optional	Specimen	Tissue/anatomical source when relevant.
+specimen_type	optional	Specimen	Specimen preparation/type, e.g. cryopreserved PBMC, plasma.
+sex	optional	Covariates	Sex/gender field if appropriate for the scientific analysis.
+age_years	optional	Covariates	Age at collection in years.
+family_id	optional	Covariates	Family/household identifier when relatedness may matter.
+site	optional	Provenance	Collection/recruitment site.
+study_id	optional	Provenance	Study/project identifier for combined cohorts.
+collection_batch	optional	Batch	Collection wave/batch.
+processing_batch	recommended	Batch	Sample-processing/extraction batch.
+library_batch	optional	Batch	Library-preparation batch.
+sequencing_batch	optional	Batch	Sequencing/run batch.
+plate	optional	Batch	Plate identifier.
+well	optional	Batch	Plate well.
+technical_replicate	optional	Batch	Technical replicate identifier/number.
+gene_expression_id	optional	Modality mapping	Alias used by gene-expression files/merged columns when different from sample_id.
+transcript_expression_id	optional	Modality mapping	Alias used by transcript-expression files/merged columns when different from sample_id.
+bcr_id	optional	Modality mapping	Alias used by BCR files when different from sample_id.
+bcr_isotype_id	optional	Modality mapping	Alias used by BCR-isotype files when different from sample_id.
+tcr_alpha_id	optional	Modality mapping	Alias used by TCR-alpha files when different from sample_id.
+tcr_beta_id	optional	Modality mapping	Alias used by TCR-beta files when different from sample_id.
+immune_infiltrate_id	optional	Modality mapping	Alias used by immune-infiltrate files when different from sample_id.
+analysis_include	optional	Review	Curator eligibility note (yes/no). It is not a substitute for frozen per-run QC review.
+known_wrong_source	optional	Review	Curator flag for a known wrong tissue/source sample (yes/no).
+qc_review_status	optional	Review	Curator status such as include, review, or exclude.
+qc_exclusion_reason	optional	Review	Human-readable curator reason; run-specific automatic/manual QC remains frozen separately.
+notes	optional	Review	Free-text provenance or curation notes.
