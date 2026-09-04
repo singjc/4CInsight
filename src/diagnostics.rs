@@ -13,7 +13,7 @@ use crate::corrected::{
     parse_immune_file, run_corrected_expression, write_adjusted_tests, write_ordination,
 };
 use crate::metadata::row_matching_ids;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
