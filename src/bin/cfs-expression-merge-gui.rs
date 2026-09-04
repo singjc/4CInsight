@@ -3,7 +3,11 @@ use cfs_expression_merger::analysis::{
     CorrectedAnalysisBundle, UnifiedCohortAnalysisRun, run_unified_cohort_analysis,
     write_unified_analysis_tables,
 };
-use cfs_expression_merger::analysis_docs::analysis_doc_sections;
+use cfs_expression_merger::analysis_docs::{
+    AnalysisDocToyChart, AnalysisDocToyExample, analysis_doc_example_matches,
+    analysis_doc_section_header_matches, analysis_doc_section_matches, analysis_doc_sections,
+    analysis_doc_subsection_matches,
+};
 use cfs_expression_merger::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, CohortComparison, CohortComparisonDefinition,
     CohortMapping, CohortModality, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
@@ -340,6 +344,7 @@ struct MergeApp {
     selected_entity: Option<usize>,
     distributions: Vec<SampleDistributionSummary>,
     profile: Vec<EntityProfilePoint>,
+    docs_search: String,
 
     cohort_root: Option<PathBuf>,
     cohort_scan: Option<ProjectScan>,
@@ -689,6 +694,7 @@ impl MergeApp {
             selected_entity: None,
             distributions: Vec::new(),
             profile: Vec::new(),
+            docs_search: String::new(),
 
             cohort_root: None,
             cohort_scan: None,
@@ -9181,35 +9187,97 @@ impl MergeApp {
                 .weak(),
             );
             ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Search docs").strong());
+                let response = ui.add_sized(
+                    [ui.available_width().min(520.0), 28.0],
+                    egui::TextEdit::singleline(&mut this.docs_search)
+                        .hint_text("Try: clonality, q value, PCA, outlier, pathway, covariate…"),
+                );
+                if !this.docs_search.is_empty() && ui.button("Clear").clicked() {
+                    this.docs_search.clear();
+                    response.request_focus();
+                }
+            });
+            let query = this.docs_search.trim();
+            if query.is_empty() {
+                ui.label(
+                    egui::RichText::new(
+                        "Search is case-insensitive and scans section titles, definitions, examples, chart labels, and interpretation notes.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            } else {
+                let matches = analysis_doc_sections()
+                    .iter()
+                    .filter(|section| analysis_doc_section_matches(section, query))
+                    .count();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Showing {matches} of {} documentation section(s) matching ‘{query}’.",
+                        analysis_doc_sections().len()
+                    ))
+                    .small()
+                    .weak(),
+                );
+            }
+
+            ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("Tip:").strong());
-                ui.label("Use the top-level Docs tab for a standalone guide. Cohort Analysis now keeps setup, QC, the primary corrected analysis, robustness diagnostics, and key findings in one workflow.");
+                ui.label("Each major topic now includes a small synthetic worked example and visual. Toy values are deliberately simple and are never drawn from, or mixed with, the current cohort results.");
             });
             ui.add_space(10.0);
-            this.render_docs_workflow_overview(ui);
-            ui.add_space(10.0);
+
+            if query.is_empty() {
+                this.render_docs_workflow_overview(ui);
+                ui.add_space(10.0);
+            }
             this.render_shared_analysis_docs(ui);
-            ui.add_space(8.0);
-            this.docs_section_references(ui);
+            if query.is_empty() {
+                ui.add_space(8.0);
+                this.docs_section_references(ui);
+            }
         });
     }
 
     fn render_shared_analysis_docs(&self, ui: &mut egui::Ui) {
+        let query = self.docs_search.trim();
         ui.label(
             egui::RichText::new(
-                "Detailed method and interpretation reference. The same canonical explanations are embedded in both unified HTML report styles so a report reader can look up exactly what a statistic means without returning to the application.",
+                "Detailed method and interpretation reference. The same canonical explanations and toy examples are embedded in both unified HTML report styles so a report reader can look up exactly what a statistic means without returning to the application.",
             )
             .small()
             .weak(),
         );
         ui.add_space(6.0);
-        for section in analysis_doc_sections() {
+
+        let mut shown = 0usize;
+        for (section_idx, section) in analysis_doc_sections().iter().enumerate() {
+            if !analysis_doc_section_matches(section, query) {
+                continue;
+            }
+            shown += 1;
+            let header_match = analysis_doc_section_header_matches(section, query);
             egui::CollapsingHeader::new(section.title)
-                .default_open(section.default_open)
+                .default_open(!query.is_empty() || section.default_open)
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new(section.summary).italics());
                     ui.add_space(8.0);
+
+                    for (example_idx, example) in section.examples.iter().enumerate() {
+                        if header_match || analysis_doc_example_matches(example, query) {
+                            self.render_doc_toy_example(ui, section_idx, example_idx, example);
+                            ui.add_space(10.0);
+                        }
+                    }
+
                     for subsection in section.subsections {
+                        if !header_match && !analysis_doc_subsection_matches(subsection, query) {
+                            continue;
+                        }
                         ui.label(egui::RichText::new(subsection.title).strong());
                         ui.add_space(3.0);
                         for paragraph in subsection.paragraphs {
@@ -9226,6 +9294,179 @@ impl MergeApp {
                     }
                 });
             ui.add_space(4.0);
+        }
+
+        if shown == 0 {
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "No documentation matched ‘{}’. Try a broader term such as ‘BCR’, ‘clonality’, ‘PCA’, ‘q value’, ‘outlier’, ‘covariate’, or ‘pathway’.",
+                    query
+                ))
+                .italics(),
+            );
+        }
+    }
+
+    fn render_doc_toy_example(
+        &self,
+        ui: &mut egui::Ui,
+        section_idx: usize,
+        example_idx: usize,
+        example: &AnalysisDocToyExample,
+    ) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(egui::RichText::new(format!("Toy example — {}", example.title)).strong());
+            ui.label(
+                egui::RichText::new(
+                    "Illustrative values only — this is not a result from your cohort.",
+                )
+                .small()
+                .weak(),
+            );
+            ui.add_space(4.0);
+            ui.label(example.setup);
+            ui.add_space(6.0);
+            self.render_doc_toy_plot(ui, section_idx, example_idx, example);
+            ui.add_space(6.0);
+            for (idx, step) in example.walkthrough.iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(format!("{}.", idx + 1)).strong());
+                    ui.label(*step);
+                });
+            }
+            ui.add_space(5.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Takeaway:").strong());
+                ui.label(example.takeaway);
+            });
+        });
+    }
+
+    fn render_doc_toy_plot(
+        &self,
+        ui: &mut egui::Ui,
+        section_idx: usize,
+        example_idx: usize,
+        example: &AnalysisDocToyExample,
+    ) {
+        let plot_id = format!("analysis_docs_toy_{section_idx}_{example_idx}");
+        match example.chart {
+            AnalysisDocToyChart::Bars {
+                categories,
+                series,
+                y_label,
+                stacked,
+            } => {
+                let labels = categories
+                    .iter()
+                    .map(|x| (*x).to_string())
+                    .collect::<Vec<_>>();
+                Plot::new(plot_id)
+                    .height(230.0)
+                    .legend(Legend::default())
+                    .x_axis_label("Toy category")
+                    .y_axis_label(y_label)
+                    .x_axis_formatter(move |mark, _range| sample_tick_label(mark.value, &labels))
+                    .show(ui, |plot_ui| {
+                        if stacked {
+                            let mut bases = vec![0.0f64; categories.len()];
+                            for toy_series in series {
+                                let bars = toy_series
+                                    .values
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, value)| {
+                                        let base = bases[idx];
+                                        bases[idx] += *value;
+                                        Bar::new(idx as f64, *value).base_offset(base).width(0.62)
+                                    })
+                                    .collect::<Vec<_>>();
+                                plot_ui.bar_chart(BarChart::new(toy_series.label, bars));
+                            }
+                        } else {
+                            let count = series.len().max(1) as f64;
+                            let width = (0.72 / count).min(0.42);
+                            for (series_idx, toy_series) in series.iter().enumerate() {
+                                let center = (series.len().saturating_sub(1)) as f64 / 2.0;
+                                let offset = (series_idx as f64 - center) * width;
+                                let bars = toy_series
+                                    .values
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, value)| {
+                                        Bar::new(idx as f64 + offset, *value).width(width * 0.88)
+                                    })
+                                    .collect::<Vec<_>>();
+                                plot_ui.bar_chart(BarChart::new(toy_series.label, bars));
+                            }
+                        }
+                    });
+            }
+            AnalysisDocToyChart::Line {
+                categories,
+                series,
+                y_label,
+            } => {
+                let labels = categories
+                    .iter()
+                    .map(|x| (*x).to_string())
+                    .collect::<Vec<_>>();
+                Plot::new(plot_id)
+                    .height(230.0)
+                    .legend(Legend::default())
+                    .x_axis_label("Sensitivity view")
+                    .y_axis_label(y_label)
+                    .x_axis_formatter(move |mark, _range| sample_tick_label(mark.value, &labels))
+                    .show(ui, |plot_ui| {
+                        for toy_series in series {
+                            let points = toy_series
+                                .values
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, value)| [idx as f64, *value])
+                                .collect::<Vec<_>>();
+                            plot_ui.line(Line::new(toy_series.label, points.clone()));
+                            plot_ui.points(Points::new(toy_series.label, points).radius(4.0));
+                        }
+                    });
+            }
+            AnalysisDocToyChart::Scatter {
+                points,
+                x_label,
+                y_label,
+            } => {
+                let mut grouped = BTreeMap::<&str, Vec<[f64; 2]>>::new();
+                for point in points {
+                    grouped
+                        .entry(point.group)
+                        .or_default()
+                        .push([point.x, point.y]);
+                }
+                Plot::new(plot_id)
+                    .height(230.0)
+                    .legend(Legend::default())
+                    .x_axis_label(x_label)
+                    .y_axis_label(y_label)
+                    .show(ui, |plot_ui| {
+                        for (group, coords) in grouped {
+                            plot_ui.points(Points::new(group, coords).radius(4.2));
+                        }
+                    });
+                let labels = points
+                    .iter()
+                    .map(|point| {
+                        format!(
+                            "{}={} ({})",
+                            point.label,
+                            point.group,
+                            format!("{:.2}, {:.2}", point.x, point.y)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  •  ");
+                ui.label(egui::RichText::new(labels).small().weak());
+            }
         }
     }
 

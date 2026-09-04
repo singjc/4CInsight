@@ -4,6 +4,14 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.15.3 adds
+
+- Adds a **Docs search bar** that filters the canonical analysis guide by section title, subsection text, statistical terms, toy-example text, and chart labels. Matching sections automatically open, so terms such as `clonality`, `q value`, `PCA`, `outlier`, `pathway`, or `covariate` jump directly to the relevant explanation.
+- Keeps only the **Start here** section expanded by default; the larger method sections stay collapsed until opened or matched by search, reducing the initial wall of text.
+- Adds one **small synthetic worked example + visual** to every major analysis-guide section. Examples are explicitly labelled illustrative toy data and walk through what to notice before giving the interpretation takeaway.
+- Uses the same example definitions in the GUI and both unified HTML report styles. The GUI renders lightweight `egui_plot` charts; reports render self-contained inline SVG plots inside the existing expandable documentation appendix.
+- Keeps toy examples completely separate from cohort results: they are fixed educational values compiled into the documentation module and never enter the statistical run/result objects.
+
 ## What v0.15.2 adds
 
 - Replaces the short GUI analysis notes with a **shared, detailed lay-person analysis reference** covering cohort definition, mapping, cross-modal QC, corrected gene/transcript models, DTU, BCR/TCR repertoire analysis, BCR isotype composition, immune ssGSEA, pathway ORA, PBMC/confounding diagnostics, candidate prioritization, ordinations, PERMANOVA, and statistical terminology.

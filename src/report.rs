@@ -1,5 +1,5 @@
 use crate::analysis::UnifiedCohortAnalysisRun;
-use crate::analysis_docs::analysis_doc_sections;
+use crate::analysis_docs::{AnalysisDocToyChart, AnalysisDocToyExample, analysis_doc_sections};
 use crate::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, BcrSampleSummary, CohortComparison,
     CohortComparisonDefinition, CohortMapping, CohortModality, FeatureTestResult,
@@ -17,7 +17,7 @@ use crate::focused::{
 };
 use crate::outliers::{OutlierConsensusRule, OutlierFilterSnapshot};
 use anyhow::{Context, Result};
-use maud::{Markup, html};
+use maud::{Markup, PreEscaped, html};
 use plotly::common::{HoverInfo, Mode, Title};
 use plotly::layout::Axis;
 use plotly::{Layout, Plot, Scatter};
@@ -1335,6 +1335,16 @@ mod tests {
         assert!(!html.contains("https://cdnjs.cloudflare.com/ajax/libs/jquery/"));
         assert!(html.contains("Plotly"));
     }
+
+    #[test]
+    fn analysis_doc_toy_example_renders_inline_svg() {
+        let example = &analysis_doc_sections()[0].examples[0];
+        let rendered = build_analysis_doc_toy_example_markup(example).into_string();
+        assert!(rendered.contains("Toy example"));
+        assert!(rendered.contains("Illustrative values only"));
+        assert!(rendered.contains("<svg"));
+        assert!(rendered.contains(example.title));
+    }
 }
 
 pub struct CorrectedReportInputs<'a> {
@@ -2375,8 +2385,9 @@ fn build_unified_analysis_documentation(run: &UnifiedCohortAnalysisRun) -> Repor
     section.add_content(html! {
         p {
             "This appendix is intentionally written for readers who are not expected to know the statistical terminology in advance. "
-            "The GUI Docs workspace and both unified HTML report styles use the same canonical explanations below. "
-            "The first block records the values used for this completed run; the expandable sections then explain what those values and outputs mean."
+            "The GUI Docs workspace and both unified HTML report styles use the same canonical explanations and toy examples below. "
+            "The desktop guide has a built-in search box; in this HTML report, use the browser's Find command and open the relevant expandable section. "
+            "The first block records the values used for this completed run; the expandable sections then explain what those values and outputs mean with small illustrative plots."
         }
         h3 { "Settings used in this completed run" }
         ul {
@@ -2412,6 +2423,9 @@ fn build_unified_analysis_documentation(run: &UnifiedCohortAnalysisRun) -> Repor
             details {
                 summary { strong { (doc.title) } " — " (doc.summary) }
                 p { em { (doc.summary) } }
+                @for example in doc.examples {
+                    (build_analysis_doc_toy_example_markup(example))
+                }
                 @for subsection in doc.subsections {
                     h4 { (subsection.title) }
                     @for paragraph in subsection.paragraphs {
@@ -2429,6 +2443,307 @@ fn build_unified_analysis_documentation(run: &UnifiedCohortAnalysisRun) -> Repor
         }
     });
     section
+}
+
+fn build_analysis_doc_toy_example_markup(example: &AnalysisDocToyExample) -> Markup {
+    html! {
+        div style="border:1px solid #d5dae0;border-radius:8px;padding:12px 14px;margin:12px 0 16px;background:#fafbfc;" {
+            h4 style="margin:0 0 4px;" { "Toy example — " (example.title) }
+            p style="margin:0 0 8px;color:#59636e;font-size:0.92em;" { strong { "Illustrative values only." } " This is not a result from the current cohort." }
+            p { (example.setup) }
+            (build_analysis_doc_toy_chart_markup(example))
+            ol {
+                @for step in example.walkthrough {
+                    li { (step) }
+                }
+            }
+            p { strong { "Takeaway: " } (example.takeaway) }
+        }
+    }
+}
+
+fn build_analysis_doc_toy_chart_markup(example: &AnalysisDocToyExample) -> Markup {
+    let svg = match example.chart {
+        AnalysisDocToyChart::Bars {
+            categories,
+            series,
+            y_label,
+            stacked,
+        } => analysis_doc_bar_svg(categories, series, y_label, stacked),
+        AnalysisDocToyChart::Line {
+            categories,
+            series,
+            y_label,
+        } => analysis_doc_line_svg(categories, series, y_label),
+        AnalysisDocToyChart::Scatter {
+            points,
+            x_label,
+            y_label,
+        } => analysis_doc_scatter_svg(points, x_label, y_label),
+    };
+    html! {
+        div style="margin:10px 0 12px;overflow-x:auto;" {
+            (PreEscaped(svg))
+        }
+    }
+}
+
+fn analysis_doc_svg_shell(body: &str, aria_label: &str, legend: &str) -> String {
+    format!(
+        r#"<svg viewBox="0 0 720 285" role="img" aria-label="{}" style="width:100%;max-width:760px;min-width:520px;height:auto;background:white;border:1px solid #e1e5e9;border-radius:6px;">{}</svg><div style="font-size:0.86em;color:#59636e;margin-top:4px;">{}</div>"#,
+        aria_label, body, legend
+    )
+}
+
+fn analysis_doc_bar_svg(
+    categories: &[&str],
+    series: &[crate::analysis_docs::AnalysisDocToySeries],
+    y_label: &str,
+    stacked: bool,
+) -> String {
+    if categories.is_empty() || series.is_empty() {
+        return String::new();
+    }
+    let max_y = if stacked {
+        (0..categories.len())
+            .map(|idx| {
+                series
+                    .iter()
+                    .map(|s| s.values.get(idx).copied().unwrap_or(0.0).max(0.0))
+                    .sum::<f64>()
+            })
+            .fold(0.0, f64::max)
+            .max(1.0)
+    } else {
+        series
+            .iter()
+            .flat_map(|s| s.values.iter().copied())
+            .fold(0.0, f64::max)
+            .max(1.0)
+    };
+    let colors = [
+        "#4c78a8", "#f58518", "#54a24b", "#e45756", "#b279a2", "#72b7b2",
+    ];
+    let plot_left = 62.0;
+    let plot_top = 22.0;
+    let plot_height = 196.0;
+    let plot_width = 618.0;
+    let category_width = plot_width / categories.len() as f64;
+    let mut body = format!(
+        r##"<line x1="62" y1="218" x2="680" y2="218" stroke="#88929c" stroke-width="1"/><line x1="62" y1="22" x2="62" y2="218" stroke="#88929c" stroke-width="1"/>"##
+    );
+    for (cat_idx, category) in categories.iter().enumerate() {
+        let center = plot_left + (cat_idx as f64 + 0.5) * category_width;
+        if stacked {
+            let mut base = 0.0;
+            for (series_idx, toy_series) in series.iter().enumerate() {
+                let value = toy_series
+                    .values
+                    .get(cat_idx)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .max(0.0);
+                let h = value / max_y * plot_height;
+                let y = plot_top + plot_height - (base + value) / max_y * plot_height;
+                body.push_str(&format!(
+                    r#"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" fill="{}" opacity="0.9"/>"#,
+                    center - category_width * 0.28,
+                    y,
+                    category_width * 0.56,
+                    h,
+                    colors[series_idx % colors.len()]
+                ));
+                base += value;
+            }
+        } else {
+            let n = series.len() as f64;
+            let bar_width = (category_width * 0.68 / n).max(4.0);
+            for (series_idx, toy_series) in series.iter().enumerate() {
+                let value = toy_series
+                    .values
+                    .get(cat_idx)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .max(0.0);
+                let h = value / max_y * plot_height;
+                let x = center - (n * bar_width) / 2.0 + series_idx as f64 * bar_width;
+                let y = plot_top + plot_height - h;
+                body.push_str(&format!(
+                    r#"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" fill="{}" opacity="0.9"/>"#,
+                    x,
+                    y,
+                    bar_width * 0.88,
+                    h,
+                    colors[series_idx % colors.len()]
+                ));
+            }
+        }
+        body.push_str(&format!(
+            r##"<text x="{:.2}" y="242" text-anchor="middle" font-size="11" fill="#39434d">{}</text>"##,
+            center, category
+        ));
+    }
+    body.push_str(&format!(
+        r##"<text x="16" y="122" transform="rotate(-90 16 122)" text-anchor="middle" font-size="12" fill="#39434d">{}</text>"##,
+        y_label
+    ));
+    let legend = series
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            format!(
+                r#"<span style="display:inline-block;margin-right:14px;color:{};">■ {}</span>"#,
+                colors[idx % colors.len()],
+                s.label
+            )
+        })
+        .collect::<String>();
+    analysis_doc_svg_shell(&body, &format!("Toy bar plot: {y_label}"), &legend)
+}
+
+fn analysis_doc_line_svg(
+    categories: &[&str],
+    series: &[crate::analysis_docs::AnalysisDocToySeries],
+    y_label: &str,
+) -> String {
+    if categories.is_empty() || series.is_empty() {
+        return String::new();
+    }
+    let values = series
+        .iter()
+        .flat_map(|s| s.values.iter().copied())
+        .collect::<Vec<_>>();
+    let min_y = values
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min)
+        .min(0.0);
+    let max_y = values
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max)
+        .max(1.0);
+    let span = (max_y - min_y).abs().max(1.0);
+    let colors = ["#4c78a8", "#f58518", "#54a24b", "#e45756"];
+    let mut body = String::from(
+        r##"<line x1="62" y1="220" x2="680" y2="220" stroke="#88929c" stroke-width="1"/><line x1="62" y1="24" x2="62" y2="220" stroke="#88929c" stroke-width="1"/>"##,
+    );
+    for (series_idx, toy_series) in series.iter().enumerate() {
+        let coords = toy_series
+            .values
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                let x = if categories.len() <= 1 {
+                    371.0
+                } else {
+                    62.0 + idx as f64 / (categories.len() - 1) as f64 * 618.0
+                };
+                let y = 220.0 - ((*value - min_y) / span) * 196.0;
+                (x, y)
+            })
+            .collect::<Vec<_>>();
+        let points = coords
+            .iter()
+            .map(|(x, y)| format!("{x:.2},{y:.2}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        body.push_str(&format!(
+            r#"<polyline points="{}" fill="none" stroke="{}" stroke-width="3"/>"#,
+            points,
+            colors[series_idx % colors.len()]
+        ));
+        for (x, y) in coords {
+            body.push_str(&format!(
+                r#"<circle cx="{x:.2}" cy="{y:.2}" r="4.5" fill="{}"/>"#,
+                colors[series_idx % colors.len()]
+            ));
+        }
+    }
+    for (idx, category) in categories.iter().enumerate() {
+        let x = if categories.len() <= 1 {
+            371.0
+        } else {
+            62.0 + idx as f64 / (categories.len() - 1) as f64 * 618.0
+        };
+        body.push_str(&format!(
+            r##"<text x="{x:.2}" y="242" text-anchor="middle" font-size="11" fill="#39434d">{}</text>"##,
+            category
+        ));
+    }
+    body.push_str(&format!(
+        r##"<text x="16" y="122" transform="rotate(-90 16 122)" text-anchor="middle" font-size="12" fill="#39434d">{}</text>"##,
+        y_label
+    ));
+    let legend = series
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            format!(
+                r#"<span style="display:inline-block;margin-right:14px;color:{};">● {}</span>"#,
+                colors[idx % colors.len()],
+                s.label
+            )
+        })
+        .collect::<String>();
+    analysis_doc_svg_shell(&body, &format!("Toy line plot: {y_label}"), &legend)
+}
+
+fn analysis_doc_scatter_svg(
+    points: &[crate::analysis_docs::AnalysisDocToyPoint],
+    x_label: &str,
+    y_label: &str,
+) -> String {
+    if points.is_empty() {
+        return String::new();
+    }
+    let min_x = points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+    let max_x = points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+    let min_y = points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+    let max_y = points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+    let x_span = (max_x - min_x).abs().max(1.0);
+    let y_span = (max_y - min_y).abs().max(1.0);
+    let colors = ["#4c78a8", "#f58518", "#54a24b", "#e45756", "#b279a2"];
+    let mut groups = BTreeMap::<&str, usize>::new();
+    for point in points {
+        if !groups.contains_key(point.group) {
+            let idx = groups.len();
+            groups.insert(point.group, idx);
+        }
+    }
+    let mut body = String::from(
+        r##"<line x1="62" y1="220" x2="680" y2="220" stroke="#88929c" stroke-width="1"/><line x1="62" y1="24" x2="62" y2="220" stroke="#88929c" stroke-width="1"/>"##,
+    );
+    for point in points {
+        let px = 62.0 + ((point.x - min_x) / x_span) * 618.0;
+        let py = 220.0 - ((point.y - min_y) / y_span) * 196.0;
+        let color = colors[*groups.get(point.group).unwrap_or(&0) % colors.len()];
+        body.push_str(&format!(
+            r##"<circle cx="{px:.2}" cy="{py:.2}" r="5" fill="{color}" opacity="0.9"/><text x="{:.2}" y="{:.2}" font-size="11" fill="#39434d">{}</text>"##,
+            px + 7.0,
+            py - 6.0,
+            point.label
+        ));
+    }
+    body.push_str(&format!(
+        r##"<text x="371" y="255" text-anchor="middle" font-size="12" fill="#39434d">{}</text><text x="16" y="122" transform="rotate(-90 16 122)" text-anchor="middle" font-size="12" fill="#39434d">{}</text>"##,
+        x_label, y_label
+    ));
+    let legend = groups
+        .iter()
+        .map(|(group, idx)| {
+            format!(
+                r#"<span style="display:inline-block;margin-right:14px;color:{};">● {}</span>"#,
+                colors[*idx % colors.len()],
+                group
+            )
+        })
+        .collect::<String>();
+    analysis_doc_svg_shell(
+        &body,
+        &format!("Toy scatter plot: {x_label} versus {y_label}"),
+        &legend,
+    )
 }
 
 fn build_unified_diagnostics_overview(result: &PbmcDiagnosticsResult) -> ReportSection {

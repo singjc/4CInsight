@@ -11,10 +11,54 @@ pub struct AnalysisDocSubsection {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct AnalysisDocToySeries {
+    pub label: &'static str,
+    pub values: &'static [f64],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AnalysisDocToyPoint {
+    pub x: f64,
+    pub y: f64,
+    pub group: &'static str,
+    pub label: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AnalysisDocToyChart {
+    Bars {
+        categories: &'static [&'static str],
+        series: &'static [AnalysisDocToySeries],
+        y_label: &'static str,
+        stacked: bool,
+    },
+    Line {
+        categories: &'static [&'static str],
+        series: &'static [AnalysisDocToySeries],
+        y_label: &'static str,
+    },
+    Scatter {
+        points: &'static [AnalysisDocToyPoint],
+        x_label: &'static str,
+        y_label: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AnalysisDocToyExample {
+    pub title: &'static str,
+    pub setup: &'static str,
+    pub walkthrough: &'static [&'static str],
+    pub takeaway: &'static str,
+    pub chart: AnalysisDocToyChart,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct AnalysisDocSection {
     pub title: &'static str,
     pub summary: &'static str,
     pub default_open: bool,
+    pub examples: &'static [AnalysisDocToyExample],
     pub subsections: &'static [AnalysisDocSubsection],
 }
 
@@ -22,11 +66,115 @@ pub fn analysis_doc_sections() -> &'static [AnalysisDocSection] {
     ANALYSIS_DOC_SECTIONS
 }
 
+fn contains_query(text: &str, query: &str) -> bool {
+    text.to_lowercase().contains(&query.to_lowercase())
+}
+
+pub fn analysis_doc_subsection_matches(subsection: &AnalysisDocSubsection, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    contains_query(subsection.title, query)
+        || subsection
+            .paragraphs
+            .iter()
+            .any(|text| contains_query(text, query))
+        || subsection
+            .bullets
+            .iter()
+            .any(|text| contains_query(text, query))
+}
+
+pub fn analysis_doc_example_matches(example: &AnalysisDocToyExample, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let chart_match = match example.chart {
+        AnalysisDocToyChart::Bars {
+            categories,
+            series,
+            y_label,
+            ..
+        }
+        | AnalysisDocToyChart::Line {
+            categories,
+            series,
+            y_label,
+        } => {
+            contains_query(y_label, query)
+                || categories.iter().any(|text| contains_query(text, query))
+                || series
+                    .iter()
+                    .any(|series| contains_query(series.label, query))
+        }
+        AnalysisDocToyChart::Scatter {
+            points,
+            x_label,
+            y_label,
+        } => {
+            contains_query(x_label, query)
+                || contains_query(y_label, query)
+                || points.iter().any(|point| {
+                    contains_query(point.group, query) || contains_query(point.label, query)
+                })
+        }
+    };
+    contains_query(example.title, query)
+        || contains_query(example.setup, query)
+        || contains_query(example.takeaway, query)
+        || example
+            .walkthrough
+            .iter()
+            .any(|text| contains_query(text, query))
+        || chart_match
+}
+
+pub fn analysis_doc_section_header_matches(section: &AnalysisDocSection, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    contains_query(section.title, query) || contains_query(section.summary, query)
+}
+
+pub fn analysis_doc_section_matches(section: &AnalysisDocSection, query: &str) -> bool {
+    analysis_doc_section_header_matches(section, query)
+        || section
+            .examples
+            .iter()
+            .any(|example| analysis_doc_example_matches(example, query))
+        || section
+            .subsections
+            .iter()
+            .any(|subsection| analysis_doc_subsection_matches(subsection, query))
+}
+
 pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
     AnalysisDocSection {
         title: "Start here: what the cohort analysis is trying to answer",
         summary: "The application asks whether a defined Case group differs from a defined Control group, while keeping sample identity, repeated sampling, selected covariates, QC decisions, and multi-omics provenance explicit.",
         default_open: true,
+        examples: &[AnalysisDocToyExample {
+            title: "From sample values to a Case-versus-Control question",
+            setup: "Imagine a toy measurement where the three Control samples average about 10 units and the three Case samples average about 15 units. The plot is only an intuition aid; the real analysis may use a count model, compositional model, or another modality-specific method rather than testing these two means directly.",
+            walkthrough: &[
+                "First define which biological samples are Control and which are Case.",
+                "Then estimate the group effect using the modality's appropriate model while honoring the selected covariates and repeated-subject structure.",
+                "Finally inspect uncertainty, q value, sample support, and QC/robustness rather than treating the difference in bar heights as proof by itself.",
+            ],
+            takeaway: "The group comparison is the scientific question; the exact statistical engine depends on the data type.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["Control", "Case"],
+                series: &[AnalysisDocToySeries {
+                    label: "Toy measurement",
+                    values: &[10.0, 15.0],
+                }],
+                y_label: "Illustrative measurement",
+                stacked: false,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "The basic unit of comparison",
@@ -57,7 +205,32 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
     AnalysisDocSection {
         title: "Cohort definition, metadata, sample mapping, and covariates",
         summary: "Before any biology is tested, the app must know which files belong to which biological samples, which samples are Case or Control, which repeated samples belong to the same subject, and which metadata variables should be adjusted for.",
-        default_open: true,
+        default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "One biological sample can have several assay IDs",
+            setup: "Three biological samples are in the metadata. All three have RNA, but one lacks BCR. The RNA and BCR filenames can use completely different aliases; they still map back to S1, S2, and S3 rather than becoming extra observations.",
+            walkthrough: &[
+                "The height 1 means that modality is available for that canonical sample; 0 means it is absent.",
+                "Missing BCR for S2 does not remove S2 from RNA analysis. It only means the BCR modality has fewer usable samples.",
+                "An alias such as RNA_001 or BCR_A17 is a matching key, not a new sample identity.",
+            ],
+            takeaway: "Mapping is per modality, but biological identity and exclusions are anchored to canonical sample_id.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["S1", "S2", "S3"],
+                series: &[
+                    AnalysisDocToySeries {
+                        label: "RNA available",
+                        values: &[1.0, 1.0, 1.0],
+                    },
+                    AnalysisDocToySeries {
+                        label: "BCR available",
+                        values: &[1.0, 0.0, 1.0],
+                    },
+                ],
+                y_label: "Modality available (0/1)",
+                stacked: false,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "How custom comparisons are created",
@@ -102,7 +275,65 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
     AnalysisDocSection {
         title: "Sample QC and cross-modal outlier analysis",
         summary: "Outlier QC asks whether a sample looks unusually far from other samples in one or more data types. It is deliberately a flag-for-review system, not an automatic sample-deletion system.",
-        default_open: true,
+        default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "A sample that is far away in PCA space",
+            setup: "Most toy samples form a compact cloud in the first two principal components, while sample S7 lies far away. A robust distance summarizes how unusual that location is relative to the appropriate comparison group.",
+            walkthrough: &[
+                "PCA first reduces many features to a small number of coordinates that summarize major sample-to-sample variation.",
+                "The robust outlier score uses the first two coordinates and robust center/scale estimates; it is not based on disease significance or on one favorite gene.",
+                "If S7 is also unusual in another modality, the cross-modal consensus evidence becomes stronger—but the sample is still only flagged for review until the user chooses to exclude it.",
+            ],
+            takeaway: "Far from the main cloud means unusual, not automatically wrong. Provenance and cross-modal behavior determine what to do next.",
+            chart: AnalysisDocToyChart::Scatter {
+                points: &[
+                    AnalysisDocToyPoint {
+                        x: -0.9,
+                        y: 0.2,
+                        group: "Typical",
+                        label: "S1",
+                    },
+                    AnalysisDocToyPoint {
+                        x: -0.4,
+                        y: -0.3,
+                        group: "Typical",
+                        label: "S2",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 0.1,
+                        y: 0.4,
+                        group: "Typical",
+                        label: "S3",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 0.5,
+                        y: -0.2,
+                        group: "Typical",
+                        label: "S4",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 0.8,
+                        y: 0.3,
+                        group: "Typical",
+                        label: "S5",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 0.2,
+                        y: -0.7,
+                        group: "Typical",
+                        label: "S6",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 4.0,
+                        y: 3.3,
+                        group: "Flagged outlier",
+                        label: "S7",
+                    },
+                ],
+                x_label: "Toy PC1",
+                y_label: "Toy PC2",
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "What representation is used for each modality",
@@ -145,7 +376,26 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
     AnalysisDocSection {
         title: "Gene-expression corrected analysis",
         summary: "The gene analysis asks, for each tested gene, whether modeled RNA count abundance differs between Case and Control after library-size normalization and any selected covariates, with repeated-subject-aware uncertainty when a subject column is provided.",
-        default_open: true,
+        default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "A two-fold adjusted expression difference",
+            setup: "Suppose the modeled abundance of a toy gene is around 20 normalized-count units in Control and 40 in Case. A two-fold Case/Control ratio corresponds to an adjusted log2 fold change of about +1 when the fitted model supports that difference.",
+            walkthrough: &[
+                "The real inferential model uses raw counts plus a library-size offset; the plotted normalized values are intuition, not the response variable passed directly to an ordinary t test.",
+                "log2FC +1 means roughly twice as much modeled abundance in Case; log2FC -1 would mean roughly half as much.",
+                "The q value asks how surprising the evidence remains after accounting for the many genes tested. Effect size and q value answer different questions.",
+            ],
+            takeaway: "A large fold change is not automatically reliable; look for adequate count support, uncertainty/FDR support, and stable sample-level behavior.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["Control", "Case"],
+                series: &[AnalysisDocToySeries {
+                    label: "Toy normalized abundance",
+                    values: &[20.0, 40.0],
+                }],
+                y_label: "Illustrative normalized count",
+                stacked: false,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "What input values are used",
@@ -213,6 +463,31 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "Transcript-expression and differential transcript-usage analysis",
         summary: "Transcript analysis contains two related questions: whether individual transcript abundance differs between groups, and whether the relative use of transcripts within the same gene changes between groups.",
         default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "Total gene abundance can stay similar while transcript usage changes",
+            setup: "A toy gene has two transcripts. In Control, transcript A contributes 70% and B contributes 30%; in Case the balance shifts to 35% and 65%. The total gene abundance could remain unchanged while the within-gene mixture changes strongly.",
+            walkthrough: &[
+                "Differential transcript abundance asks whether a transcript's amount changes.",
+                "DTU asks a different question: whether a transcript takes a larger or smaller share of the transcripts produced from its gene.",
+                "CLR transformation compares each transcript with the geometric-center tendency of the other transcripts in that same gene, which is why the analysis is about relative usage.",
+            ],
+            takeaway: "A DTU signal can exist without a gene-level expression change, and a gene-expression change does not necessarily imply altered transcript usage.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["Control", "Case"],
+                series: &[
+                    AnalysisDocToySeries {
+                        label: "Transcript A",
+                        values: &[70.0, 35.0],
+                    },
+                    AnalysisDocToySeries {
+                        label: "Transcript B",
+                        values: &[30.0, 65.0],
+                    },
+                ],
+                y_label: "Within-gene transcript share (%)",
+                stacked: true,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "Differential transcript abundance",
@@ -244,7 +519,40 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
     AnalysisDocSection {
         title: "BCR and TCR repertoire analysis",
         summary: "Repertoire analysis asks several different biological questions: how diverse or dominated each sample's receptor repertoire is, how clonotypes are shared, whether whole repertoires are globally similar, and whether V/D/J or V-J compositions shift between groups.",
-        default_open: true,
+        default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "Why a dominated repertoire has higher clonality",
+            setup: "Compare two toy repertoires with the same four displayed clone categories. The diverse sample spreads reads fairly evenly, while the dominated sample is mostly Clone A. The app turns each sample's full clonotype abundance distribution into one sample-level clonality value.",
+            walkthrough: &[
+                "Shannon diversity is high when abundance is spread across many clonotypes and lower when a few clonotypes dominate.",
+                "Clonality normalizes that diversity by observed richness: 1 - Shannon/ln(richness). Values near 0 are relatively even; values closer to 1 are dominated by a small number of clones.",
+                "The corrected Case/Control analysis then compares these one-per-sample clonality values. It is not calculating a separate clonality for each V gene, CDR3, or clone type.",
+            ],
+            takeaway: "Clonality describes the shape of each sample's whole repertoire, then those sample-level summaries are compared between groups.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["Diverse sample", "Dominated sample"],
+                series: &[
+                    AnalysisDocToySeries {
+                        label: "Clone A",
+                        values: &[25.0, 80.0],
+                    },
+                    AnalysisDocToySeries {
+                        label: "Clone B",
+                        values: &[25.0, 8.0],
+                    },
+                    AnalysisDocToySeries {
+                        label: "Clone C",
+                        values: &[25.0, 7.0],
+                    },
+                    AnalysisDocToySeries {
+                        label: "Other clones",
+                        values: &[25.0, 5.0],
+                    },
+                ],
+                y_label: "Read share (%)",
+                stacked: true,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "What the app treats as a clonotype",
@@ -351,6 +659,35 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "BCR isotype composition analysis",
         summary: "The dedicated BCR-isotype modality asks whether the relative mixture of antibody isotypes differs between groups using the precomputed Isotype Read Fraction values from the isotype workbook.",
         default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "Isotype analysis compares the mixture, not four independent percentages",
+            setup: "In a toy example, Control is 55% IgM, 25% IgG, and 20% IgA, while Case shifts toward IgG. Because the fractions in each sample add to a whole, increasing one component necessarily changes the room available for the others.",
+            walkthrough: &[
+                "The isotype fractions are compositional: they are interpreted relative to one another rather than as unrelated measurements.",
+                "CLR/Aitchison analysis converts the relative composition to log-ratio coordinates before group testing.",
+                "A positive effect for IgG means IgG is higher relative to the geometric center of the isotype mixture in Case; it is not simply an unadjusted difference in the displayed mean percentage.",
+            ],
+            takeaway: "Read the isotype result as a shift in the balance of the antibody-class mixture.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["Control", "Case"],
+                series: &[
+                    AnalysisDocToySeries {
+                        label: "IgM",
+                        values: &[55.0, 30.0],
+                    },
+                    AnalysisDocToySeries {
+                        label: "IgG",
+                        values: &[25.0, 50.0],
+                    },
+                    AnalysisDocToySeries {
+                        label: "IgA",
+                        values: &[20.0, 20.0],
+                    },
+                ],
+                y_label: "Isotype read fraction (%)",
+                stacked: true,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "What values are used",
@@ -381,6 +718,31 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "Immune-infiltrate / ssGSEA analysis",
         summary: "The immune analysis compares per-sample ssGSEA signature scores for immune-cell labels and separately summarizes the overall pattern of signatures across samples.",
         default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "An immune signature score is a per-sample relative enrichment score",
+            setup: "This toy pattern shows higher monocyte-signature scores and lower T-cell-signature scores in Case. Each plotted value represents a sample-level ssGSEA-style signature score, not a directly measured cell percentage.",
+            walkthrough: &[
+                "ssGSEA summarizes whether genes belonging to a cell-type signature tend to be relatively high within a sample's ranked expression profile.",
+                "The corrected feature model compares those per-sample scores between groups after selected covariates.",
+                "A higher monocyte signature can be consistent with more monocyte-like transcriptional contribution, but it does not prove an exact monocyte fraction without an independently validated deconvolution/counting method.",
+            ],
+            takeaway: "Use immune signatures as relative transcriptional evidence about cell-type programs, especially when evaluating composition as a possible confounder.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["Monocyte", "T cell", "B cell"],
+                series: &[
+                    AnalysisDocToySeries {
+                        label: "Control",
+                        values: &[0.2, 0.8, 0.6],
+                    },
+                    AnalysisDocToySeries {
+                        label: "Case",
+                        values: &[0.8, 0.35, 0.55],
+                    },
+                ],
+                y_label: "Toy ssGSEA score",
+                stacked: false,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "What an ssGSEA score means here",
@@ -411,6 +773,25 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "Pathway over-representation analysis (ORA)",
         summary: "Pathway ORA asks whether genes already selected from the corrected gene analysis are represented in a pathway more often than expected from the set of genes that were actually tested.",
         default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "Observed pathway overlap versus what the tested universe makes plausible",
+            setup: "Suppose a pathway contains 20 of the genes that were actually testable, and 6 of those genes appear in the corrected foreground list. If the tested universe and foreground size imply only about 1-2 overlaps by chance, six overlaps is enrichment evidence.",
+            walkthrough: &[
+                "The hypergeometric test compares the observed overlap with the overlap expected when drawing the same number of foreground genes from the measured/tested gene universe.",
+                "The pathway q value corrects for testing many pathways.",
+                "The pathway does not become 'activated' merely because it is enriched; ORA says that selected genes are over-represented in that annotation set.",
+            ],
+            takeaway: "Pathway ORA summarizes concentration of selected genes in known sets; it does not establish causal pathway activity.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["Expected by chance", "Observed overlap"],
+                series: &[AnalysisDocToySeries {
+                    label: "Foreground genes in pathway",
+                    values: &[1.5, 6.0],
+                }],
+                y_label: "Toy overlap count",
+                stacked: false,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "How the foreground and background are defined",
@@ -455,6 +836,29 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "PBMC, source, composition, and candidate-robustness diagnostics",
         summary: "These diagnostics ask whether striking gene signals could be explained or strongly influenced by unusual sample source, cell-composition structure, sparse counts, one or two samples, or a historical/family/batch level.",
         default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "A robust candidate should not disappear under one reasonable sensitivity check",
+            setup: "A toy candidate has an estimated effect of +1.2 in the inclusive analysis. Removing a reviewed unusual sample, adjusting for an immune-composition axis, or leaving out one batch changes the estimate modestly but keeps it positive. A fragile candidate would collapse toward zero or reverse direction.",
+            walkthrough: &[
+                "Inclusive is the primary view unless the run was explicitly configured otherwise.",
+                "QC-restricted and composition-adjusted models are sensitivity views of the same cohort, not independent replications.",
+                "The diagnostic layer records whether direction and effect magnitude remain reasonably stable and whether one or two samples dominate the signal.",
+            ],
+            takeaway: "Sensitivity stability raises confidence that a preliminary signal is not an artifact of one obvious nuisance structure, but replication is still needed.",
+            chart: AnalysisDocToyChart::Line {
+                categories: &[
+                    "Inclusive",
+                    "QC-reviewed",
+                    "Immune-adjusted",
+                    "Leave-batch-out",
+                ],
+                series: &[AnalysisDocToySeries {
+                    label: "Toy effect",
+                    values: &[1.20, 1.05, 0.95, 1.10],
+                }],
+                y_label: "Estimated effect",
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "Sample-level expression and immune QC",
@@ -522,6 +926,40 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "Candidate prioritization and the simplified report",
         summary: "Candidate prioritization is a ranking/presentation layer built from the completed corrected results. It helps decide what to inspect first; it does not create new evidence.",
         default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "Prioritization favors findings that combine evidence and effect",
+            setup: "Three toy genes illustrate why ranking is only a presentation aid. Gene A has a strong effect and strong q value, Gene B has a tiny effect despite a good q value, and Gene C has a large effect but weak FDR support.",
+            walkthrough: &[
+                "The corrected statistical result remains the source of evidence; prioritization only decides which rows are shown first.",
+                "A useful candidate usually combines acceptable FDR support, a biologically meaningful effect, adequate sample/count support, and robustness to QC checks.",
+                "A candidate label such as robust preliminary candidate is still not equivalent to a validated biomarker.",
+            ],
+            takeaway: "Ranking helps triage attention; it must never be mistaken for a second statistical test or validation score.",
+            chart: AnalysisDocToyChart::Scatter {
+                points: &[
+                    AnalysisDocToyPoint {
+                        x: 1.4,
+                        y: 3.0,
+                        group: "Balanced evidence",
+                        label: "Gene A",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 0.15,
+                        y: 3.4,
+                        group: "Small effect",
+                        label: "Gene B",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 1.8,
+                        y: 0.7,
+                        group: "Weak FDR support",
+                        label: "Gene C",
+                    },
+                ],
+                x_label: "Absolute toy effect",
+                y_label: "-log10(toy q)",
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "How candidates are shortlisted",
@@ -552,6 +990,58 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "How to read PCA, PCoA, PERMANOVA, dendrograms, and effect plots",
         summary: "These plots answer different questions. Ordination and clustering describe sample-to-sample structure; feature tables and effect plots test individual features; PERMANOVA tests a global distance-based group difference.",
         default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "Ordination shows global sample structure, not a per-gene test",
+            setup: "In this toy PCA/PCoA-like plot, Control and Case samples separate along the horizontal axis. That suggests a global difference in the multivariate pattern, but it does not tell you which individual feature caused the separation.",
+            walkthrough: &[
+                "Each point is one sample; nearby points have more similar multivariate profiles under the representation/distance used.",
+                "PCA summarizes variance in a feature matrix. PCoA places samples from a chosen distance matrix into coordinates.",
+                "PERMANOVA can test whether distance-based group structure is stronger than expected under permitted label permutations; individual feature tables are still needed to identify specific genes, clonotypes/compositions, or signatures.",
+            ],
+            takeaway: "Use ordination for the big-picture sample geometry and feature-level models for specific biological claims.",
+            chart: AnalysisDocToyChart::Scatter {
+                points: &[
+                    AnalysisDocToyPoint {
+                        x: -1.4,
+                        y: -0.2,
+                        group: "Control",
+                        label: "C1",
+                    },
+                    AnalysisDocToyPoint {
+                        x: -1.0,
+                        y: 0.3,
+                        group: "Control",
+                        label: "C2",
+                    },
+                    AnalysisDocToyPoint {
+                        x: -0.7,
+                        y: -0.5,
+                        group: "Control",
+                        label: "C3",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 0.8,
+                        y: -0.3,
+                        group: "Case",
+                        label: "D1",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 1.1,
+                        y: 0.4,
+                        group: "Case",
+                        label: "D2",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 1.5,
+                        y: 0.0,
+                        group: "Case",
+                        label: "D3",
+                    },
+                ],
+                x_label: "Toy axis 1",
+                y_label: "Toy axis 2",
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "PCA",
@@ -612,6 +1102,31 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "Statistical glossary: common terms in the results",
         summary: "This glossary translates the recurring statistical terms into the specific role they play in 4C Cohort Explorer.",
         default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "Why a q value is usually larger than the corresponding p value",
+            setup: "These toy values show three features after many tests. Their raw p values are small, but BH-adjusted q values are larger because the procedure accounts for the fact that many opportunities for a small p value were examined.",
+            walkthrough: &[
+                "A p value describes evidence against the feature-level null model under its assumptions.",
+                "A q value is the multiple-testing-adjusted quantity used by the app to control the expected false-discovery proportion among discoveries at a chosen threshold.",
+                "Neither value tells you whether the effect is biologically large; read it together with the effect estimate and sample support.",
+            ],
+            takeaway: "p answers a single-test evidence question; q places that evidence in the context of the many features tested.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["Feature A", "Feature B", "Feature C"],
+                series: &[
+                    AnalysisDocToySeries {
+                        label: "p value",
+                        values: &[0.001, 0.006, 0.018],
+                    },
+                    AnalysisDocToySeries {
+                        label: "q value",
+                        values: &[0.010, 0.030, 0.060],
+                    },
+                ],
+                y_label: "Toy probability-scale value",
+                stacked: false,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "Effects and uncertainty",
@@ -667,6 +1182,30 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "What conclusions are reasonable, and what still needs validation",
         summary: "A strong result combines correct mapping, adequate sample support, meaningful effect size, FDR support, sensible sample-level behavior, and stability across reasonable QC/confounding checks. Even then, it remains a discovery result until replicated independently.",
         default_open: false,
+        examples: &[AnalysisDocToyExample {
+            title: "Confidence grows when several reasonable views tell the same story",
+            setup: "A toy signal stays positive across the primary analysis and three reasonable sensitivity views. This is stronger than a signal that appears only in one exact sample set or modelling choice, but it still comes from the same discovery cohort.",
+            walkthrough: &[
+                "Start with correct mapping and sufficient data support.",
+                "Require a meaningful effect and appropriately adjusted statistical evidence.",
+                "Then inspect sample-level plots, reviewed-QC sensitivity, covariate/confounding sensitivity, and modality context.",
+                "Independent replication is what turns robustness within one cohort into evidence that can generalize beyond that cohort.",
+            ],
+            takeaway: "Internal robustness is a confidence check; external replication is a different and stronger form of validation.",
+            chart: AnalysisDocToyChart::Line {
+                categories: &[
+                    "Primary",
+                    "QC sensitivity",
+                    "Covariate sensitivity",
+                    "Leave-level-out",
+                ],
+                series: &[AnalysisDocToySeries {
+                    label: "Toy direction/effect",
+                    values: &[1.0, 0.92, 0.88, 0.95],
+                }],
+                y_label: "Relative toy effect",
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "A practical interpretation sequence",
@@ -696,3 +1235,104 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         ],
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_major_doc_section_has_a_toy_example() {
+        assert!(!analysis_doc_sections().is_empty());
+        for section in analysis_doc_sections() {
+            assert!(
+                !section.examples.is_empty(),
+                "documentation section lacks a toy example: {}",
+                section.title
+            );
+        }
+    }
+
+    #[test]
+    fn toy_chart_shapes_are_consistent() {
+        for section in analysis_doc_sections() {
+            for example in section.examples {
+                match example.chart {
+                    AnalysisDocToyChart::Bars {
+                        categories, series, ..
+                    }
+                    | AnalysisDocToyChart::Line {
+                        categories, series, ..
+                    } => {
+                        assert!(
+                            !categories.is_empty(),
+                            "{} has no x categories",
+                            example.title
+                        );
+                        assert!(
+                            !series.is_empty(),
+                            "{} has no plotted series",
+                            example.title
+                        );
+                        for plotted in series {
+                            assert_eq!(
+                                plotted.values.len(),
+                                categories.len(),
+                                "series {} in {} has the wrong number of values",
+                                plotted.label,
+                                example.title
+                            );
+                            assert!(
+                                plotted.values.iter().all(|value| value.is_finite()),
+                                "{} contains a non-finite toy value",
+                                example.title
+                            );
+                        }
+                    }
+                    AnalysisDocToyChart::Scatter { points, .. } => {
+                        assert!(
+                            !points.is_empty(),
+                            "{} has no scatter points",
+                            example.title
+                        );
+                        assert!(
+                            points
+                                .iter()
+                                .all(|point| point.x.is_finite() && point.y.is_finite()),
+                            "{} contains a non-finite scatter coordinate",
+                            example.title
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_finds_clonality_and_hides_unrelated_sections() {
+        let matching = analysis_doc_sections()
+            .iter()
+            .filter(|section| analysis_doc_section_matches(section, "clonality"))
+            .map(|section| section.title)
+            .collect::<Vec<_>>();
+        assert!(matching.iter().any(|title| title.contains("BCR and TCR")));
+        assert!(
+            !matching
+                .iter()
+                .any(|title| title.contains("Pathway over-representation"))
+        );
+    }
+
+    #[test]
+    fn search_is_case_insensitive() {
+        let upper = analysis_doc_sections()
+            .iter()
+            .filter(|section| analysis_doc_section_matches(section, "PCA"))
+            .count();
+        let lower = analysis_doc_sections()
+            .iter()
+            .filter(|section| analysis_doc_section_matches(section, "pca"))
+            .count();
+        assert_eq!(upper, lower);
+        assert!(upper > 0);
+    }
+}
