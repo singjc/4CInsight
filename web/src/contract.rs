@@ -1,7 +1,9 @@
 //! Browser-side transport-shaped state for the hosted 4C client.
 //!
-//! Phase 3D connects private project lifecycle, authenticated upload/list/delete, explicit input-role assignment, and server-side mapping audit
-//! operations to `cfs-server`. Mapping plus persistent frozen jobs are enabled; Phase 3D runs native QC and one representative corrected gene-expression lane while the rest of the scientific stack remains disabled.
+//! Phase 3D.2 connects private project lifecycle, bounded authenticated batch
+//! upload, native-like automatic role/sample assignment, mapping, and frozen job
+//! operations to `cfs-server`. Native QC and one representative corrected gene
+//! lane are enabled while the rest of the scientific stack remains disabled.
 
 #[derive(Debug, Clone)]
 pub struct RemoteProjectSummary {

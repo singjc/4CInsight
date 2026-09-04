@@ -1,4 +1,7 @@
-use crate::metadata::{canonical_sample_id, row_matching_ids};
+use crate::{
+    input_conventions::{FilenameInputKind, classify_input_filename},
+    metadata::{canonical_sample_id, row_matching_ids},
+};
 use anyhow::{Context, Result, anyhow, bail};
 use calamine::{Data, Reader, Xlsx, open_workbook};
 use csv::ReaderBuilder;
@@ -404,48 +407,19 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn classify_workbook_name(name: &str) -> Option<(CohortModality, String)> {
-    let canonical_name = strip_copy_suffix(name);
-    let lower = canonical_name.to_ascii_lowercase();
-    let suffixes = [
-        (
-            "_tumor_rna_gene_expression_report.xlsx",
-            CohortModality::GeneExpression,
-        ),
-        (
-            "_tumor_rna_transcript_expression_report.xlsx",
-            CohortModality::TranscriptExpression,
-        ),
-        ("_bcr_heavy_chain_report.xlsx", CohortModality::Bcr),
-        ("_bcr_isotype_composition.xlsx", CohortModality::BcrIsotype),
-        ("_tcr_alpha_clone_report.xlsx", CohortModality::TcrAlpha),
-        ("_tcr_beta_clone_report.xlsx", CohortModality::TcrBeta),
-        ("_immune_infiltrate.xlsx", CohortModality::ImmuneInfiltrate),
-    ];
-    for (suffix, modality) in suffixes {
-        if lower.ends_with(suffix) {
-            let prefix_len = canonical_name.len().saturating_sub(suffix.len());
-            return Some((modality, canonical_name[..prefix_len].to_string()));
-        }
-    }
-    None
-}
-
-fn strip_copy_suffix(name: &str) -> String {
-    let lower = name.to_ascii_lowercase();
-    let Some(ext_pos) = lower.rfind(".xlsx") else {
-        return name.to_string();
+pub(crate) fn classify_workbook_name(name: &str) -> Option<(CohortModality, String)> {
+    let classification = classify_input_filename(name)?;
+    let modality = match classification.kind {
+        FilenameInputKind::GeneExpression => CohortModality::GeneExpression,
+        FilenameInputKind::TranscriptExpression => CohortModality::TranscriptExpression,
+        FilenameInputKind::Bcr => CohortModality::Bcr,
+        FilenameInputKind::BcrIsotype => CohortModality::BcrIsotype,
+        FilenameInputKind::TcrAlpha => CohortModality::TcrAlpha,
+        FilenameInputKind::TcrBeta => CohortModality::TcrBeta,
+        FilenameInputKind::ImmuneInfiltrate => CohortModality::ImmuneInfiltrate,
+        _ => return None,
     };
-    let stem = &name[..ext_pos];
-    if let Some(open) = stem.rfind(" (") {
-        if stem.ends_with(')') {
-            let digits = &stem[open + 2..stem.len() - 1];
-            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-                return format!("{}.xlsx", &stem[..open]);
-            }
-        }
-    }
-    name.to_string()
+    Some((modality, classification.sample_id?))
 }
 
 pub fn load_metadata(path: &Path) -> Result<MetadataTable> {

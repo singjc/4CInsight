@@ -2,7 +2,66 @@
 
 A Rust application for memory-bounded RNA expression merging plus metadata-driven multi-modal cohort exploration across gene/transcript expression, BCR, BCR isotypes, TCR alpha/beta, and immune-infiltrate data.
 
-The project contains a command-line interface, an `egui` desktop interface, and a browser/WASM client served by a local Rust `cfs-server`. The desktop application remains the production-capable local analysis environment; the browser path is being brought online incrementally. Private projects, authenticated opaque-object storage, explicit input-role assignment, native mapping, batch/directory selection, persistent frozen jobs, native QC, and one representative corrected gene-expression server lane are now implemented. The complete unified multi-omics/report stack remains desktop-only while web parity is validated incrementally.
+The project contains a command-line interface, an `egui` desktop interface, and a browser/WASM client served by a local Rust `cfs-server`. The desktop application remains the production-capable local analysis environment; the browser path is being brought online incrementally. Private projects, authenticated opaque-object storage, native-like folder scanning and automatic role/sample-ID assignment, bounded concurrent uploads, native mapping, persistent frozen jobs, native QC, and one representative corrected gene-expression server lane are now implemented. The complete unified multi-omics/report stack remains desktop-only while web parity is validated incrementally.
+
+## What v0.16.8 adds
+
+- Adds **Phase 3D.2 native-like high-throughput ingest** for cohorts with hundreds or thousands of files. The local browser no longer sends a large selected batch strictly one file at a time: it uses bounded concurrent uploads while preserving one authenticated request, opaque object UUID, streaming SHA-256, and independent quota check per file.
+- Defaults to **6 concurrent uploads** for the local/self-hosted quota profile and **2** for the hosted/conservative profile. Override deliberately with `CFS_MAX_CONCURRENT_UPLOADS`. The scientific worker limit remains separate (`CFS_MAX_CONCURRENT_JOBS=1` by default).
+- Refactors server upload locking so the global project mutation lock is held only for short authorization/quota preflight and atomic finalization. Request bodies stream/hash to private scratch storage outside that lock, allowing bounded uploads to make real progress in parallel. Final project quota/object checks are still serialized and authoritative.
+- Avoids rebuilding the complete `manifests/inputs.json` after every file in a large upload batch. The logical manifest is refreshed once by assignment/mapping operations from the authoritative object records, removing an avoidable O(n²)-like cost for large cohorts.
+- Adds a shared `src/input_conventions.rs` filename classifier used by native project scanning, the server, and WASM. Exact standard 4C filenames can seed the same modality/sample identity as the native desktop scanner instead of requiring hundreds of manual role selections.
+- **Choose folder…** now mirrors the native project scan: recognized 4C workbooks/merged tables/metadata candidates are queued, while auxiliary files such as GMT libraries, logs, and unrelated files are skipped by default. **Choose files…** remains available for intentionally custom-named inputs.
+- Standard sample workbooks are automatically assigned a role and sample ID only after the uploaded bytes pass the same defensive role validator used by manual assignment. Custom/ambiguous names remain `unassigned`; metadata candidates remain manual so the server never silently chooses which metadata table is primary.
+- Adds **Auto-detect native roles & sample IDs** for projects uploaded under older versions. Existing v0.16.7 projects can therefore be upgraded in place without re-uploading hundreds of files.
+- Large object lists now default to showing only files that still need attention, with a role summary and a toggle to inspect all uploaded objects. Failed concurrent uploads stay selected for one-click retry.
+- Advances `/api/health` to API v6 and reports `max_concurrent_uploads`. Mapping, frozen-job, native QC, and representative corrected-gene semantics are unchanged.
+
+### Native filename conventions used for automatic assignment
+
+The standard suffixes currently shared with the native cohort scanner are:
+
+```text
+*_tumor_rna_gene_expression_report.xlsx
+*_tumor_rna_transcript_expression_report.xlsx
+*_bcr_heavy_chain_report.xlsx
+*_bcr_isotype_composition.xlsx
+*_tcr_alpha_clone_report.xlsx
+*_tcr_beta_clone_report.xlsx
+*_immune_infiltrate.xlsx
+```
+
+The prefix before the suffix becomes the sample ID. Explorer/Finder-style copies such as `...report (1).xlsx` are normalized before classification. Merged gene/transcript TSVs and native-style metadata-candidate names are recognized for folder filtering; metadata candidates are deliberately not auto-promoted to `primary_metadata`. Filenames are only classification/provenance hints and are never authorization credentials or server storage paths.
+
+## What v0.16.7 adds
+
+- Adds explicit **quota profiles** for browser/server storage instead of using the original Phase-3B smoke-test limits for every deployment. The default `local` / self-hosted profile is sized for real cohort work: **2 GiB per file, 20 GiB retained project storage, and 4,096 uploaded objects**.
+- Retains a `hosted` / conservative profile with the previous **64 MiB per file, 512 MiB per project, and 64 objects** defaults for future constrained/public deployments. Select it with `CFS_QUOTA_PROFILE=hosted`.
+- Keeps `CFS_MAX_FILE_BYTES`, `CFS_MAX_PROJECT_BYTES`, and `CFS_MAX_OBJECTS` as explicit overrides on top of either profile. `CFS_MAX_PROJECT_BYTES` still covers logical retained bytes: uploads + frozen job snapshots + persisted job artifacts.
+- Exposes the active quota profile through `/api/health` (API v5), server startup logging, and the browser UI.
+- Improves batch-upload preflight messages. The browser now shows projected object count and retained storage after the selected batch, and quota failures report current/projected usage rather than a generic object-count error.
+- Keeps the Phase-3D scientific/job behavior unchanged: one local worker by default, frozen snapshots, native mapping/QC, and the representative corrected gene-expression lane.
+
+### Local/self-hosted defaults
+
+```text
+CFS_QUOTA_PROFILE=local       # default
+per file                      2 GiB
+retained project storage     20 GiB
+uploaded objects             4096
+persisted jobs                 16
+concurrent scientific jobs      1
+```
+
+The 20 GiB project budget deliberately includes frozen job snapshots. For example, ~350 MiB of uploaded expression files plus a ~350 MiB frozen job snapshot consumes roughly ~700 MiB of logical retained storage even if hard links reduce physical disk use.
+
+For a deliberately constrained deployment:
+
+```bash
+CFS_QUOTA_PROFILE=hosted ./scripts/run_web_local.sh
+```
+
+All quota values remain environment-overridable when the backend has appropriate private storage capacity.
 
 ## What v0.16.6 adds
 
@@ -52,7 +111,7 @@ Open `http://127.0.0.1:8080`, create/recover a project, upload harmless syntheti
 - Upload request bodies are **streamed by Axum/Tokio to a private scratch file** instead of being accumulated into one server-memory buffer. SHA-256 is calculated incrementally over the same byte stream before the object is finalized.
 - Stores each upload under an **opaque UUID object key** such as `inputs/<object-uuid>.bin`; the browser-supplied/original filename is preserved only as metadata and is never used as a filesystem path.
 - Adds object metadata records containing the opaque object ID, original filename, byte size, SHA-256, upload timestamp, and optional content type.
-- Adds configurable upload safety limits: per-file bytes, total project bytes, and object count. The development defaults are **64 MiB per file**, **512 MiB per project**, and **64 objects**. The server rejects over-limit uploads and removes partial scratch files.
+- Adds configurable upload safety limits: per-file bytes, total project bytes, and object count. Phase 3B originally introduced conservative smoke-test defaults of **64 MiB per file**, **512 MiB per project**, and **64 objects**; v0.16.7 replaces those as the default local profile while retaining them as the optional hosted/conservative profile. The server rejects over-limit uploads and removes partial scratch files.
 - Adds authenticated `GET /api/projects/{project_id}/objects`, `POST /api/projects/{project_id}/objects?filename=...`, and `DELETE /api/projects/{project_id}/objects/{object_id}` endpoints.
 - Adds browser file selection/upload, uploaded-object listing with SHA-256/object IDs, and individual object deletion. Project deletion and TTL expiry continue to remove the complete project directory including all uploaded bytes.
 - Keeps **scientific parsing, mapping/QC, corrected analysis, job execution, result/report persistence, and S3/MinIO disabled**. For Phase-3B validation, use harmless non-patient test files first.

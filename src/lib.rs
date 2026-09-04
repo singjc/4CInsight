@@ -6,9 +6,12 @@ pub mod corrected;
 pub mod diagnostics;
 pub mod focused;
 pub mod gmt_catalog;
+pub mod input_conventions;
 pub mod metadata;
 pub mod outliers;
 pub mod report;
+pub mod ui_theme;
+pub mod web_server;
 
 use anyhow::{Context, Result, anyhow, bail};
 use calamine::{Data, Range, Reader, Xlsx, open_workbook};

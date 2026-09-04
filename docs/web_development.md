@@ -1,10 +1,12 @@
 # 4C Cohort Explorer web development
 
-## Current status: Phase 3D frozen jobs + batch/directory upload (v0.16.6)
+## Current status: Phase 3D.2 native-like high-throughput ingest (v0.16.8)
 
-The browser client now runs through the native Rust `cfs-server` and supports private temporary projects, authenticated opaque-object storage, explicit input-role/sample-ID assignment, the existing native mapping audit, browser multi-file/directory selection, frozen persistent jobs, native cross-modal QC, and one representative corrected gene-expression lane.
+The browser client now runs through the native Rust `cfs-server` and supports private temporary projects, authenticated opaque-object storage, native-like folder scanning, automatic standard role/sample-ID assignment, bounded concurrent uploads, the existing native mapping audit, frozen persistent jobs, native cross-modal QC, and one representative corrected gene-expression lane.
 
-The full desktop scientific stack is **not** web-connected yet. Phase 3D is intentionally a parity bridge: it proves that a browser project can freeze exactly the validated inputs, execute selected existing native engines asynchronously, persist their results privately, and recover those jobs later without creating a separate browser-side scientific implementation.
+Phase 3D.2 is primarily a **large-cohort ingest usability/performance iteration**. It addresses the realistic case where one cohort contains hundreds of gene-expression workbooks plus BCR/TCR/isotype/immune files: users should not have to upload them serially or manually assign a role to every standard 4C filename.
+
+The full desktop scientific stack is **not** web-connected yet. Phase 3D remains a parity bridge: browser/server ingest ultimately feeds the same native mapping/QC/scientific functions rather than creating a second browser-side implementation.
 
 ```text
 Desktop
@@ -14,15 +16,16 @@ Desktop
         ↓
     existing Rust filesystem + complete scientific analysis
 
-Browser (Phase 3D)
+Browser (Phase 3D.2)
     egui / eframe WebRunner (WASM)
         ↓ same-origin HTTP
     cfs-server (Axum, native Rust)
         ├── /       → web/dist static assets
         └── /api/*
               ├── project capability/lifecycle API
-              ├── authenticated object upload/list/delete API
-              ├── explicit input-role assignment
+              ├── bounded concurrent opaque-object uploads
+              ├── shared native filename conventions
+              ├── validated automatic role/sample-ID assignment
               ├── native mapping-audit API
               └── frozen persistent job API
                         ↓
@@ -32,9 +35,7 @@ Browser (Phase 3D)
                representative gene-corrected engine
 ```
 
-The browser crate remains separate under `web/`; workbook parsing, report writers, and the scientific engine continue to compile and run natively rather than inside WASM. The browser reuses `src/analysis_docs.rs` and `src/ui_theme.rs` so documentation and styling remain single-source.
-
----
+The browser crate remains separate under `web/`; workbook parsing, report writers, and the scientific engine continue to compile and run natively rather than inside WASM. `src/input_conventions.rs` is pure shared classification logic imported by native scanning, the server, and WASM, while the browser continues to reuse `src/analysis_docs.rs` and `src/ui_theme.rs` for single-source docs/theme behavior.
 
 ## Run the local web application
 
@@ -170,78 +171,123 @@ Abandoned `.part` upload files are cleaned immediately on handled upload failure
 
 ---
 
-## Uploads: single objects, multi-selection, and directory selection
+## Uploads: native-like folder scans and bounded concurrency
 
-The server still has one authenticated object-upload primitive:
+The server retains one authenticated object-upload primitive:
 
 ```text
 POST /api/projects/{project_id}/objects?filename=...
 ```
 
-The browser now provides two convenience selectors:
+The browser provides:
 
-- **Choose files…** — browser multi-file selection;
-- **Choose folder…** — directory selection using the browser's directory picker semantics (`webkitdirectory`/`directory` where supported).
+- **Choose files…** — arbitrary browser multi-file selection, including intentionally custom-named inputs;
+- **Choose folder…** — directory selection using browser `webkitdirectory`/`directory` semantics where supported.
 
-A selected batch is intentionally **not** combined into one huge request. The WASM client sends each returned `File` through the same existing authenticated streaming object endpoint, sequentially:
+For a folder selection, Phase 3D.2 first applies the **same shared filename conventions used by the native cohort scanner**. Recognized 4C sample workbooks, merged expression tables, and metadata candidates are queued. Auxiliary/unrecognized files such as GMT libraries, logs, unrelated reports, and other files in the same directory are skipped by default. This avoids uploading an entire analysis directory merely because relevant 4C workbooks live inside it.
+
+A batch is still **not** collapsed into one giant request. Each file remains independently authenticated and independently addressable, but the WASM client now runs a bounded number of those requests concurrently:
 
 ```text
-browser selection: N files
+browser selection: N recognized files
         ↓
-file 1 → authenticated stream → object UUID 1 + SHA-256
-file 2 → authenticated stream → object UUID 2 + SHA-256
-...
-file N → authenticated stream → object UUID N + SHA-256
+        ├─ file 1 ─┐
+        ├─ file 2 ─┤  up to configured concurrency
+        ├─ file 3 ─┤  (local default 6)
+        └─ ...    ─┘
+              ↓
+       individual authenticated streams
+              ↓
+       opaque object UUID per file
+       SHA-256 per file
+       quota check per file
 ```
 
-This preserves:
-
-- per-file size checks;
-- per-project quota checks;
-- independent integrity hashes;
-- independent object deletion;
-- bounded request memory;
-- the existing opaque-object storage model.
-
-The folder hierarchy is **not** used as a server storage path. The current server stores the original base filename as metadata only. If preservation of browser-relative folder paths becomes scientifically useful later, it should be added as sanitized provenance metadata rather than being used as a physical storage key.
-
-### Upload limits
-
-Development defaults:
+Default upload concurrency:
 
 ```text
-maximum individual file   64 MiB
-maximum project storage  512 MiB
-maximum uploaded objects  64
-maximum persisted jobs    16
-concurrent local jobs       1
-maximum one job artifact 128 MiB
+local/self-hosted profile        6
+hosted/conservative profile      2
 ```
 
-Configuration:
+Override it deliberately with:
 
 ```text
-CFS_MAX_FILE_BYTES
-CFS_MAX_PROJECT_BYTES
-CFS_MAX_OBJECTS
-CFS_MAX_JOBS
-CFS_MAX_CONCURRENT_JOBS
+CFS_MAX_CONCURRENT_UPLOADS
 ```
 
-The 64 MiB input limit is intentionally conservative for the current laptop validation lane. It is not the intended final upper bound for real scientific projects. Large-data hosting should later use a resumable/multipart storage implementation, preferably behind the same opaque object interface.
+This setting is independent of `CFS_MAX_CONCURRENT_JOBS`, which controls CPU-heavy scientific workers rather than HTTP upload streams.
+
+### Server-side upload locking
+
+The local server no longer holds its global project mutation lock while receiving an entire request body. Each upload now uses:
+
+```text
+short authorization/quota preflight under lock
+        ↓
+release lock
+        ↓
+stream + SHA-256 into unique private .part file
+        ↓
+defensive inferred-role validation where applicable
+        ↓
+reacquire lock
+        ↓
+exact object-count/storage recheck + atomic finalization
+```
+
+This preserves authoritative serialized quota accounting while allowing several file bodies to stream/hash concurrently. Phase 3D.2 also avoids rebuilding the full `manifests/inputs.json` after every single upload; assignment/mapping operations regenerate it once from authoritative object records. Together these changes remove the biggest avoidable serial/O(n²)-like costs seen with hundreds of files.
+
+If a concurrent upload fails, the server removes the partial scratch object and the browser retains that failed `File` in the pending selection so it can be retried without re-selecting the whole batch.
+
+Directory-relative browser paths are **never** used as server storage keys. Original filenames remain classification/provenance metadata only. A future S3 backend can preserve the same opaque-object contract.
+
+### Upload limits and quota profiles
+
+The server now has two named default profiles. The **local/self-hosted** profile is the default for `cfs-server` and is intended for real cohort work on a machine whose operator controls the private storage:
+
+```text
+CFS_QUOTA_PROFILE=local       (default)
+maximum individual file       2 GiB
+maximum retained project     20 GiB
+maximum uploaded objects      4096
+maximum persisted jobs          16
+concurrent local uploads         6
+concurrent local jobs            1
+maximum one job artifact      128 MiB
+```
+
+The **hosted/conservative** profile retains the original Phase-3B smoke-test limits:
+
+```text
+CFS_QUOTA_PROFILE=hosted
+maximum individual file      64 MiB
+maximum retained project    512 MiB
+maximum uploaded objects       64
+concurrent uploads               2
+```
+
+Configuration/overrides:
+
+```text
+CFS_QUOTA_PROFILE            local (default) or hosted
+CFS_MAX_FILE_BYTES           overrides profile per-file default
+CFS_MAX_PROJECT_BYTES        overrides profile project default
+CFS_MAX_OBJECTS              overrides profile object default
+CFS_MAX_CONCURRENT_UPLOADS   local default 6; hosted default 2
+CFS_MAX_JOBS                 default 16
+CFS_MAX_CONCURRENT_JOBS      default 1
+```
+
+`CFS_MAX_PROJECT_BYTES` is a **logical retained-storage budget**, not merely raw uploads. It includes uploaded object bytes + frozen job snapshot bytes + persisted job artifacts. This is intentionally conservative even when local hard links mean snapshot bytes consume little additional physical disk space.
+
+The browser preflights a selected batch using both projected object count and projected retained bytes, while the server remains authoritative and rechecks every individual upload. Large remote/internet deployments should later use resumable/multipart object storage behind the same opaque object interface rather than simply raising HTTP upload limits without bounds.
 
 ---
 
-## Input-role contract
+## Input-role contract and automatic assignment
 
-Every upload begins as:
-
-```text
-role = unassigned
-sample_id = null
-```
-
-Supported roles:
+Supported persisted roles remain:
 
 ```text
 unassigned
@@ -258,13 +304,40 @@ merged_gene_expression
 merged_transcript_expression
 ```
 
-Rules:
+Phase 3D.2 changes **how standard inputs arrive at those roles**. A shared pure-string classifier in `src/input_conventions.rs` is used by native project scanning, `cfs-server`, and WASM. It recognizes these exact native sample-workbook suffixes:
+
+```text
+*_tumor_rna_gene_expression_report.xlsx
+*_tumor_rna_transcript_expression_report.xlsx
+*_bcr_heavy_chain_report.xlsx
+*_bcr_isotype_composition.xlsx
+*_tcr_alpha_clone_report.xlsx
+*_tcr_beta_clone_report.xlsx
+*_immune_infiltrate.xlsx
+```
+
+The prefix before the suffix becomes the proposed sample ID. Explorer/Finder-style copy suffixes such as `...report (1).xlsx` are normalized before classification. Native merged gene/transcript TSV naming and workbook metadata-candidate naming are also recognized for folder filtering.
+
+Automatic assignment is deliberately conservative:
+
+1. the filename must exactly match one of the standard conventions;
+2. the corresponding uploaded bytes must pass the same defensive role validator used by manual assignment;
+3. singleton-role conflicts are not silently overwritten;
+4. metadata **candidates are not automatically made `primary_metadata`**, because choosing which metadata table defines the cohort is a scientific/user decision;
+5. custom or ambiguous filenames remain `unassigned`.
+
+Therefore filenames are a convenience/classification hint, not an authoritative mapping decision. The native mapping audit remains the scientific validation gate.
+
+For an existing project uploaded with v0.16.7 or earlier, use **Auto-detect native roles & sample IDs**. The server validates unassigned recognized objects in a bounded batch, applies only safe assignments, writes the logical manifest once, and returns unresolved/validation-failed counts. No re-upload is required.
+
+The browser defaults the large object table to **files needing attention only**. A role summary shows the automatically/manually assigned population, and **Show all uploaded objects** remains available for inspection/correction. Manual per-object role/sample edits are still supported.
+
+Additional rules:
 
 - exactly one `primary_metadata` object is required for mapping/jobs;
 - singleton merged/metadata roles cannot be silently duplicated;
-- sample-level modalities require an explicit sample ID;
-- role/sample identity is never guessed from filenames;
-- original filenames remain display/provenance metadata only;
+- sample-level modalities require a non-empty sample ID after assignment;
+- original filenames remain display/provenance metadata only and are never storage paths or authorization credentials;
 - web metadata accepts `.xlsx`, `.tsv`, `.csv`, and `.txt`;
 - legacy `.xls` is currently rejected with an instruction to convert it;
 - sample-level modality roles currently require `.xlsx`;
@@ -486,7 +559,7 @@ Expected capabilities include:
 ```json
 {
   "status": "ok",
-  "api_version": 4,
+  "api_version": 6,
   "upload_enabled": true,
   "mapping_enabled": true,
   "analysis_enabled": true,
@@ -494,7 +567,8 @@ Expected capabilities include:
   "representative_gene_enabled": true,
   "batch_upload_enabled": true,
   "storage_backend": "local-filesystem",
-  "max_concurrent_jobs": 1
+  "max_concurrent_jobs": 1,
+  "max_concurrent_uploads": 6
 }
 ```
 
@@ -506,14 +580,21 @@ Expected capabilities include:
 
 Use harmless synthetic/non-patient data first.
 
-### 1. Batch selection/upload
+### 1. Large native-like folder ingest
 
-Create a temporary project, then test both:
+Create a temporary project and test a realistic directory containing many standard 4C workbooks plus auxiliary files. For the user's current validation cohort, the 323 gene-expression workbooks are a useful real-world stress test after synthetic testing.
 
-- **Choose files…** with several files at once;
-- **Choose folder…** with a small directory tree.
+Verify:
 
-Verify that the server lists one opaque object per file and that no selected folder hierarchy appears as a physical server path.
+- **Choose folder…** queues recognized 4C inputs and skips GMT/log/unrelated files;
+- the selected-batch status reports role counts and skipped-file count;
+- upload progress reports bounded concurrency (local default 6);
+- every file still becomes one opaque object with its own SHA-256;
+- standard native-named workbooks arrive already assigned to the expected role/sample ID;
+- only failed uploads remain selected for retry;
+- no selected folder hierarchy appears as a physical server storage path.
+
+For intentionally custom filenames, use **Choose files…**; those inputs are allowed but may remain unassigned for manual review.
 
 Inspect:
 
@@ -521,13 +602,9 @@ Inspect:
 find ~/.local/share/4c-cohort-explorer-web/projects/<PROJECT_UUID> -maxdepth 3 -type f -print
 ```
 
-### 2. Mapping parity
+### 2. Automatic assignment + mapping parity
 
-Assign:
-
-- one primary metadata object;
-- sample-level modality objects with explicit sample IDs;
-- optional merged expression table(s).
+If validating an already-uploaded v0.16.7 project, first click **Auto-detect native roles & sample IDs** and verify the recognized sample workbooks are assigned without re-uploading. Manually choose the one primary metadata object and resolve only genuinely custom/ambiguous inputs.
 
 Run the server mapping audit and compare the exact same synthetic cohort in native mode:
 
@@ -596,10 +673,12 @@ CFS_BIND                  default 127.0.0.1:8080
 CFS_STORAGE_ROOT          default ~/.local/share/4c-cohort-explorer-web
 CFS_WEB_DIST              default web/dist
 CFS_DEFAULT_TTL_HOURS     default 24, capped at 168
-CFS_MAX_FILE_BYTES        default 64 MiB
-CFS_MAX_PROJECT_BYTES     default 512 MiB
+CFS_QUOTA_PROFILE         default local; alternative hosted
+CFS_MAX_FILE_BYTES        local default 2 GiB; hosted default 64 MiB
+CFS_MAX_PROJECT_BYTES     local default 20 GiB; hosted default 512 MiB
                          includes uploaded objects + frozen job snapshots + persisted artifacts (logical retained bytes)
-CFS_MAX_OBJECTS           default 64
+CFS_MAX_OBJECTS           local default 4096; hosted default 64
+CFS_MAX_CONCURRENT_UPLOADS local default 6; hosted default 2
 CFS_MAX_JOBS              default 16
 CFS_MAX_CONCURRENT_JOBS   default 1
 ```

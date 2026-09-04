@@ -4,6 +4,8 @@
 mod analysis_docs;
 mod api;
 mod contract;
+#[path = "../../src/input_conventions.rs"]
+mod input_conventions;
 #[path = "../../src/ui_theme.rs"]
 mod ui_theme;
 
@@ -16,6 +18,7 @@ use api::{HealthResponse, MappingAuditResponse, ObjectSummaryResponse, ProjectSu
 use contract::{RemoteBackendCapabilities, RemoteProjectSummary};
 use eframe::egui;
 use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points};
+use futures_util::{StreamExt, stream};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use wasm_bindgen::{JsCast, closure::Closure, prelude::*};
 
@@ -112,7 +115,12 @@ struct RemoteApiState {
     mapping_audit: Option<MappingAuditResponse>,
     selected_upload_count: usize,
     selected_upload_total_size: u64,
+    selected_upload_skipped_count: usize,
     selected_upload_preview: String,
+    upload_progress_total: usize,
+    upload_progress_completed: usize,
+    upload_progress_failed: usize,
+    show_all_uploaded_objects: bool,
     analysis_subject_column: String,
     analysis_covariates: String,
     jobs: Vec<api::JobSummaryResponse>,
@@ -139,7 +147,12 @@ impl Default for RemoteApiState {
             mapping_audit: None,
             selected_upload_count: 0,
             selected_upload_total_size: 0,
+            selected_upload_skipped_count: 0,
             selected_upload_preview: String::new(),
+            upload_progress_total: 0,
+            upload_progress_completed: 0,
+            upload_progress_failed: 0,
+            show_all_uploaded_objects: false,
             analysis_subject_column: String::new(),
             analysis_covariates: String::new(),
             jobs: Vec::new(),
@@ -262,7 +275,11 @@ impl WebShellApp {
                     state.active_job = None;
                     state.selected_upload_count = 0;
                     state.selected_upload_total_size = 0;
+                    state.selected_upload_skipped_count = 0;
                     state.selected_upload_preview.clear();
+                    state.upload_progress_total = 0;
+                    state.upload_progress_completed = 0;
+                    state.upload_progress_failed = 0;
                     state.status_message = "Private project created".to_string();
                     state.last_error = None;
                 }
@@ -383,7 +400,11 @@ impl WebShellApp {
                     state.active_job = None;
                     state.selected_upload_count = 0;
                     state.selected_upload_total_size = 0;
+                    state.selected_upload_skipped_count = 0;
                     state.selected_upload_preview.clear();
+                    state.upload_progress_total = 0;
+                    state.upload_progress_completed = 0;
+                    state.upload_progress_failed = 0;
                     pending.borrow_mut().clear();
                     state.status_message = format!("Project {} deleted", deleted.project_id);
                     state.last_error = None;
@@ -436,11 +457,27 @@ impl WebShellApp {
             };
             let mut selected = Vec::new();
             let mut total = 0u64;
+            let mut skipped = 0usize;
             let mut preview = Vec::new();
+            let mut role_counts = BTreeMap::<String, usize>::new();
             for idx in 0..files.length() {
                 let Some(file) = files.get(idx) else {
                     continue;
                 };
+                let classification = input_conventions::classify_input_filename(&file.name());
+                if directory && classification.is_none() {
+                    skipped = skipped.saturating_add(1);
+                    continue;
+                }
+                if let Some(classification) = classification {
+                    *role_counts
+                        .entry(classification.kind.display_name().to_string())
+                        .or_default() += 1;
+                } else {
+                    *role_counts
+                        .entry("Custom / unresolved".to_string())
+                        .or_default() += 1;
+                }
                 total = total.saturating_add(file.size() as u64);
                 if preview.len() < 8 {
                     preview.push(format!(
@@ -451,12 +488,26 @@ impl WebShellApp {
                 }
                 selected.push(file);
             }
+            let mut state = remote.borrow_mut();
+            state.selected_upload_skipped_count = skipped;
             if selected.is_empty() {
+                pending.borrow_mut().clear();
+                state.selected_upload_count = 0;
+                state.selected_upload_total_size = 0;
+                state.selected_upload_preview.clear();
+                state.last_error = Some(if directory && skipped > 0 {
+                    format!(
+                        "The selected directory contained {skipped} file(s), but none matched the native 4C input filename conventions. Use Choose files… for intentionally custom-named inputs."
+                    )
+                } else {
+                    "No files were selected.".to_string()
+                });
+                drop(state);
+                ctx.request_repaint();
                 return;
             }
             let count = selected.len();
             *pending.borrow_mut() = selected;
-            let mut state = remote.borrow_mut();
             state.selected_upload_count = count;
             state.selected_upload_total_size = total;
             state.selected_upload_preview = preview.join("  •  ");
@@ -465,11 +516,27 @@ impl WebShellApp {
                     .selected_upload_preview
                     .push_str(&format!("  •  … and {} more", count - 8));
             }
+            state.upload_progress_total = 0;
+            state.upload_progress_completed = 0;
+            state.upload_progress_failed = 0;
             state.last_error = None;
+            let role_summary = role_counts
+                .into_iter()
+                .map(|(role, count)| format!("{role}: {count}"))
+                .collect::<Vec<_>>()
+                .join(" · ");
             state.status_message = if directory {
-                format!("Selected {count} file(s) from a directory; review quotas before uploading")
+                if skipped > 0 {
+                    format!(
+                        "Native-like folder scan selected {count} recognized 4C input file(s) and skipped {skipped} auxiliary/unrecognized file(s) · {role_summary}"
+                    )
+                } else {
+                    format!(
+                        "Native-like folder scan selected {count} recognized 4C input file(s) · {role_summary}"
+                    )
+                }
             } else {
-                format!("Selected {count} file(s); review quotas before uploading")
+                format!("Selected {count} file(s) · {role_summary}")
             };
             drop(state);
             ctx.request_repaint();
@@ -488,15 +555,7 @@ impl WebShellApp {
         }
         let remote = self.remote.clone();
         let pending = self.pending_uploads.clone();
-        let (
-            project_id,
-            token,
-            max_file_bytes,
-            max_project_bytes,
-            max_objects,
-            project_bytes,
-            project_objects,
-        ) = {
+        let (project_id, token, concurrency) = {
             let mut state = remote.borrow_mut();
             if state.busy {
                 return;
@@ -508,111 +567,169 @@ impl WebShellApp {
                     Some("Recover or create a private project before uploading.".to_string());
                 return;
             }
-            let (max_file_bytes, max_project_bytes, max_objects) = state
+            let (max_file_bytes, max_project_bytes, max_objects, max_concurrent_uploads) = state
                 .health
                 .as_ref()
-                .map(|h| (h.max_file_bytes, h.max_project_bytes, h.max_objects))
-                .unwrap_or((0, 0, 0));
+                .map(|h| {
+                    (
+                        h.max_file_bytes,
+                        h.max_project_bytes,
+                        h.max_objects,
+                        h.max_concurrent_uploads,
+                    )
+                })
+                .unwrap_or((0, 0, 0, 1));
             if max_file_bytes > 0 {
                 if let Some(file) = files
                     .iter()
                     .find(|file| file.size() as u64 > max_file_bytes)
                 {
                     state.last_error = Some(format!(
-                        "{} is {} bytes, above the server per-file limit of {} bytes.",
+                        "{} is {}, above the server per-file limit of {}. Raise CFS_MAX_FILE_BYTES only if this local project requires it.",
                         file.name(),
-                        file.size() as u64,
-                        max_file_bytes
+                        format_bytes(file.size() as u64),
+                        format_bytes(max_file_bytes)
                     ));
                     return;
                 }
             }
-            if max_project_bytes > 0
-                && state
-                    .project
-                    .storage_bytes
-                    .saturating_add(state.selected_upload_total_size)
-                    > max_project_bytes
-            {
-                state.last_error = Some(
-                    "The selected batch would exceed the server project-storage quota.".to_string(),
-                );
+            let projected_bytes = state
+                .project
+                .storage_bytes
+                .saturating_add(state.selected_upload_total_size);
+            if max_project_bytes > 0 && projected_bytes > max_project_bytes {
+                state.last_error = Some(format!(
+                    "Selected batch {} + current retained storage {} = {}, above the {} project quota. The quota also counts frozen job snapshots/artifacts. Raise CFS_MAX_PROJECT_BYTES only if the backend has sufficient private storage.",
+                    format_bytes(state.selected_upload_total_size),
+                    format_bytes(state.project.storage_bytes),
+                    format_bytes(projected_bytes),
+                    format_bytes(max_project_bytes)
+                ));
                 return;
             }
-            if max_objects > 0
-                && state.project.uploaded_objects.saturating_add(files.len()) > max_objects
-            {
-                state.last_error = Some(
-                    "The selected batch would exceed the server object-count quota.".to_string(),
-                );
+            let projected_objects = state.project.uploaded_objects.saturating_add(files.len());
+            if max_objects > 0 && projected_objects > max_objects {
+                state.last_error = Some(format!(
+                    "Selected batch has {} files; the project currently has {} uploaded objects, so this upload would require {} of the server's {} object slots. Reduce the batch or raise CFS_MAX_OBJECTS for an appropriately sized local backend.",
+                    files.len(),
+                    state.project.uploaded_objects,
+                    projected_objects,
+                    max_objects
+                ));
                 return;
             }
+            let concurrency = max_concurrent_uploads.max(1).min(files.len().max(1));
             state.busy = true;
             state.last_error = None;
-            state.status_message = format!("Uploading {} file(s)…", files.len());
-            (
-                project_id,
-                token,
-                max_file_bytes,
-                max_project_bytes,
-                max_objects,
-                state.project.storage_bytes,
-                state.project.uploaded_objects,
-            )
+            state.upload_progress_total = files.len();
+            state.upload_progress_completed = 0;
+            state.upload_progress_failed = 0;
+            state.status_message = format!(
+                "Uploading {} file(s) with up to {} concurrent local stream(s)…",
+                files.len(),
+                concurrency
+            );
+            (project_id, token, concurrency)
         };
-        let _ = (
-            max_file_bytes,
-            max_project_bytes,
-            max_objects,
-            project_bytes,
-            project_objects,
-        );
+
         wasm_bindgen_futures::spawn_local(async move {
-            let mut uploaded_objects = Vec::new();
-            let mut latest_project = None;
+            let uploads = stream::iter(files.into_iter().enumerate().map(|(idx, file)| {
+                let project_id = project_id.clone();
+                let token = token.clone();
+                let retry_file = file.clone();
+                async move {
+                    (
+                        idx,
+                        retry_file,
+                        api::upload_object(&project_id, &token, file).await,
+                    )
+                }
+            }))
+            .buffer_unordered(concurrency);
+            futures_util::pin_mut!(uploads);
+
             let mut errors = Vec::new();
-            for (idx, file) in files.into_iter().enumerate() {
-                {
-                    let mut state = remote.borrow_mut();
-                    state.status_message = format!("Uploading file {}…", idx + 1);
-                    drop(state);
-                    ctx.request_repaint();
+            let mut failed_files = Vec::new();
+            while let Some((idx, retry_file, result)) = uploads.next().await {
+                let mut state = remote.borrow_mut();
+                state.upload_progress_completed = state.upload_progress_completed.saturating_add(1);
+                if let Err(error) = result {
+                    state.upload_progress_failed = state.upload_progress_failed.saturating_add(1);
+                    errors.push(format!("file {}: {error}", idx + 1));
+                    failed_files.push(retry_file);
                 }
-                match api::upload_object(&project_id, &token, file).await {
-                    Ok(uploaded) => {
-                        latest_project = Some(uploaded.project);
-                        uploaded_objects.push(uploaded.object);
-                    }
-                    Err(error) => errors.push(format!("file {}: {error}", idx + 1)),
-                }
+                state.status_message = format!(
+                    "Uploaded {}/{} file(s) · {} failed · concurrency {}",
+                    state.upload_progress_completed,
+                    state.upload_progress_total,
+                    state.upload_progress_failed,
+                    concurrency
+                );
+                drop(state);
+                ctx.request_repaint();
             }
+
+            let project_result = api::get_project(&project_id, &token).await;
+            let objects_result = api::list_objects(&project_id, &token).await;
             let mut state = remote.borrow_mut();
             state.busy = false;
-            if let Some(project) = latest_project {
+            if let Ok(project) = project_result {
                 state.project = remote_project_from_response(&project);
             }
-            state.objects.extend(uploaded_objects);
-            state.objects.sort_by(|a, b| {
-                a.uploaded_unix_seconds
-                    .cmp(&b.uploaded_unix_seconds)
-                    .then_with(|| a.object_id.cmp(&b.object_id))
-            });
-            sync_assignment_drafts(&mut state);
+            match objects_result {
+                Ok(objects) => {
+                    state.objects = objects;
+                    sync_assignment_drafts(&mut state);
+                }
+                Err(error) => errors.push(format!("refresh after upload: {error}")),
+            }
             state.mapping_audit = None;
             state.active_job = None;
-            state.selected_upload_count = 0;
-            state.selected_upload_total_size = 0;
-            state.selected_upload_preview.clear();
-            pending.borrow_mut().clear();
+            if failed_files.is_empty() {
+                state.selected_upload_count = 0;
+                state.selected_upload_total_size = 0;
+                state.selected_upload_skipped_count = 0;
+                state.selected_upload_preview.clear();
+                pending.borrow_mut().clear();
+            } else {
+                let failed_total = failed_files
+                    .iter()
+                    .map(|file| file.size() as u64)
+                    .sum::<u64>();
+                state.selected_upload_count = failed_files.len();
+                state.selected_upload_total_size = failed_total;
+                state.selected_upload_skipped_count = 0;
+                state.selected_upload_preview = format!(
+                    "{} failed file(s) retained for one-click retry",
+                    failed_files.len()
+                );
+                *pending.borrow_mut() = failed_files;
+            }
+
+            let auto_assigned = state
+                .objects
+                .iter()
+                .filter(|object| object.role != "unassigned")
+                .count();
+            let unresolved = state
+                .objects
+                .iter()
+                .filter(|object| object.role == "unassigned")
+                .count();
             if errors.is_empty() {
-                state.status_message =
-                    "Batch upload complete; assign explicit 4C input roles before mapping"
-                        .to_string();
+                state.status_message = format!(
+                    "Batch upload complete · {} object(s) assigned by native filename conventions · {} object(s) need attention",
+                    auto_assigned, unresolved
+                );
                 state.last_error = None;
             } else {
-                state.status_message =
-                    "Batch upload completed with one or more failures".to_string();
-                state.last_error = Some(errors.join(" | "));
+                let hidden = errors.len().saturating_sub(6);
+                let mut message = errors.into_iter().take(6).collect::<Vec<_>>().join(" | ");
+                if hidden > 0 {
+                    message.push_str(&format!(" | … and {hidden} more failure(s)"));
+                }
+                state.status_message = "Batch upload completed with one or more failures; failed files remain selected for retry".to_string();
+                state.last_error = Some(message);
             }
             drop(state);
             ctx.request_repaint();
@@ -727,6 +844,61 @@ impl WebShellApp {
         });
     }
 
+    fn auto_assign_existing_objects(&self, ctx: egui::Context) {
+        let remote = self.remote.clone();
+        let (project_id, token) = {
+            let mut state = remote.borrow_mut();
+            if state.busy {
+                return;
+            }
+            let project_id = state.recovery_project_id.trim().to_string();
+            let token = state.recovery_token.trim().to_string();
+            if project_id.is_empty() || token.is_empty() {
+                state.last_error = Some(
+                    "Project credentials are required to auto-detect uploaded input roles."
+                        .to_string(),
+                );
+                return;
+            }
+            state.busy = true;
+            state.last_error = None;
+            state.status_message =
+                "Applying native filename conventions to unassigned uploaded objects…".to_string();
+            (project_id, token)
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = api::auto_assign_objects(&project_id, &token).await;
+            let mut state = remote.borrow_mut();
+            state.busy = false;
+            match result {
+                Ok(response) => {
+                    state.objects = response.objects;
+                    sync_assignment_drafts(&mut state);
+                    state.mapping_audit = None;
+                    state.active_job = None;
+                    state.status_message = format!(
+                        "Native auto-detection assigned {} object(s) · {} already assigned · {} failed validation · {} unresolved",
+                        response.assigned,
+                        response.already_assigned,
+                        response.validation_failed,
+                        response.unresolved
+                    );
+                    if response.warnings.is_empty() {
+                        state.last_error = None;
+                    } else {
+                        state.last_error = Some(response.warnings.join(" | "));
+                    }
+                }
+                Err(error) => {
+                    state.status_message = "Automatic role detection failed".to_string();
+                    state.last_error = Some(error);
+                }
+            }
+            drop(state);
+            ctx.request_repaint();
+        });
+    }
+
     fn run_remote_mapping_audit(&self, ctx: egui::Context) {
         let remote = self.remote.clone();
         let comparison_column = self.comparison_field.trim().to_string();
@@ -793,11 +965,15 @@ impl WebShellApp {
             }
             let project_id = state.recovery_project_id.trim().to_string();
             let token = state.recovery_token.trim().to_string();
-            let Some(mapping) = state.mapping_audit.as_ref() else {
-                state.last_error = Some(
-                    "Run and review the current mapping audit before submitting a job.".to_string(),
-                );
-                return;
+            let mapping_snapshot_sha256 = match state.mapping_audit.as_ref() {
+                Some(mapping) => mapping.mapping_snapshot_sha256.clone(),
+                None => {
+                    state.last_error = Some(
+                        "Run and review the current mapping audit before submitting a job."
+                            .to_string(),
+                    );
+                    return;
+                }
             };
             if project_id.is_empty() || token.is_empty() {
                 state.last_error =
@@ -826,7 +1002,7 @@ impl WebShellApp {
             (
                 project_id,
                 token,
-                mapping.mapping_snapshot_sha256.clone(),
+                mapping_snapshot_sha256,
                 if subject_column.is_empty() {
                     None
                 } else {
@@ -970,7 +1146,7 @@ impl WebShellApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.remote.borrow().clone();
         let connected = snapshot.health.is_some();
-        let phase_label = "Web · Phase 3D";
+        let phase_label = "Web · Phase 3D.2";
         let server_label = if connected {
             "Local server connected"
         } else {
@@ -1024,7 +1200,7 @@ impl WebShellApp {
     fn overview(&mut self, ui: &mut egui::Ui) {
         ui.heading("Browser client + local Rust server");
         ui.label(
-            "Phase 3D serves this WASM frontend and a small same-origin API from one local cfs-server process. Uploaded inputs can now be explicitly assigned and validated for the native mapping audit, while frozen asynchronous jobs now run native mapping/QC and one representative corrected gene-expression lane.",
+            "Phase 3D.2 adds native-like high-throughput ingest on top of the same-origin cfs-server: folder scans skip auxiliary files, standard 4C filenames auto-assign roles/sample IDs, and bounded concurrent uploads feed the existing native mapping/QC/job path.",
         );
         ui.add_space(10.0);
 
@@ -1061,6 +1237,13 @@ impl WebShellApp {
                     "Batch/folder selection: {} · persistent jobs: {} · local worker slots: {}",
                     health.batch_upload_enabled, health.persistent_jobs, health.max_concurrent_jobs
                 ));
+                ui.label(format!(
+                    "Quota profile: {} · per file {} · project {} · {} objects",
+                    health.quota_profile,
+                    format_bytes(health.max_file_bytes),
+                    format_bytes(health.max_project_bytes),
+                    health.max_objects
+                ));
             }
             if let Some(error) = &snapshot.last_error {
                 ui.label(egui::RichText::new(error).color(egui::Color32::LIGHT_RED));
@@ -1076,7 +1259,7 @@ impl WebShellApp {
             .inner_margin(12)
             .corner_radius(8)
             .show(ui, |ui| {
-            ui.label(egui::RichText::new("What works in Phase 3D").strong());
+            ui.label(egui::RichText::new("What works in Phase 3D.2").strong());
             for item in [
                 "One Rust cfs-server serves both web/dist and /api from 127.0.0.1:8080 by default.",
                 "A private temporary project can be created with an opaque UUID and independent recovery token.",
@@ -1212,7 +1395,7 @@ impl WebShellApp {
     fn cohort_shell(&mut self, ui: &mut egui::Ui) {
         ui.heading("Cohort Analysis — private remote-project shell");
         ui.label(
-            "Phase 3D adds explicit input-role assignment, defensive file validation, primary-metadata parsing, and the existing native sample mapping audit on top of authenticated uploads. Frozen asynchronous job submission is enabled after a current validated mapping snapshot exists; only native QC and the representative corrected gene-expression lane are connected in this phase.",
+            "Phase 3D.2 keeps explicit/manual role correction available but automatically recognizes the same standard 4C filenames as the native desktop scanner. Folder upload filters auxiliary files, bounded concurrency speeds large cohorts, and the existing native mapping/QC/frozen-job path remains the scientific validation gate.",
         );
         ui.add_space(8.0);
 
@@ -1336,7 +1519,11 @@ impl WebShellApp {
                     state.active_job = None;
                     state.selected_upload_count = 0;
                     state.selected_upload_total_size = 0;
+                    state.selected_upload_skipped_count = 0;
                     state.selected_upload_preview.clear();
+                    state.upload_progress_total = 0;
+                    state.upload_progress_completed = 0;
+                    state.upload_progress_failed = 0;
                     self.pending_uploads.borrow_mut().clear();
                     state.status_message = "Recovery credentials cleared from browser memory; the server project remains until deletion or expiry".to_string();
                 }
@@ -1351,12 +1538,15 @@ impl WebShellApp {
             .show(ui, |ui| {
             ui.label(egui::RichText::new("3. Private uploaded objects").strong());
             ui.label(
-                "Phase 3D stores uploaded bytes under opaque object UUIDs, then requires an explicit 4C role assignment before interpretation. The original filename remains metadata only. Every upload, assignment, mapping, list, and delete request requires the project recovery token.",
+                "Phase 3D.2 stores uploaded bytes under opaque object UUIDs. Standard native 4C filenames can automatically seed role/sample-ID assignments after content validation; custom or ambiguous inputs remain unassigned for review. Filenames remain metadata only and never become storage keys or authorization credentials.",
             );
             if let Some(health) = &snapshot.health {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Local storage backend:");
+                    ui.label("Storage backend:");
                     ui.monospace(&health.storage_backend);
+                    ui.separator();
+                    ui.label("quota profile");
+                    ui.monospace(&health.quota_profile);
                     ui.separator();
                     ui.label(format!("per-file limit {}", format_bytes(health.max_file_bytes)));
                     ui.separator();
@@ -1365,6 +1555,8 @@ impl WebShellApp {
                     ui.label(format!("max {} objects", health.max_objects));
                     ui.separator();
                     ui.label(format!("max {} persisted jobs", health.max_jobs_per_project));
+                    ui.separator();
+                    ui.label(format!("{} concurrent uploads", health.max_concurrent_uploads));
                 });
             }
             ui.add_space(5.0);
@@ -1418,15 +1610,73 @@ impl WebShellApp {
                     let mut state = self.remote.borrow_mut();
                     state.selected_upload_count = 0;
                     state.selected_upload_total_size = 0;
+                    state.selected_upload_skipped_count = 0;
                     state.selected_upload_preview.clear();
+                    state.upload_progress_total = 0;
+                    state.upload_progress_completed = 0;
+                    state.upload_progress_failed = 0;
                 }
             });
             if !snapshot.selected_upload_preview.is_empty() {
                 ui.label(egui::RichText::new(&snapshot.selected_upload_preview).small().weak());
             }
+            if snapshot.selected_upload_skipped_count > 0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Folder scan skipped {} auxiliary/unrecognized file(s), matching native desktop scan behavior.",
+                        snapshot.selected_upload_skipped_count
+                    ))
+                    .small()
+                    .weak(),
+                );
+            }
+            if snapshot.upload_progress_total > 0 && snapshot.busy {
+                let fraction = snapshot.upload_progress_completed as f32
+                    / snapshot.upload_progress_total.max(1) as f32;
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .show_percentage()
+                        .text(format!(
+                            "{}/{} uploaded · {} failed",
+                            snapshot.upload_progress_completed,
+                            snapshot.upload_progress_total,
+                            snapshot.upload_progress_failed
+                        )),
+                );
+            }
+            if snapshot.selected_upload_count > 0 {
+                if let Some(health) = &snapshot.health {
+                    let projected_objects = snapshot
+                        .project
+                        .uploaded_objects
+                        .saturating_add(snapshot.selected_upload_count);
+                    let projected_bytes = snapshot
+                        .project
+                        .storage_bytes
+                        .saturating_add(snapshot.selected_upload_total_size);
+                    let fits_objects = projected_objects <= health.max_objects;
+                    let fits_bytes = projected_bytes <= health.max_project_bytes;
+                    let color = if fits_objects && fits_bytes {
+                        ui.visuals().weak_text_color()
+                    } else {
+                        egui::Color32::LIGHT_RED
+                    };
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Projected after upload: {}/{} objects · {} / {} retained project storage",
+                            projected_objects,
+                            health.max_objects,
+                            format_bytes(projected_bytes),
+                            format_bytes(health.max_project_bytes)
+                        ))
+                        .small()
+                        .color(color),
+                    );
+                }
+            }
             ui.label(
                 egui::RichText::new(
-                    "Multi-file and directory selection are browser-side conveniences: each file is still uploaded as its own authenticated opaque object, so per-file/project quotas and deletion semantics remain unchanged. Directory paths are not used as server storage keys.",
+                    "Choose folder… now mirrors native project scanning: only recognized 4C inputs are queued by default, while auxiliary files such as GMT libraries/logs are skipped. Uploads use bounded concurrency, but each file remains its own authenticated opaque object with independent SHA-256/quota enforcement. Directory paths are never server storage keys.",
                 )
                 .small()
                 .weak(),
@@ -1443,12 +1693,52 @@ impl WebShellApp {
             if objects.is_empty() {
                 ui.label(egui::RichText::new("No uploaded objects in this project.").weak());
             } else {
+                let unresolved = objects.iter().filter(|object| object.role == "unassigned").count();
+                let assigned = objects.len().saturating_sub(unresolved);
+                let mut role_counts = BTreeMap::<String, usize>::new();
+                for object in &objects {
+                    *role_counts.entry(input_role_label(&object.role).to_string()).or_default() += 1;
+                }
+                let role_summary = role_counts
+                    .iter()
+                    .map(|(role, count)| format!("{role}: {count}"))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
                 ui.label(
-                    egui::RichText::new(
-                        "Assign every scientific input explicitly. Sample-level modality roles require the biological/file sample ID used to match the primary metadata. Filenames are not used to infer roles or sample identity.",
-                    )
+                    egui::RichText::new(format!(
+                        "{} assigned automatically/manually · {} need attention · {}",
+                        assigned, unresolved, role_summary
+                    ))
                     .small(),
                 );
+                ui.label(
+                    egui::RichText::new(
+                        "Exact native desktop filename conventions automatically assign standard sample workbooks and sample IDs after defensive validation. Use Auto-detect for projects uploaded with an older version; only unresolved/custom files require manual edits. The mapping audit remains the authoritative validation gate.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(
+                            !snapshot.busy && unresolved > 0,
+                            egui::Button::new("Auto-detect native roles & sample IDs"),
+                        )
+                        .clicked()
+                    {
+                        self.auto_assign_existing_objects(ui.ctx().clone());
+                    }
+                    let mut show_all = snapshot.show_all_uploaded_objects;
+                    let label = if show_all {
+                        "Show only files needing attention"
+                    } else {
+                        "Show all uploaded objects"
+                    };
+                    if ui.selectable_label(show_all, label).clicked() {
+                        show_all = !show_all;
+                        self.remote.borrow_mut().show_all_uploaded_objects = show_all;
+                    }
+                });
                 ui.add_space(5.0);
                 egui::Grid::new("web_phase3c_objects_grid")
                     .striped(true)
@@ -1458,7 +1748,18 @@ impl WebShellApp {
                             ui.label(egui::RichText::new(heading).strong());
                         }
                         ui.end_row();
-                        for object in objects {
+                        let visible_objects = objects
+                            .into_iter()
+                            .filter(|object| snapshot.show_all_uploaded_objects || object.role == "unassigned")
+                            .collect::<Vec<_>>();
+                        if visible_objects.is_empty() {
+                            ui.label(egui::RichText::new("All uploaded objects are assigned. Use ‘Show all uploaded objects’ to inspect or correct them.").weak());
+                            for _ in 1..7 {
+                                ui.label("");
+                            }
+                            ui.end_row();
+                        }
+                        for object in visible_objects {
                             ui.label(&object.original_name).on_hover_text(format!(
                                 "Uploaded at Unix second {}{}",
                                 object.uploaded_unix_seconds,
@@ -2336,25 +2637,25 @@ async fn poll_remote_job(
     for _ in 0..3600usize {
         gloo_timers::future::TimeoutFuture::new(1000).await;
         let result = api::get_job(&project_id, &token, &job_id).await;
-        let mut terminal = false;
-        {
+        let terminal = {
             let mut state = remote.borrow_mut();
             match result {
                 Ok(job) => {
-                    terminal = matches!(
+                    let terminal = matches!(
                         job.summary.status.as_str(),
                         "complete" | "failed" | "cancelled"
                     );
                     state.status_message = job.summary.progress_message.clone();
                     state.active_job = Some(job);
                     state.last_error = None;
+                    terminal
                 }
                 Err(error) => {
                     state.last_error = Some(error);
-                    terminal = true;
+                    true
                 }
             }
-        }
+        };
         ctx.request_repaint();
         if terminal {
             break;

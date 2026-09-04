@@ -1,11 +1,11 @@
 //! Local web server for the 4C Cohort Explorer browser client.
 //!
-//! Phase 3D adds frozen, persistent local analysis jobs on top of the private
-//! project/object/mapping layers. A job snapshots the validated object-role
-//! manifest before execution, reuses the native mapping and cross-modal QC
-//! engines, and optionally runs one representative native corrected
-//! gene-expression lane. The complete unified multi-omics/report stack remains
-//! intentionally deferred to later phases.
+//! Phase 3D.2 adds native-like high-throughput ingest on top of the frozen,
+//! persistent local analysis-job path: shared filename conventions, validated
+//! automatic role/sample assignment, and bounded concurrent request streaming.
+//! Jobs still snapshot a validated object-role manifest and reuse the native
+//! mapping/QC and representative corrected gene-expression engines. The complete
+//! unified multi-omics/report stack remains intentionally deferred.
 
 use crate::{
     cohort::{
@@ -14,6 +14,7 @@ use crate::{
         load_metadata,
     },
     corrected::{CorrectedModelSpec, run_corrected_expression},
+    input_conventions::{FilenameInputKind, classify_input_filename},
     metadata::canonical_sample_id,
     outliers::{OutlierConfig, run_cross_modal_outlier_qc},
 };
@@ -30,7 +31,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -59,16 +60,66 @@ const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_TTL_HOURS: u64 = 24;
 const MAX_TTL_HOURS: u64 = 24 * 7;
 const CLEANUP_INTERVAL_SECONDS: u64 = 60 * 60;
-const DEFAULT_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
-const DEFAULT_MAX_PROJECT_BYTES: u64 = 512 * 1024 * 1024;
-const DEFAULT_MAX_OBJECTS: usize = 64;
+const LOCAL_DEFAULT_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const LOCAL_DEFAULT_MAX_PROJECT_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const LOCAL_DEFAULT_MAX_OBJECTS: usize = 4_096;
+const HOSTED_DEFAULT_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const HOSTED_DEFAULT_MAX_PROJECT_BYTES: u64 = 512 * 1024 * 1024;
+const HOSTED_DEFAULT_MAX_OBJECTS: usize = 64;
 const DEFAULT_MAX_JOBS_PER_PROJECT: usize = 16;
 const DEFAULT_MAX_CONCURRENT_JOBS: usize = 1;
+const LOCAL_DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 6;
+const HOSTED_DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 2;
+const AUTO_ASSIGN_VALIDATION_CONCURRENCY: usize = 6;
 const MAX_JOB_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 const UPLOAD_SCRATCH_MAX_AGE_SECONDS: u64 = 6 * 60 * 60;
 const MAX_XLSX_ENTRIES: usize = 4_096;
 const MAX_XLSX_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_XLSX_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaProfile {
+    LocalSelfHosted,
+    HostedConservative,
+}
+
+impl QuotaProfile {
+    fn from_env() -> Result<Self> {
+        let value = env::var("CFS_QUOTA_PROFILE")
+            .unwrap_or_else(|_| "local".to_string())
+            .trim()
+            .to_ascii_lowercase();
+        match value.as_str() {
+            "local" | "self-hosted" | "self_hosted" => Ok(Self::LocalSelfHosted),
+            "hosted" | "conservative" => Ok(Self::HostedConservative),
+            _ => {
+                bail!("CFS_QUOTA_PROFILE must be one of: local, self-hosted, hosted, conservative")
+            }
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalSelfHosted => "local-self-hosted",
+            Self::HostedConservative => "hosted-conservative",
+        }
+    }
+
+    fn defaults(self) -> (u64, u64, usize) {
+        match self {
+            Self::LocalSelfHosted => (
+                LOCAL_DEFAULT_MAX_FILE_BYTES,
+                LOCAL_DEFAULT_MAX_PROJECT_BYTES,
+                LOCAL_DEFAULT_MAX_OBJECTS,
+            ),
+            Self::HostedConservative => (
+                HOSTED_DEFAULT_MAX_FILE_BYTES,
+                HOSTED_DEFAULT_MAX_PROJECT_BYTES,
+                HOSTED_DEFAULT_MAX_OBJECTS,
+            ),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WebServerConfig {
@@ -76,11 +127,13 @@ pub struct WebServerConfig {
     pub storage_root: PathBuf,
     pub web_dist: PathBuf,
     pub default_ttl_hours: u64,
+    pub quota_profile: QuotaProfile,
     pub max_file_bytes: u64,
     pub max_project_bytes: u64,
     pub max_objects: usize,
     pub max_jobs_per_project: usize,
     pub max_concurrent_jobs: usize,
+    pub max_concurrent_uploads: usize,
 }
 
 impl WebServerConfig {
@@ -107,17 +160,27 @@ impl WebServerConfig {
             .transpose()?
             .unwrap_or(DEFAULT_TTL_HOURS)
             .clamp(1, MAX_TTL_HOURS);
-        let max_file_bytes = env_u64("CFS_MAX_FILE_BYTES", DEFAULT_MAX_FILE_BYTES)?;
-        let max_project_bytes = env_u64("CFS_MAX_PROJECT_BYTES", DEFAULT_MAX_PROJECT_BYTES)?;
-        let max_objects = env_usize("CFS_MAX_OBJECTS", DEFAULT_MAX_OBJECTS)?;
+        let quota_profile = QuotaProfile::from_env()?;
+        let (default_max_file_bytes, default_max_project_bytes, default_max_objects) =
+            quota_profile.defaults();
+        let max_file_bytes = env_u64("CFS_MAX_FILE_BYTES", default_max_file_bytes)?;
+        let max_project_bytes = env_u64("CFS_MAX_PROJECT_BYTES", default_max_project_bytes)?;
+        let max_objects = env_usize("CFS_MAX_OBJECTS", default_max_objects)?;
         let max_jobs_per_project = env_usize("CFS_MAX_JOBS", DEFAULT_MAX_JOBS_PER_PROJECT)?;
         let max_concurrent_jobs =
             env_usize("CFS_MAX_CONCURRENT_JOBS", DEFAULT_MAX_CONCURRENT_JOBS)?;
+        let default_upload_concurrency = match quota_profile {
+            QuotaProfile::LocalSelfHosted => LOCAL_DEFAULT_MAX_CONCURRENT_UPLOADS,
+            QuotaProfile::HostedConservative => HOSTED_DEFAULT_MAX_CONCURRENT_UPLOADS,
+        };
+        let max_concurrent_uploads =
+            env_usize("CFS_MAX_CONCURRENT_UPLOADS", default_upload_concurrency)?;
         if max_file_bytes == 0
             || max_project_bytes == 0
             || max_objects == 0
             || max_jobs_per_project == 0
             || max_concurrent_jobs == 0
+            || max_concurrent_uploads == 0
         {
             bail!("web limits must all be greater than zero");
         }
@@ -130,11 +193,13 @@ impl WebServerConfig {
             storage_root,
             web_dist,
             default_ttl_hours,
+            quota_profile,
             max_file_bytes,
             max_project_bytes,
             max_objects,
             max_jobs_per_project,
             max_concurrent_jobs,
+            max_concurrent_uploads,
         })
     }
 }
@@ -224,6 +289,16 @@ pub enum UploadedInputRole {
 }
 
 impl UploadedInputRole {
+    fn is_singleton(self) -> bool {
+        matches!(
+            self,
+            Self::PrimaryMetadata
+                | Self::FilteredMetadata
+                | Self::MergedGeneExpression
+                | Self::MergedTranscriptExpression
+        )
+    }
+
     fn requires_sample_id(self) -> bool {
         matches!(
             self,
@@ -235,6 +310,21 @@ impl UploadedInputRole {
                 | Self::TcrBeta
                 | Self::ImmuneInfiltrate
         )
+    }
+
+    fn from_filename_kind(kind: FilenameInputKind) -> Option<Self> {
+        match kind {
+            FilenameInputKind::GeneExpression => Some(Self::GeneExpression),
+            FilenameInputKind::TranscriptExpression => Some(Self::TranscriptExpression),
+            FilenameInputKind::Bcr => Some(Self::Bcr),
+            FilenameInputKind::BcrIsotype => Some(Self::BcrIsotype),
+            FilenameInputKind::TcrAlpha => Some(Self::TcrAlpha),
+            FilenameInputKind::TcrBeta => Some(Self::TcrBeta),
+            FilenameInputKind::ImmuneInfiltrate => Some(Self::ImmuneInfiltrate),
+            FilenameInputKind::MergedGeneExpression => Some(Self::MergedGeneExpression),
+            FilenameInputKind::MergedTranscriptExpression => Some(Self::MergedTranscriptExpression),
+            FilenameInputKind::MetadataCandidate => None,
+        }
     }
 
     fn cohort_modality(self) -> Option<CohortModality> {
@@ -339,11 +429,13 @@ pub struct HealthResponse {
     pub representative_gene_enabled: bool,
     pub batch_upload_enabled: bool,
     pub storage_backend: &'static str,
+    pub quota_profile: &'static str,
     pub max_file_bytes: u64,
     pub max_project_bytes: u64,
     pub max_objects: usize,
     pub max_jobs_per_project: usize,
     pub max_concurrent_jobs: usize,
+    pub max_concurrent_uploads: usize,
     pub max_job_artifact_bytes: u64,
 }
 
@@ -389,6 +481,16 @@ pub struct AssignObjectRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct AssignObjectResponse {
     pub object: ObjectSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutoAssignObjectsResponse {
+    pub assigned: usize,
+    pub already_assigned: usize,
+    pub unresolved: usize,
+    pub validation_failed: usize,
+    pub objects: Vec<ObjectSummary>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1028,40 +1130,40 @@ impl LocalProjectStore {
         max_project_bytes: u64,
         max_objects: usize,
     ) -> Result<(ObjectSummary, ProjectSummary)> {
-        let _guard = self.mutation_lock.lock().await;
-        let mut project = self.authorize_record(project_id, token).await?;
-        self.reconcile_record_storage(&mut project).await?;
-        if project.uploaded_objects >= max_objects {
-            bail!("project has reached the maximum object count");
-        }
         let original_name = sanitize_upload_filename(filename)?;
-        if let Some(length) = content_length {
-            if length == 0 {
-                bail!("empty uploads are not allowed");
-            }
-            if length > max_file_bytes {
-                bail!("upload exceeds the maximum file size");
-            }
-            if project.storage_bytes.saturating_add(length) > max_project_bytes {
-                bail!("upload would exceed the project storage quota");
-            }
-        }
 
-        let objects_dir = self.objects_dir(project_id);
-        let inputs_dir = self.inputs_dir(project_id);
-        let scratch_dir = self.scratch_dir(project_id);
-        for dir in [&objects_dir, &inputs_dir, &scratch_dir] {
-            fs::create_dir_all(dir).await?;
-            set_private_dir_permissions(dir).await?;
+        // Short authorization/quota preflight only. The global project mutation
+        // lock is intentionally released before reading the request body so
+        // bounded concurrent uploads can stream/hash in parallel. Quotas are
+        // checked again atomically during finalization.
+        {
+            let _guard = self.mutation_lock.lock().await;
+            let project = self.authorize_record(project_id, token).await?;
+            if project.uploaded_objects >= max_objects {
+                bail!("project has reached the maximum object count");
+            }
+            if let Some(length) = content_length {
+                if length == 0 {
+                    bail!("empty uploads are not allowed");
+                }
+                if length > max_file_bytes {
+                    bail!("upload exceeds the maximum file size");
+                }
+                if project.storage_bytes.saturating_add(length) > max_project_bytes {
+                    bail!("upload would exceed the project storage quota");
+                }
+            }
         }
 
         let object_id = Uuid::new_v4();
-        let scratch_path = scratch_dir.join(format!("upload-{object_id}.part"));
+        let scratch_path = self
+            .scratch_dir(project_id)
+            .join(format!("upload-{object_id}.part"));
         let final_path = self.object_data_path(project_id, object_id);
         let metadata_path = self.object_record_path(project_id, object_id);
         let mut file = fs::File::create(&scratch_path)
             .await
-            .with_context(|| format!("failed to create {}", scratch_path.display()))?;
+            .with_context(|| format!("failed to create upload scratch object {object_id}"))?;
         set_private_file_permissions(&scratch_path).await?;
 
         let mut total = 0u64;
@@ -1076,9 +1178,6 @@ impl LocalProjectStore {
                     .ok_or_else(|| anyhow!("upload size overflow"))?;
                 if total > max_file_bytes {
                     bail!("upload exceeds the maximum file size");
-                }
-                if project.storage_bytes.saturating_add(total) > max_project_bytes {
-                    bail!("upload would exceed the project storage quota");
                 }
                 hasher.update(&chunk);
                 file.write_all(&chunk).await?;
@@ -1097,40 +1196,91 @@ impl LocalProjectStore {
             bail!("empty uploads are not allowed");
         }
 
-        fs::rename(&scratch_path, &final_path)
+        // Exact native filename conventions can safely prepare an automatic
+        // role/sample-ID assignment. The bytes still pass the same defensive
+        // role validator used by manual assignment. If validation fails, the
+        // upload remains valid but is stored as unassigned for manual review.
+        let sha256 = hex::encode(hasher.finalize());
+        let mut inferred_assignment = infer_auto_assignment_from_filename(&original_name);
+        if let Some((role, _)) = &inferred_assignment {
+            let validation_path = scratch_path.clone();
+            let validation_name = original_name.clone();
+            let validation_role = *role;
+            let valid = tokio::task::spawn_blocking(move || {
+                validate_object_for_role(&validation_path, &validation_name, validation_role)
+            })
             .await
-            .with_context(|| format!("failed to finalize uploaded object {object_id}"))?;
-        set_private_file_permissions(&final_path).await?;
-        let object_record = StoredObjectRecord {
-            schema_version: 1,
-            object_id,
-            original_name,
-            byte_size: total,
-            sha256: hex::encode(hasher.finalize()),
-            uploaded_unix_seconds: unix_seconds()?,
-            content_type: sanitize_content_type(content_type.as_deref()),
-            role: UploadedInputRole::Unassigned,
-            sample_id: None,
-        };
-        if let Err(error) = write_json_atomic(&metadata_path, &object_record).await {
-            let _ = fs::remove_file(&final_path).await;
-            return Err(error);
+            .context("automatic input validation task failed")?
+            .is_ok();
+            if !valid {
+                inferred_assignment = None;
+            }
         }
 
-        project.uploaded_objects = project.uploaded_objects.saturating_add(1);
-        project.storage_bytes = project.storage_bytes.saturating_add(total);
-        project.last_accessed_unix_seconds = unix_seconds()?;
-        if let Err(error) = write_json_atomic(&self.project_record_path(project_id), &project).await
-        {
-            let _ = fs::remove_file(&metadata_path).await;
-            let _ = fs::remove_file(&final_path).await;
-            return Err(error);
+        let finalize_result: Result<(ObjectSummary, ProjectSummary)> = async {
+            let _guard = self.mutation_lock.lock().await;
+            let mut project = self.authorize_record(project_id, token).await?;
+            if project.uploaded_objects >= max_objects {
+                bail!("project has reached the maximum object count");
+            }
+            if project.storage_bytes.saturating_add(total) > max_project_bytes {
+                bail!("upload would exceed the project storage quota");
+            }
+
+            let (mut role, mut sample_id) = inferred_assignment
+                .clone()
+                .unwrap_or((UploadedInputRole::Unassigned, None));
+            if role.is_singleton() {
+                let objects = self.list_object_records(project_id).await?;
+                if objects.iter().any(|other| other.role == role) {
+                    role = UploadedInputRole::Unassigned;
+                    sample_id = None;
+                }
+            }
+
+            fs::rename(&scratch_path, &final_path)
+                .await
+                .with_context(|| format!("failed to finalize uploaded object {object_id}"))?;
+            set_private_file_permissions(&final_path).await?;
+            let object_record = StoredObjectRecord {
+                schema_version: 1,
+                object_id,
+                original_name: original_name.clone(),
+                byte_size: total,
+                sha256: sha256.clone(),
+                uploaded_unix_seconds: unix_seconds()?,
+                content_type: sanitize_content_type(content_type.as_deref()),
+                role,
+                sample_id,
+            };
+            if let Err(error) = write_json_atomic(&metadata_path, &object_record).await {
+                let _ = fs::remove_file(&final_path).await;
+                return Err(error);
+            }
+
+            project.uploaded_objects = project.uploaded_objects.saturating_add(1);
+            project.storage_bytes = project.storage_bytes.saturating_add(total);
+            project.last_accessed_unix_seconds = unix_seconds()?;
+            if let Err(error) =
+                write_json_atomic(&self.project_record_path(project_id), &project).await
+            {
+                let _ = fs::remove_file(&metadata_path).await;
+                let _ = fs::remove_file(&final_path).await;
+                return Err(error);
+            }
+            // Do not rebuild the full manifest after every file in a large batch.
+            // Mapping/assignment operations refresh it once from the final object set.
+            Ok((
+                ObjectSummary::from(&object_record),
+                ProjectSummary::from(&project),
+            ))
         }
-        self.refresh_input_manifest(project_id).await?;
-        Ok((
-            ObjectSummary::from(&object_record),
-            ProjectSummary::from(&project),
-        ))
+        .await;
+
+        if finalize_result.is_err() {
+            let _ = fs::remove_file(&scratch_path).await;
+        }
+        finalize_result
     }
 
     async fn assign_object_authorized(
@@ -1175,6 +1325,113 @@ impl LocalProjectStore {
         project.last_accessed_unix_seconds = unix_seconds()?;
         write_json_atomic(&self.project_record_path(project_id), &project).await?;
         Ok(ObjectSummary::from(&object))
+    }
+
+    async fn auto_assign_objects_authorized(
+        &self,
+        project_id: Uuid,
+        token: &str,
+    ) -> Result<AutoAssignObjectsResponse> {
+        let (objects, already_assigned) = {
+            let _guard = self.mutation_lock.lock().await;
+            let mut project = self.authorize_record(project_id, token).await?;
+            let objects = self.list_object_records(project_id).await?;
+            project.last_accessed_unix_seconds = unix_seconds()?;
+            write_json_atomic(&self.project_record_path(project_id), &project).await?;
+            let already_assigned = objects
+                .iter()
+                .filter(|object| object.role != UploadedInputRole::Unassigned)
+                .count();
+            (objects, already_assigned)
+        };
+
+        let candidates = objects
+            .into_iter()
+            .filter(|object| object.role == UploadedInputRole::Unassigned)
+            .filter_map(|object| {
+                let (role, sample_id) = infer_auto_assignment_from_filename(&object.original_name)?;
+                let data_path = self.object_data_path(project_id, object.object_id);
+                Some((object, data_path, role, sample_id))
+            })
+            .collect::<Vec<_>>();
+
+        let validations = stream::iter(candidates.into_iter().map(
+            |(object, data_path, role, sample_id)| async move {
+                let original_name = object.original_name.clone();
+                let validation = tokio::task::spawn_blocking(move || {
+                    validate_object_for_role(&data_path, &original_name, role)
+                })
+                .await;
+                let valid = matches!(validation, Ok(Ok(())));
+                (object.object_id, role, sample_id, valid)
+            },
+        ))
+        .buffer_unordered(AUTO_ASSIGN_VALIDATION_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+        let validation_failed = validations
+            .iter()
+            .filter(|(_, _, _, valid)| !*valid)
+            .count();
+        let mut warnings = Vec::new();
+        if validation_failed > 0 {
+            warnings.push(format!(
+                "{validation_failed} recognized object(s) failed defensive content validation and remain unassigned"
+            ));
+        }
+
+        let _guard = self.mutation_lock.lock().await;
+        let mut project = self.authorize_record(project_id, token).await?;
+        let mut current = self.list_object_records(project_id).await?;
+        let mut assigned = 0usize;
+
+        for (object_id, role, sample_id, valid) in validations {
+            if !valid {
+                continue;
+            }
+            let Some(index) = current
+                .iter()
+                .position(|object| object.object_id == object_id)
+            else {
+                continue;
+            };
+            if current[index].role != UploadedInputRole::Unassigned {
+                continue;
+            }
+            if role.is_singleton()
+                && current
+                    .iter()
+                    .any(|other| other.object_id != object_id && other.role == role)
+            {
+                continue;
+            }
+            current[index].role = role;
+            current[index].sample_id = sample_id;
+            write_json_atomic(
+                &self.object_record_path(project_id, object_id),
+                &current[index],
+            )
+            .await?;
+            assigned = assigned.saturating_add(1);
+        }
+
+        self.write_input_manifest_from_records(project_id, &current)
+            .await?;
+        project.last_accessed_unix_seconds = unix_seconds()?;
+        write_json_atomic(&self.project_record_path(project_id), &project).await?;
+        let unresolved = current
+            .iter()
+            .filter(|object| object.role == UploadedInputRole::Unassigned)
+            .count();
+        Ok(AutoAssignObjectsResponse {
+            assigned,
+            already_assigned,
+            unresolved,
+            validation_failed,
+            objects: current.iter().map(ObjectSummary::from).collect(),
+            warnings,
+        })
     }
 
     async fn mapping_audit_authorized(
@@ -1804,6 +2061,15 @@ impl LocalProjectStore {
         }
         Ok(removed)
     }
+}
+
+fn infer_auto_assignment_from_filename(
+    original_name: &str,
+) -> Option<(UploadedInputRole, Option<String>)> {
+    let classification = classify_input_filename(original_name)?;
+    let role = UploadedInputRole::from_filename_kind(classification.kind)?;
+    let sample_id = normalize_assigned_sample_id(role, classification.sample_id.as_deref()).ok()?;
+    Some((role, sample_id))
 }
 
 fn normalize_assigned_sample_id(
@@ -2617,12 +2883,15 @@ fn mapping_status_name(status: MappingStatus) -> &'static str {
 struct AppState {
     store: Arc<LocalProjectStore>,
     default_ttl_hours: u64,
+    quota_profile: QuotaProfile,
     max_file_bytes: u64,
     max_project_bytes: u64,
     max_objects: usize,
     max_jobs_per_project: usize,
     max_concurrent_jobs: usize,
+    max_concurrent_uploads: usize,
     worker_slots: Arc<Semaphore>,
+    upload_slots: Arc<Semaphore>,
 }
 
 pub async fn run_local_web_server(config: WebServerConfig) -> Result<()> {
@@ -2648,12 +2917,15 @@ pub async fn run_local_web_server(config: WebServerConfig) -> Result<()> {
     let state = AppState {
         store,
         default_ttl_hours: config.default_ttl_hours,
+        quota_profile: config.quota_profile,
         max_file_bytes: config.max_file_bytes,
         max_project_bytes: config.max_project_bytes,
         max_objects: config.max_objects,
         max_jobs_per_project: config.max_jobs_per_project,
         max_concurrent_jobs: config.max_concurrent_jobs,
+        max_concurrent_uploads: config.max_concurrent_uploads,
         worker_slots: Arc::new(Semaphore::new(config.max_concurrent_jobs)),
+        upload_slots: Arc::new(Semaphore::new(config.max_concurrent_uploads)),
     };
     let static_files =
         ServeDir::new(config.web_dist.clone()).append_index_html_on_directories(true);
@@ -2667,6 +2939,10 @@ pub async fn run_local_web_server(config: WebServerConfig) -> Result<()> {
         .route(
             "/api/projects/{project_id}/objects",
             get(list_objects).post(upload_object),
+        )
+        .route(
+            "/api/projects/{project_id}/objects/auto-assign",
+            post(auto_assign_objects),
         )
         .route(
             "/api/projects/{project_id}/objects/{object_id}",
@@ -2706,6 +2982,7 @@ pub async fn run_local_web_server(config: WebServerConfig) -> Result<()> {
         "Default project retention: {} hours",
         config.default_ttl_hours
     );
+    println!("Quota profile: {}", config.quota_profile.as_str());
     println!("Upload limit per file: {} bytes", config.max_file_bytes);
     println!(
         "Project storage quota: {} bytes across at most {} objects",
@@ -2718,6 +2995,10 @@ pub async fn run_local_web_server(config: WebServerConfig) -> Result<()> {
     println!(
         "Concurrent local scientific jobs: {}",
         config.max_concurrent_jobs
+    );
+    println!(
+        "Concurrent local uploads: {}",
+        config.max_concurrent_uploads
     );
 
     axum::serve(listener, app)
@@ -2769,7 +3050,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         app_version: env!("CARGO_PKG_VERSION"),
-        api_version: 4,
+        api_version: 6,
         default_ttl_hours: state.default_ttl_hours,
         max_ttl_hours: MAX_TTL_HOURS,
         upload_enabled: true,
@@ -2779,11 +3060,13 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         representative_gene_enabled: true,
         batch_upload_enabled: true,
         storage_backend: "local-filesystem",
+        quota_profile: state.quota_profile.as_str(),
         max_file_bytes: state.max_file_bytes,
         max_project_bytes: state.max_project_bytes,
         max_objects: state.max_objects,
         max_jobs_per_project: state.max_jobs_per_project,
         max_concurrent_jobs: state.max_concurrent_jobs,
+        max_concurrent_uploads: state.max_concurrent_uploads,
         max_job_artifact_bytes: MAX_JOB_ARTIFACT_BYTES,
     })
 }
@@ -2863,6 +3146,17 @@ async fn upload_object(
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let _upload_permit = state
+        .upload_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "upload worker is unavailable",
+            )
+        })?;
     match state
         .store
         .upload_object_authorized(
@@ -2922,6 +3216,23 @@ async fn assign_object(
         .await
     {
         Ok(object) => Ok(Json(AssignObjectResponse { object })),
+        Err(error) => Err(map_input_error(error)),
+    }
+}
+
+async fn auto_assign_objects(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<AutoAssignObjectsResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let token = bearer_token(&headers)?;
+    match state
+        .store
+        .auto_assign_objects_authorized(project_id, token)
+        .await
+    {
+        Ok(response) => Ok(Json(response)),
         Err(error) => Err(map_input_error(error)),
     }
 }
@@ -3312,6 +3623,36 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn quota_profiles_have_expected_defaults() {
+        assert_eq!(
+            QuotaProfile::LocalSelfHosted.defaults(),
+            (2 * 1024 * 1024 * 1024, 20 * 1024 * 1024 * 1024, 4_096,)
+        );
+        assert_eq!(
+            QuotaProfile::HostedConservative.defaults(),
+            (64 * 1024 * 1024, 512 * 1024 * 1024, 64)
+        );
+    }
+
+    #[test]
+    fn native_filename_auto_assignment_matches_shared_conventions() {
+        let (role, sample_id) =
+            infer_auto_assignment_from_filename("4C_39_tumor_rna_gene_expression_report.xlsx")
+                .unwrap();
+        assert_eq!(role, UploadedInputRole::GeneExpression);
+        assert_eq!(sample_id.as_deref(), Some("4C_39"));
+
+        let (role, sample_id) =
+            infer_auto_assignment_from_filename("Normal_FJ_RNA_13_bcr_heavy_chain_report.xlsx")
+                .unwrap();
+        assert_eq!(role, UploadedInputRole::Bcr);
+        assert_eq!(sample_id.as_deref(), Some("Normal_FJ_RNA_13"));
+
+        assert!(infer_auto_assignment_from_filename("cohort_sample_metadata.xlsx").is_none());
+        assert!(infer_auto_assignment_from_filename("h.all.v2026.1.Hs.symbols.gmt").is_none());
+    }
 
     #[test]
     fn recovery_tokens_are_random_and_hashable() {

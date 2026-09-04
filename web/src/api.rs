@@ -1,4 +1,4 @@
-//! Same-origin Phase-3D client for the local `cfs-server` API.
+//! Same-origin Phase-3D.2 client for the local `cfs-server` API.
 
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -19,11 +19,14 @@ pub struct HealthResponse {
     pub representative_gene_enabled: bool,
     pub batch_upload_enabled: bool,
     pub storage_backend: String,
+    #[serde(default)]
+    pub quota_profile: String,
     pub max_file_bytes: u64,
     pub max_project_bytes: u64,
     pub max_objects: usize,
     pub max_jobs_per_project: usize,
     pub max_concurrent_jobs: usize,
+    pub max_concurrent_uploads: usize,
     pub max_job_artifact_bytes: u64,
 }
 
@@ -87,6 +90,16 @@ pub struct AssignObjectRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AssignObjectResponse {
     pub object: ObjectSummaryResponse,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoAssignObjectsResponse {
+    pub assigned: usize,
+    pub already_assigned: usize,
+    pub unresolved: usize,
+    pub validation_failed: usize,
+    pub objects: Vec<ObjectSummaryResponse>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -354,6 +367,20 @@ pub async fn assign_object(
         .send()
         .await
         .map_err(|error| format!("assignment request failed: {error}"))?;
+    decode(response).await
+}
+
+pub async fn auto_assign_objects(
+    project_id: &str,
+    recovery_token: &str,
+) -> Result<AutoAssignObjectsResponse, String> {
+    let response = Request::post(&format!(
+        "{API_ROOT}/projects/{project_id}/objects/auto-assign"
+    ))
+    .header("Authorization", &format!("Bearer {recovery_token}"))
+    .send()
+    .await
+    .map_err(|error| format!("automatic assignment request failed: {error}"))?;
     decode(response).await
 }
 
