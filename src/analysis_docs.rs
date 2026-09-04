@@ -157,21 +157,23 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         summary: "The application asks whether a defined Case group differs from a defined Control group, while keeping sample identity, repeated sampling, selected covariates, QC decisions, and multi-omics provenance explicit.",
         default_open: true,
         examples: &[AnalysisDocToyExample {
-            title: "From sample values to a Case-versus-Control question",
-            setup: "Imagine a toy measurement where the three Control samples average about 10 units and the three Case samples average about 15 units. The plot is only an intuition aid; the real analysis may use a count model, compositional model, or another modality-specific method rather than testing these two means directly.",
+            title: "Per-sample values roll up into a Case-versus-Control question",
+            setup: "Imagine three Control samples and three Case samples for a toy measurement. The Control values cluster around 9–11 units, while the Case values cluster around 14–16 units. The plot is still only an intuition aid: the real analysis may use a count model, compositional model, or another modality-specific method rather than testing these displayed values with a simple bar comparison.",
             walkthrough: &[
-                "First define which biological samples are Control and which are Case.",
-                "Then estimate the group effect using the modality's appropriate model while honoring the selected covariates and repeated-subject structure.",
-                "Finally inspect uncertainty, q value, sample support, and QC/robustness rather than treating the difference in bar heights as proof by itself.",
+                "First define which biological samples belong to Control and which belong to Case.",
+                "Then estimate the group effect using the modality's appropriate model while honoring selected covariates and repeated-subject structure.",
+                "Finally inspect uncertainty, q value, sample support, and QC/robustness rather than treating the visible separation as proof by itself.",
             ],
-            takeaway: "The group comparison is the scientific question; the exact statistical engine depends on the data type.",
+            takeaway: "The scientific question is whether the two groups differ overall; the exact statistical engine depends on the data type.",
             chart: AnalysisDocToyChart::Bars {
-                categories: &["Control", "Case"],
+                categories: &[
+                    "Ctrl-01", "Ctrl-02", "Ctrl-03", "Case-01", "Case-02", "Case-03",
+                ],
                 series: &[AnalysisDocToySeries {
-                    label: "Toy measurement",
-                    values: &[10.0, 15.0],
+                    label: "Toy sample value",
+                    values: &[9.8, 10.7, 9.4, 14.1, 15.6, 14.9],
                 }],
-                y_label: "Illustrative measurement",
+                y_label: "Illustrative sample measurement",
                 stacked: false,
             },
         }],
@@ -378,19 +380,21 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         summary: "The gene analysis asks, for each tested gene, whether modeled RNA count abundance differs between Case and Control after library-size normalization and any selected covariates, with repeated-subject-aware uncertainty when a subject column is provided.",
         default_open: false,
         examples: &[AnalysisDocToyExample {
-            title: "A two-fold adjusted expression difference",
-            setup: "Suppose the modeled abundance of a toy gene is around 20 normalized-count units in Control and 40 in Case. A two-fold Case/Control ratio corresponds to an adjusted log2 fold change of about +1 when the fitted model supports that difference.",
+            title: "A gene can show a consistent two-fold shift across samples",
+            setup: "Suppose a toy gene has size-factor-normalized abundances around 18–23 in three Control samples and 35–43 in three Case samples. That pattern is visually consistent with an adjusted log2 fold change near +1 if the negative-binomial model supports it after accounting for covariates and dispersion.",
             walkthrough: &[
                 "The real inferential model uses raw counts plus a library-size offset; the plotted normalized values are intuition, not the response variable passed directly to an ordinary t test.",
                 "log2FC +1 means roughly twice as much modeled abundance in Case; log2FC -1 would mean roughly half as much.",
                 "The q value asks how surprising the evidence remains after accounting for the many genes tested. Effect size and q value answer different questions.",
             ],
-            takeaway: "A large fold change is not automatically reliable; look for adequate count support, uncertainty/FDR support, and stable sample-level behavior.",
+            takeaway: "A visible Case/Control shift is easier to trust when it is supported by count depth, modeled uncertainty, FDR control, and stable sample-level behavior.",
             chart: AnalysisDocToyChart::Bars {
-                categories: &["Control", "Case"],
+                categories: &[
+                    "Ctrl-01", "Ctrl-02", "Ctrl-03", "Case-01", "Case-02", "Case-03",
+                ],
                 series: &[AnalysisDocToySeries {
                     label: "Toy normalized abundance",
-                    values: &[20.0, 40.0],
+                    values: &[18.4, 22.1, 20.3, 35.6, 39.8, 42.7],
                 }],
                 y_label: "Illustrative normalized count",
                 stacked: false,
@@ -520,39 +524,115 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "BCR and TCR repertoire analysis",
         summary: "Repertoire analysis asks several different biological questions: how diverse or dominated each sample's receptor repertoire is, how clonotypes are shared, whether whole repertoires are globally similar, and whether V/D/J or V-J compositions shift between groups.",
         default_open: false,
-        examples: &[AnalysisDocToyExample {
-            title: "Why a dominated repertoire has higher clonality",
-            setup: "Compare two toy repertoires with the same four displayed clone categories. The diverse sample spreads reads fairly evenly, while the dominated sample is mostly Clone A. The app turns each sample's full clonotype abundance distribution into one sample-level clonality value.",
-            walkthrough: &[
-                "Shannon diversity is high when abundance is spread across many clonotypes and lower when a few clonotypes dominate.",
-                "Clonality normalizes that diversity by observed richness: 1 - Shannon/ln(richness). Values near 0 are relatively even; values closer to 1 are dominated by a small number of clones.",
-                "The corrected Case/Control analysis then compares these one-per-sample clonality values. It is not calculating a separate clonality for each V gene, CDR3, or clone type.",
-            ],
-            takeaway: "Clonality describes the shape of each sample's whole repertoire, then those sample-level summaries are compared between groups.",
-            chart: AnalysisDocToyChart::Bars {
-                categories: &["Diverse sample", "Dominated sample"],
-                series: &[
-                    AnalysisDocToySeries {
-                        label: "Clone A",
-                        values: &[25.0, 80.0],
-                    },
-                    AnalysisDocToySeries {
-                        label: "Clone B",
-                        values: &[25.0, 8.0],
-                    },
-                    AnalysisDocToySeries {
-                        label: "Clone C",
-                        values: &[25.0, 7.0],
-                    },
-                    AnalysisDocToySeries {
-                        label: "Other clones",
-                        values: &[25.0, 5.0],
-                    },
+        examples: &[
+            AnalysisDocToyExample {
+                title: "Why a dominated repertoire has higher clonality",
+                setup: "Compare two toy repertoires with the same four displayed clone categories. The diverse sample spreads reads fairly evenly, while the dominated sample is mostly Clone A. The app turns each sample's full clonotype abundance distribution into one sample-level clonality value.",
+                walkthrough: &[
+                    "Shannon diversity is high when abundance is spread across many clonotypes and lower when a few clonotypes dominate.",
+                    "Clonality normalizes that diversity by observed richness: 1 - Shannon/ln(richness). Values near 0 are relatively even; values closer to 1 are dominated by a small number of clones.",
+                    "The corrected Case/Control analysis then compares these one-per-sample clonality values. It is not calculating a separate clonality for each V gene, CDR3, or clone type.",
                 ],
-                y_label: "Read share (%)",
-                stacked: true,
+                takeaway: "Clonality describes the shape of each sample's whole repertoire, then those sample-level summaries are compared between groups.",
+                chart: AnalysisDocToyChart::Bars {
+                    categories: &["Even repertoire", "Clone-dominated repertoire"],
+                    series: &[
+                        AnalysisDocToySeries {
+                            label: "Clone A",
+                            values: &[25.0, 80.0],
+                        },
+                        AnalysisDocToySeries {
+                            label: "Clone B",
+                            values: &[25.0, 8.0],
+                        },
+                        AnalysisDocToySeries {
+                            label: "Clone C",
+                            values: &[25.0, 7.0],
+                        },
+                        AnalysisDocToySeries {
+                            label: "Other clones",
+                            values: &[25.0, 5.0],
+                        },
+                    ],
+                    y_label: "Read share (%)",
+                    stacked: true,
+                },
             },
-        }],
+            AnalysisDocToyExample {
+                title: "Normalized Shannon evenness and clonality are complementary",
+                setup: "For teaching, imagine three repertoires with the same observed richness. The app computes Shannon entropy H, divides by ln(richness) to obtain a normalized evenness-like quantity, and defines clonality as 1 minus that normalized Shannon value.",
+                walkthrough: &[
+                    "An even repertoire has normalized Shannon close to 1 because reads are spread broadly across the observed clonotypes.",
+                    "As a few clonotypes take more of the reads, normalized Shannon falls and clonality rises.",
+                    "Because clonality = 1 - H/ln(richness), the two quantities in this teaching plot add to 100% after scaling them for display.",
+                ],
+                takeaway: "Richness counts how many clonotypes are observed; Shannon/evenness and clonality describe how evenly their abundance is distributed.",
+                chart: AnalysisDocToyChart::Bars {
+                    categories: &["Even", "Moderately expanded", "Strongly dominated"],
+                    series: &[
+                        AnalysisDocToySeries {
+                            label: "Normalized Shannon H/ln(S)",
+                            values: &[92.0, 64.0, 30.0],
+                        },
+                        AnalysisDocToySeries {
+                            label: "Clonality = 1 - H/ln(S)",
+                            values: &[8.0, 36.0, 70.0],
+                        },
+                    ],
+                    y_label: "Scaled proportion (%)",
+                    stacked: true,
+                },
+            },
+            AnalysisDocToyExample {
+                title: "Rarefaction makes richness comparable at the same read depth",
+                setup: "Two repertoire samples can have different sequencing depths. In this toy rarefaction view, the deeper sample initially contains more observed clonotypes simply because more reads were collected. The corrected analysis compares diversity after downsampling each repertoire to a common matched depth.",
+                walkthrough: &[
+                    "At low read depth, both samples reveal only part of their repertoire and observed richness rises as more reads are sampled.",
+                    "If one sample was originally sequenced much deeper, comparing its full observed richness with a shallower sample would favor the deeper sample.",
+                    "The app therefore rarefies without replacement to the smallest usable depth (subject to the configured cap), repeats that sampling, and averages matched-depth richness and Shannon values.",
+                ],
+                takeaway: "Rarefaction is a depth-matching step: it asks how diverse the repertoires look when they are given the same number of sampled reads.",
+                chart: AnalysisDocToyChart::Line {
+                    categories: &["1k reads", "2k", "5k", "10k", "20k"],
+                    series: &[
+                        AnalysisDocToySeries {
+                            label: "Sample A richness",
+                            values: &[180.0, 285.0, 460.0, 575.0, 650.0],
+                        },
+                        AnalysisDocToySeries {
+                            label: "Sample B richness",
+                            values: &[165.0, 260.0, 410.0, 500.0, 555.0],
+                        },
+                    ],
+                    y_label: "Observed clonotypes after rarefaction",
+                },
+            },
+            AnalysisDocToyExample {
+                title: "Morisita-Horn and Jaccard answer different repertoire-similarity questions",
+                setup: "Suppose two sample pairs share many of the same clonotypes, but one pair also has very different clone abundances. Jaccard focuses only on whether clonotypes are present; Morisita-Horn gives much more weight to abundant clones.",
+                walkthrough: &[
+                    "Pair 1 shares most clonotypes and also has similar abundance structure, so both similarities are high.",
+                    "Pair 2 shares many clonotype identities, so Jaccard stays fairly high, but the dominant clone abundances differ, so Morisita-Horn is lower.",
+                    "The app converts Morisita-Horn similarity to distance as 1 - similarity for PCoA/PERMANOVA; Jaccard distance likewise reflects set overlap rather than abundance weighting.",
+                ],
+                takeaway: "Jaccard asks 'are the same clonotypes present?'; Morisita-Horn asks 'are the abundance-weighted repertoires similar?'.",
+                chart: AnalysisDocToyChart::Bars {
+                    categories: &["Pair 1", "Pair 2"],
+                    series: &[
+                        AnalysisDocToySeries {
+                            label: "Jaccard similarity",
+                            values: &[0.82, 0.74],
+                        },
+                        AnalysisDocToySeries {
+                            label: "Morisita-Horn similarity",
+                            values: &[0.88, 0.39],
+                        },
+                    ],
+                    y_label: "Toy similarity (0 to 1)",
+                    stacked: false,
+                },
+            },
+        ],
         subsections: &[
             AnalysisDocSubsection {
                 title: "What the app treats as a clonotype",
@@ -659,35 +739,67 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "BCR isotype composition analysis",
         summary: "The dedicated BCR-isotype modality asks whether the relative mixture of antibody isotypes differs between groups using the precomputed Isotype Read Fraction values from the isotype workbook.",
         default_open: false,
-        examples: &[AnalysisDocToyExample {
-            title: "Isotype analysis compares the mixture, not four independent percentages",
-            setup: "In a toy example, Control is 55% IgM, 25% IgG, and 20% IgA, while Case shifts toward IgG. Because the fractions in each sample add to a whole, increasing one component necessarily changes the room available for the others.",
-            walkthrough: &[
-                "The isotype fractions are compositional: they are interpreted relative to one another rather than as unrelated measurements.",
-                "CLR/Aitchison analysis converts the relative composition to log-ratio coordinates before group testing.",
-                "A positive effect for IgG means IgG is higher relative to the geometric center of the isotype mixture in Case; it is not simply an unadjusted difference in the displayed mean percentage.",
-            ],
-            takeaway: "Read the isotype result as a shift in the balance of the antibody-class mixture.",
-            chart: AnalysisDocToyChart::Bars {
-                categories: &["Control", "Case"],
-                series: &[
-                    AnalysisDocToySeries {
-                        label: "IgM",
-                        values: &[55.0, 30.0],
-                    },
-                    AnalysisDocToySeries {
-                        label: "IgG",
-                        values: &[25.0, 50.0],
-                    },
-                    AnalysisDocToySeries {
-                        label: "IgA",
-                        values: &[20.0, 20.0],
-                    },
+        examples: &[
+            AnalysisDocToyExample {
+                title: "Isotype analysis compares the mixture, not four independent percentages",
+                setup: "In this toy cohort, three Control samples are relatively IgM-heavy while three Case samples shift toward IgG. Because each sample's fractions add to a whole, increasing one component necessarily changes the room available for the others.",
+                walkthrough: &[
+                    "The isotype fractions are compositional: they are interpreted relative to one another rather than as unrelated measurements.",
+                    "CLR/Aitchison analysis converts the relative composition to log-ratio coordinates before group testing.",
+                    "A positive effect for IgG means IgG is higher relative to the geometric center of the isotype mixture in Case; it is not simply an unadjusted difference in the displayed mean percentage.",
                 ],
-                y_label: "Isotype read fraction (%)",
-                stacked: true,
+                takeaway: "Read the isotype result as a shift in the balance of the antibody-class mixture across samples, not as four unrelated percentage tests.",
+                chart: AnalysisDocToyChart::Bars {
+                    categories: &[
+                        "Ctrl-01", "Ctrl-02", "Ctrl-03", "Case-01", "Case-02", "Case-03",
+                    ],
+                    series: &[
+                        AnalysisDocToySeries {
+                            label: "IgM",
+                            values: &[56.0, 52.0, 49.0, 30.0, 35.0, 28.0],
+                        },
+                        AnalysisDocToySeries {
+                            label: "IgG",
+                            values: &[22.0, 26.0, 24.0, 49.0, 45.0, 53.0],
+                        },
+                        AnalysisDocToySeries {
+                            label: "IgA",
+                            values: &[16.0, 14.0, 18.0, 15.0, 15.0, 13.0],
+                        },
+                        AnalysisDocToySeries {
+                            label: "Undetermined",
+                            values: &[6.0, 8.0, 9.0, 6.0, 5.0, 6.0],
+                        },
+                    ],
+                    y_label: "Isotype read fraction (%)",
+                    stacked: true,
+                },
             },
-        }],
+            AnalysisDocToyExample {
+                title: "Aitchison / CLR compares relative balance on a log-ratio scale",
+                setup: "Here two illustrative samples have already been converted from isotype fractions into centered log-ratio (CLR) coordinates. Each point on the y-axis is a log-ratio relative to the sample's geometric mean isotype abundance, so the values in one sample sum to zero. Euclidean distance between the two CLR profiles is the Aitchison distance.",
+                walkthrough: &[
+                    "Start from the composition in one sample, add the small pseudocount, take logs, and subtract the mean log abundance across retained isotypes.",
+                    "The resulting CLR coordinates describe balance: positive values mean that component is relatively high within the sample, negative values mean it is relatively low.",
+                    "Aitchison distance is then ordinary Euclidean distance between the CLR coordinates, which is why the method respects the relative/compositional nature of the data.",
+                ],
+                takeaway: "Aitchison/CLR asks whether the relative balance of the mixture changes; it deliberately avoids interpreting the parts as independent absolute measurements.",
+                chart: AnalysisDocToyChart::Line {
+                    categories: &["IgM", "IgG", "IgA", "Undetermined"],
+                    series: &[
+                        AnalysisDocToySeries {
+                            label: "Control-like sample CLR",
+                            values: &[0.66, -0.07, -0.29, -0.30],
+                        },
+                        AnalysisDocToySeries {
+                            label: "Case-like sample CLR",
+                            values: &[-0.31, 0.81, -0.20, -0.30],
+                        },
+                    ],
+                    y_label: "CLR coordinate (log-ratio scale)",
+                },
+            },
+        ],
         subsections: &[
             AnalysisDocSubsection {
                 title: "What values are used",
@@ -773,25 +885,46 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "Pathway over-representation analysis (ORA)",
         summary: "Pathway ORA asks whether genes already selected from the corrected gene analysis are represented in a pathway more often than expected from the set of genes that were actually tested.",
         default_open: false,
-        examples: &[AnalysisDocToyExample {
-            title: "Observed pathway overlap versus what the tested universe makes plausible",
-            setup: "Suppose a pathway contains 20 of the genes that were actually testable, and 6 of those genes appear in the corrected foreground list. If the tested universe and foreground size imply only about 1-2 overlaps by chance, six overlaps is enrichment evidence.",
-            walkthrough: &[
-                "The hypergeometric test compares the observed overlap with the overlap expected when drawing the same number of foreground genes from the measured/tested gene universe.",
-                "The pathway q value corrects for testing many pathways.",
-                "The pathway does not become 'activated' merely because it is enriched; ORA says that selected genes are over-represented in that annotation set.",
-            ],
-            takeaway: "Pathway ORA summarizes concentration of selected genes in known sets; it does not establish causal pathway activity.",
-            chart: AnalysisDocToyChart::Bars {
-                categories: &["Expected by chance", "Observed overlap"],
-                series: &[AnalysisDocToySeries {
-                    label: "Foreground genes in pathway",
-                    values: &[1.5, 6.0],
-                }],
-                y_label: "Toy overlap count",
-                stacked: false,
+        examples: &[
+            AnalysisDocToyExample {
+                title: "Observed pathway overlap versus what the tested universe makes plausible",
+                setup: "Suppose a pathway contains 20 of the genes that were actually testable, and 6 of those genes appear in the corrected foreground list. If the tested universe and foreground size imply only about 1-2 overlaps by chance, six overlaps is enrichment evidence.",
+                walkthrough: &[
+                    "The hypergeometric test compares the observed overlap with the overlap expected when drawing the same number of foreground genes from the measured/tested gene universe.",
+                    "The pathway q value corrects for testing many pathways.",
+                    "The pathway does not become 'activated' merely because it is enriched; ORA says that selected genes are over-represented in that annotation set.",
+                ],
+                takeaway: "Pathway ORA summarizes concentration of selected genes in known sets; it does not establish causal pathway activity.",
+                chart: AnalysisDocToyChart::Bars {
+                    categories: &["Expected by chance", "Observed overlap"],
+                    series: &[AnalysisDocToySeries {
+                        label: "Foreground genes in pathway",
+                        values: &[1.5, 6.0],
+                    }],
+                    y_label: "Toy overlap count",
+                    stacked: false,
+                },
             },
-        }],
+            AnalysisDocToyExample {
+                title: "Hypergeometric ORA is a without-replacement enrichment calculation",
+                setup: "Use a small teaching universe of 1,000 tested genes. A pathway contains 80 of them. The corrected foreground contains 50 genes, and 12 of those 50 fall inside the pathway. The hypergeometric test asks how often an overlap of 12 or more would occur if 50 genes were drawn from the 1,000 tested genes without replacement.",
+                walkthrough: &[
+                    "Inside the pathway, 12 of 80 measured genes are in the foreground: 15%.",
+                    "Outside the pathway, only 38 of 920 measured genes are in the foreground: about 4.1%.",
+                    "The hypergeometric upper tail uses the exact counts (1,000 total, 80 pathway, 50 foreground, 12 overlap) rather than testing the two percentages with a separate regression.",
+                ],
+                takeaway: "ORA asks whether the foreground is disproportionately concentrated in a pathway compared with the tested-gene universe.",
+                chart: AnalysisDocToyChart::Bars {
+                    categories: &["Pathway genes", "Other tested genes"],
+                    series: &[AnalysisDocToySeries {
+                        label: "Foreground fraction (%)",
+                        values: &[15.0, 4.13],
+                    }],
+                    y_label: "Genes in foreground (%)",
+                    stacked: false,
+                },
+            },
+        ],
         subsections: &[
             AnalysisDocSubsection {
                 title: "How the foreground and background are defined",
@@ -990,58 +1123,120 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "How to read PCA, PCoA, PERMANOVA, dendrograms, and effect plots",
         summary: "These plots answer different questions. Ordination and clustering describe sample-to-sample structure; feature tables and effect plots test individual features; PERMANOVA tests a global distance-based group difference.",
         default_open: false,
-        examples: &[AnalysisDocToyExample {
-            title: "Ordination shows global sample structure, not a per-gene test",
-            setup: "In this toy PCA/PCoA-like plot, Control and Case samples separate along the horizontal axis. That suggests a global difference in the multivariate pattern, but it does not tell you which individual feature caused the separation.",
-            walkthrough: &[
-                "Each point is one sample; nearby points have more similar multivariate profiles under the representation/distance used.",
-                "PCA summarizes variance in a feature matrix. PCoA places samples from a chosen distance matrix into coordinates.",
-                "PERMANOVA can test whether distance-based group structure is stronger than expected under permitted label permutations; individual feature tables are still needed to identify specific genes, clonotypes/compositions, or signatures.",
-            ],
-            takeaway: "Use ordination for the big-picture sample geometry and feature-level models for specific biological claims.",
-            chart: AnalysisDocToyChart::Scatter {
-                points: &[
-                    AnalysisDocToyPoint {
-                        x: -1.4,
-                        y: -0.2,
-                        group: "Control",
-                        label: "C1",
-                    },
-                    AnalysisDocToyPoint {
-                        x: -1.0,
-                        y: 0.3,
-                        group: "Control",
-                        label: "C2",
-                    },
-                    AnalysisDocToyPoint {
-                        x: -0.7,
-                        y: -0.5,
-                        group: "Control",
-                        label: "C3",
-                    },
-                    AnalysisDocToyPoint {
-                        x: 0.8,
-                        y: -0.3,
-                        group: "Case",
-                        label: "D1",
-                    },
-                    AnalysisDocToyPoint {
-                        x: 1.1,
-                        y: 0.4,
-                        group: "Case",
-                        label: "D2",
-                    },
-                    AnalysisDocToyPoint {
-                        x: 1.5,
-                        y: 0.0,
-                        group: "Case",
-                        label: "D3",
-                    },
+        examples: &[
+            AnalysisDocToyExample {
+                title: "Ordination shows global sample structure, not a per-gene test",
+                setup: "In this toy PCA/PCoA-like plot, Control and Case samples separate mainly along the horizontal axis with some within-group spread. That suggests a global difference in the multivariate pattern, but it does not tell you which individual feature caused the separation.",
+                walkthrough: &[
+                    "Each point is one sample; nearby points have more similar multivariate profiles under the representation or distance used.",
+                    "PCA summarizes variance in a feature matrix. PCoA places samples from a chosen distance matrix into coordinates.",
+                    "PERMANOVA can test whether distance-based group structure is stronger than expected under permitted label permutations; individual feature tables are still needed to identify specific genes, clonotypes/compositions, or signatures.",
                 ],
-                x_label: "Toy axis 1",
-                y_label: "Toy axis 2",
+                takeaway: "Use ordination for the big-picture sample geometry and feature-level models for specific biological claims.",
+                chart: AnalysisDocToyChart::Scatter {
+                    points: &[
+                        AnalysisDocToyPoint {
+                            x: -1.4,
+                            y: -0.2,
+                            group: "Control",
+                            label: "Ctrl-01",
+                        },
+                        AnalysisDocToyPoint {
+                            x: -1.0,
+                            y: 0.3,
+                            group: "Control",
+                            label: "Ctrl-02",
+                        },
+                        AnalysisDocToyPoint {
+                            x: -0.7,
+                            y: -0.5,
+                            group: "Control",
+                            label: "Ctrl-03",
+                        },
+                        AnalysisDocToyPoint {
+                            x: 0.8,
+                            y: -0.3,
+                            group: "Case",
+                            label: "Case-01",
+                        },
+                        AnalysisDocToyPoint {
+                            x: 1.1,
+                            y: 0.4,
+                            group: "Case",
+                            label: "Case-02",
+                        },
+                        AnalysisDocToyPoint {
+                            x: 1.5,
+                            y: 0.0,
+                            group: "Case",
+                            label: "Case-03",
+                        },
+                    ],
+                    x_label: "Toy axis 1",
+                    y_label: "Toy axis 2",
+                },
             },
-        }],
+            AnalysisDocToyExample {
+                title: "PERMANOVA compares the observed pseudo-F with a permutation null",
+                setup: "Imagine the distance matrix from a modality has already been computed. After 499 allowed label permutations, most pseudo-F values stay below about 1.8, while the observed Case/Control pseudo-F is 3.4. That pattern suggests the observed group structure is stronger than expected if labels were exchangeable under the design.",
+                walkthrough: &[
+                    "First compute the observed pseudo-F from the distance matrix by comparing between-group structure with within-group residual structure.",
+                    "Then shuffle the permitted labels (or subject blocks) many times and recompute pseudo-F each time.",
+                    "The PERMANOVA p value is the fraction of permuted pseudo-F values that are at least as large as the observed one.",
+                ],
+                takeaway: "PERMANOVA is a global permutation test on a distance matrix: it can say the multivariate structure differs, but not which feature caused the difference.",
+                chart: AnalysisDocToyChart::Bars {
+                    categories: &[
+                        "Permutation median",
+                        "Permutation 95th percentile",
+                        "Observed",
+                    ],
+                    series: &[AnalysisDocToySeries {
+                        label: "Pseudo-F",
+                        values: &[0.92, 1.76, 3.40],
+                    }],
+                    y_label: "Pseudo-F statistic",
+                    stacked: false,
+                },
+            },
+            AnalysisDocToyExample {
+                title: "PCA variance explained tells how much of the overall variation each axis captures",
+                setup: "In this toy PCA, PC1 explains 42% of the represented variance and PC2 explains 21%. A PC1-versus-PC2 plot therefore displays 63% of the variance captured by the features used for that PCA, while the remaining variance is distributed across later components.",
+                walkthrough: &[
+                    "PCA orders components so PC1 captures the largest possible amount of variance, PC2 captures the next largest orthogonal amount, and so on.",
+                    "A high percentage on PC1 means one dominant axis summarizes a large part of the sample-to-sample variation; it does not mean that axis is necessarily disease-specific.",
+                    "When PC1 and PC2 explain only a modest fraction, a two-dimensional scatter plot is an incomplete projection and important structure may live in later PCs.",
+                ],
+                takeaway: "Variance explained tells you how much of the multivariate information is visible on each PCA axis, not what biological process that axis represents.",
+                chart: AnalysisDocToyChart::Bars {
+                    categories: &["PC1", "PC2", "PC3", "PC4", "PC5"],
+                    series: &[AnalysisDocToySeries {
+                        label: "Variance explained",
+                        values: &[42.0, 21.0, 13.0, 8.0, 5.0],
+                    }],
+                    y_label: "Variance explained (%)",
+                    stacked: false,
+                },
+            },
+            AnalysisDocToyExample {
+                title: "PCA loadings show which features pull an axis in the positive or negative direction",
+                setup: "A PCA loading is a feature weight that helps define a principal component. In this toy PC1, interferon-related genes have positive loadings while lymphocyte markers have negative loadings. Samples with high PC1 scores tend to have relatively more of the positive-loading pattern and less of the negative-loading pattern, within the preprocessing used for the PCA.",
+                walkthrough: &[
+                    "The sign is directional but arbitrary: multiplying an entire PC and all of its loadings by -1 describes the same PCA geometry.",
+                    "Large absolute loadings indicate features that contribute strongly to the axis; small loadings contribute less.",
+                    "Loadings are descriptive feature weights, not differential-expression p values. A high loading does not by itself mean the feature is significantly different between Case and Control.",
+                ],
+                takeaway: "Scores locate samples on a PC; loadings help explain which features define that axis. Use corrected feature-level models for inferential claims.",
+                chart: AnalysisDocToyChart::Line {
+                    categories: &["IFIT3", "CXCL10", "ISG15", "MS4A1", "CD3D", "NKG7"],
+                    series: &[AnalysisDocToySeries {
+                        label: "Toy PC1 loading",
+                        values: &[0.42, 0.36, 0.31, -0.28, -0.34, -0.22],
+                    }],
+                    y_label: "PC1 loading",
+                },
+            },
+        ],
         subsections: &[
             AnalysisDocSubsection {
                 title: "PCA",
@@ -1102,31 +1297,57 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "Statistical glossary: common terms in the results",
         summary: "This glossary translates the recurring statistical terms into the specific role they play in 4C Cohort Explorer.",
         default_open: false,
-        examples: &[AnalysisDocToyExample {
-            title: "Why a q value is usually larger than the corresponding p value",
-            setup: "These toy values show three features after many tests. Their raw p values are small, but BH-adjusted q values are larger because the procedure accounts for the fact that many opportunities for a small p value were examined.",
-            walkthrough: &[
-                "A p value describes evidence against the feature-level null model under its assumptions.",
-                "A q value is the multiple-testing-adjusted quantity used by the app to control the expected false-discovery proportion among discoveries at a chosen threshold.",
-                "Neither value tells you whether the effect is biologically large; read it together with the effect estimate and sample support.",
-            ],
-            takeaway: "p answers a single-test evidence question; q places that evidence in the context of the many features tested.",
-            chart: AnalysisDocToyChart::Bars {
-                categories: &["Feature A", "Feature B", "Feature C"],
-                series: &[
-                    AnalysisDocToySeries {
-                        label: "p value",
-                        values: &[0.001, 0.006, 0.018],
-                    },
-                    AnalysisDocToySeries {
-                        label: "q value",
-                        values: &[0.010, 0.030, 0.060],
-                    },
+        examples: &[
+            AnalysisDocToyExample {
+                title: "Why a q value is usually larger than the corresponding p value",
+                setup: "These toy values show three features after many tests. Their raw p values are small, but BH-adjusted q values are larger because the procedure accounts for the fact that many opportunities for a small p value were examined.",
+                walkthrough: &[
+                    "A p value describes evidence against the feature-level null model under its assumptions.",
+                    "A q value is the multiple-testing-adjusted quantity used by the app to control the expected false-discovery proportion among discoveries at a chosen threshold.",
+                    "Neither value tells you whether the effect is biologically large; read it together with the effect estimate and sample support.",
                 ],
-                y_label: "Toy probability-scale value",
-                stacked: false,
+                takeaway: "p answers a single-test evidence question; q places that evidence in the context of the many features tested.",
+                chart: AnalysisDocToyChart::Bars {
+                    categories: &["Feature A", "Feature B", "Feature C"],
+                    series: &[
+                        AnalysisDocToySeries {
+                            label: "p value",
+                            values: &[0.001, 0.006, 0.018],
+                        },
+                        AnalysisDocToySeries {
+                            label: "q value",
+                            values: &[0.010, 0.030, 0.060],
+                        },
+                    ],
+                    y_label: "Toy probability-scale value",
+                    stacked: false,
+                },
             },
-        }],
+            AnalysisDocToyExample {
+                title: "Benjamini-Hochberg uses p-value rank to control false discovery rate",
+                setup: "For a tiny teaching family of five tests, sort the p values from smallest to largest. The BH calculation compares each p value with its rank among all tests, then applies a monotonic correction so adjusted q values do not decrease as the raw p values become less significant.",
+                walkthrough: &[
+                    "For sorted rank i among m tests, the basic BH adjustment starts from p × m / i.",
+                    "The final BH q values are made monotonic from the least-significant end so an earlier, smaller p value cannot receive a worse adjusted value than a later one.",
+                    "In a real RNA analysis m can be thousands of genes, which is why a raw p value that looks small may still have a much larger q value after the full testing family is considered.",
+                ],
+                takeaway: "BH rewards very small p values that remain extreme relative to the number and rank of all tests, while controlling the expected false-discovery proportion among selected results.",
+                chart: AnalysisDocToyChart::Line {
+                    categories: &["Rank 1", "Rank 2", "Rank 3", "Rank 4", "Rank 5"],
+                    series: &[
+                        AnalysisDocToySeries {
+                            label: "Sorted p value",
+                            values: &[0.002, 0.010, 0.030, 0.080, 0.200],
+                        },
+                        AnalysisDocToySeries {
+                            label: "BH q value",
+                            values: &[0.010, 0.025, 0.050, 0.100, 0.200],
+                        },
+                    ],
+                    y_label: "Probability-scale value",
+                },
+            },
+        ],
         subsections: &[
             AnalysisDocSubsection {
                 title: "Effects and uncertainty",
@@ -1320,6 +1541,54 @@ mod tests {
                 .iter()
                 .any(|title| title.contains("Pathway over-representation"))
         );
+    }
+
+    #[test]
+    fn search_finds_aitchison_and_permanova_examples() {
+        let aitchison = analysis_doc_sections()
+            .iter()
+            .filter(|section| analysis_doc_section_matches(section, "Aitchison"))
+            .map(|section| section.title)
+            .collect::<Vec<_>>();
+        assert!(
+            aitchison.iter().any(
+                |title| title.contains("BCR isotype") || title.contains("PCA, PCoA, PERMANOVA")
+            )
+        );
+
+        let permanova = analysis_doc_sections()
+            .iter()
+            .filter(|section| analysis_doc_section_matches(section, "PERMANOVA"))
+            .map(|section| section.title)
+            .collect::<Vec<_>>();
+        assert!(
+            permanova
+                .iter()
+                .any(|title| title.contains("PCA, PCoA, PERMANOVA"))
+        );
+    }
+
+    #[test]
+    fn search_finds_extended_statistic_examples() {
+        for term in [
+            "Shannon",
+            "clonality",
+            "rarefaction",
+            "Morisita-Horn",
+            "Benjamini-Hochberg",
+            "hypergeometric",
+            "Aitchison",
+            "PERMANOVA",
+            "variance explained",
+            "loadings",
+        ] {
+            assert!(
+                analysis_doc_sections()
+                    .iter()
+                    .any(|section| analysis_doc_section_matches(section, term)),
+                "documentation search did not find {term}"
+            );
+        }
     }
 
     #[test]

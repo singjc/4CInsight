@@ -4,12 +4,12 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
-## What v0.15.3 adds
+## What v0.15.4 adds
 
-- Adds a **Docs search bar** that filters the canonical analysis guide by section title, subsection text, statistical terms, toy-example text, and chart labels. Matching sections automatically open, so terms such as `clonality`, `q value`, `PCA`, `outlier`, `pathway`, or `covariate` jump directly to the relevant explanation.
+- Keeps the **Docs search bar** and expands the educational plots with more realistic sample-level toy data, clearer category labeling, and dedicated statistics explainers for concepts such as **Aitchison/CLR** and **PERMANOVA**. Matching sections automatically open, so terms such as `clonality`, `q value`, `PCA`, `PERMANOVA`, `Aitchison`, `outlier`, `pathway`, or `covariate` jump directly to the relevant explanation.
 - Keeps only the **Start here** section expanded by default; the larger method sections stay collapsed until opened or matched by search, reducing the initial wall of text.
-- Adds one **small synthetic worked example + visual** to every major analysis-guide section. Examples are explicitly labelled illustrative toy data and walk through what to notice before giving the interpretation takeaway.
-- Uses the same example definitions in the GUI and both unified HTML report styles. The GUI renders lightweight `egui_plot` charts; reports render self-contained inline SVG plots inside the existing expandable documentation appendix.
+- Provides **one or more synthetic worked examples + visuals** in every major analysis-guide section. Examples are explicitly labelled illustrative toy data and walk through what to notice before giving the interpretation takeaway.
+- Uses the same example definitions in the GUI and both unified HTML report styles. The GUI renders lightweight `egui_plot` charts; reports render self-contained inline SVG plots inside the existing expandable documentation appendix. The toy examples now emphasize per-sample values and realistic multivariate/compositional interpretations rather than only coarse two-bar summaries. Dedicated explainers cover **Shannon/clonality, rarefaction, Morisita-Horn vs Jaccard, Aitchison/CLR, PERMANOVA, BH/FDR, hypergeometric ORA, PCA variance explained, and PCA loadings**.
 - Keeps toy examples completely separate from cohort results: they are fixed educational values compiled into the documentation module and never enter the statistical run/result objects.
 
 ## What v0.15.2 adds

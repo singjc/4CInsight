@@ -18,7 +18,7 @@ The **corrected / standard analysis is the primary inferential engine**. Cross-m
 
 Both HTML report styles and the technical table export are generated from the **same frozen completed analysis run**. Exporting a different report does not rerun statistics or change sample inclusion.
 
-### Searchable visual in-app and report documentation (v0.15.3)
+### Searchable visual in-app and report documentation (v0.15.4)
 
 The desktop **Docs** workspace now contains a much more detailed method-and-interpretation reference intended for readers without a statistics background. The same canonical reference is embedded in both the simplified and full unified HTML reports. The report version also begins with the exact settings used for that completed run (expression support thresholds, covariates/subject handling, repertoire rarefaction and ambiguity policy, composition thresholds/pseudocount, PERMANOVA permutations, pathway thresholds, QC rule, and diagnostic thresholds).
 
@@ -29,7 +29,9 @@ The in-app/report guide also explains, in implementation-specific terms, raw-cou
 The Docs workspace now has a case-insensitive search box. When a search term is present, non-matching sections/subsections are hidden and matching sections open automatically. Search also covers the educational examples and chart labels, so a reader can type a concept such as `clonality`, `q value`, `PCA`, `outlier`, `pathway`, `DTU`, or `covariate` rather than scanning the full guide.
 Only the introductory **Start here** section is expanded by default; the larger method sections remain collapsed until the reader opens them or a search matches them.
 
-Each major documentation section also has a fixed **toy example** with deliberately simple synthetic values, a small plot, a numbered walkthrough, and a one-sentence takeaway. These examples are teaching aids only: they are not sampled from the current cohort, never enter a statistical model, and are visually labelled as illustrative. The same example definitions are rendered with `egui_plot` in the GUI and as inline self-contained SVG figures in both HTML report styles.
+Each major documentation section also has one or more fixed **toy examples** with synthetic values, small plots, numbered walkthroughs, and one-sentence takeaways. These examples are teaching aids only: they are not sampled from the current cohort, never enter a statistical model, and are visually labelled as illustrative. The same example definitions are rendered with `egui_plot` in the GUI and as inline self-contained SVG figures in both HTML report styles.
+
+The v0.15.4 documentation pass makes the examples more sample-oriented and adds dedicated visual explainers for several statistics that are otherwise difficult to understand from prose alone: **normalized Shannon diversity versus clonality, matched-depth rarefaction, Morisita-Horn versus Jaccard similarity, Aitchison/CLR geometry, PERMANOVA pseudo-F permutations, Benjamini-Hochberg q-value adjustment, hypergeometric pathway ORA, PCA variance explained, and PCA feature loadings**. The Docs-only categorical tick formatter is also stricter so grouped toy bars no longer repeat the same x-axis label around offset bar positions.
 
 
 ## 1. Cohort & metadata

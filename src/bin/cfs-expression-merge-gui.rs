@@ -9365,9 +9365,10 @@ impl MergeApp {
                 Plot::new(plot_id)
                     .height(230.0)
                     .legend(Legend::default())
-                    .x_axis_label("Toy category")
                     .y_axis_label(y_label)
-                    .x_axis_formatter(move |mark, _range| sample_tick_label(mark.value, &labels))
+                    .x_axis_formatter(move |mark, _range| {
+                        analysis_doc_tick_label(mark.value, &labels)
+                    })
                     .show(ui, |plot_ui| {
                         if stacked {
                             let mut bases = vec![0.0f64; categories.len()];
@@ -9415,9 +9416,10 @@ impl MergeApp {
                 Plot::new(plot_id)
                     .height(230.0)
                     .legend(Legend::default())
-                    .x_axis_label("Sensitivity view")
                     .y_axis_label(y_label)
-                    .x_axis_formatter(move |mark, _range| sample_tick_label(mark.value, &labels))
+                    .x_axis_formatter(move |mark, _range| {
+                        analysis_doc_tick_label(mark.value, &labels)
+                    })
                     .show(ui, |plot_ui| {
                         for toy_series in series {
                             let points = toy_series
@@ -10605,6 +10607,15 @@ fn sample_tick_label(value: f64, samples: &[String]) -> String {
     }
     let idx = rounded as usize;
     samples.get(idx).cloned().unwrap_or_default()
+}
+
+fn analysis_doc_tick_label(value: f64, labels: &[String]) -> String {
+    let rounded = value.round();
+    if (value - rounded).abs() > 0.04 || rounded < 0.0 {
+        return String::new();
+    }
+    let idx = rounded as usize;
+    labels.get(idx).cloned().unwrap_or_default()
 }
 
 fn box_spread_from_values(values: &[f64]) -> Option<BoxSpread> {
