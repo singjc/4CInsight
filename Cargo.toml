@@ -1,6 +1,6 @@
 [package]
 name = "cfs-expression-merger"
-version = "0.16.0"
+version = "0.16.6"
 edition = "2024"
 description = "Cohort explorer for RNA expression merging and metadata-driven multi-modal analysis"
 license = "MIT"
@@ -17,6 +17,10 @@ path = "src/bin/cfs-expression-merge.rs"
 name = "cfs-expression-merge-gui"
 path = "src/bin/cfs-expression-merge-gui.rs"
 
+[[bin]]
+name = "cfs-server"
+path = "src/bin/cfs-server.rs"
+
 [dependencies]
 anyhow = "1.0"
 calamine = "0.36.1"
@@ -29,3 +33,17 @@ tempfile = "3.24"
 report-builder = "0.1.1"
 maud = "0.27.0"
 plotly = { version = "0.12.1", features = ["plotly_embed_js"] }
+
+axum = "0.8"
+base64 = "0.22"
+hex = "0.4"
+futures-util = "0.3"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+subtle = "2.6"
+tokio = { version = "1.47", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "time", "io-util"] }
+tower-http = { version = "0.6", features = ["fs"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }
+zip = "8.6"

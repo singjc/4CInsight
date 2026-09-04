@@ -2,7 +2,148 @@
 
 A Rust application for memory-bounded RNA expression merging plus metadata-driven multi-modal cohort exploration across gene/transcript expression, BCR, BCR isotypes, TCR alpha/beta, and immune-infiltrate data.
 
-The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
+The project contains a command-line interface, an `egui` desktop interface, and a browser/WASM client served by a local Rust `cfs-server`. The desktop application remains the production-capable local analysis environment; the browser path is being brought online incrementally. Private projects, authenticated opaque-object storage, explicit input-role assignment, native mapping, batch/directory selection, persistent frozen jobs, native QC, and one representative corrected gene-expression server lane are now implemented. The complete unified multi-omics/report stack remains desktop-only while web parity is validated incrementally.
+
+## What v0.16.6 adds
+
+- Adds **Phase 3D frozen persistent analysis jobs**. A job can be submitted only from a current validated mapping snapshot; the server fingerprints the logical input manifest plus comparison and rejects submission if uploads or role assignments made that mapping stale.
+- Freezes assigned input bytes into `jobs/<job-id>/snapshot/` before execution. On the local filesystem the server prefers hard links and falls back to copying, so later object deletion or assignment changes cannot silently mutate the already-submitted job.
+- Adds an asynchronous persisted lifecycle: `queued → preparing → running → complete/failed/cancelled`. Browser polling shows progress, jobs can be reopened after browser refresh/project recovery, and server restart marks interrupted in-progress jobs as failed rather than silently resuming them.
+- Reuses the **existing native cross-modal outlier/QC engine** from the frozen snapshot. There is no web-specific QC calculation.
+- Adds one deliberately narrow representative corrected-analysis lane: when a `merged_gene_expression` TSV is assigned, the worker runs the existing native `run_corrected_expression()` path with `Raw Count`, `Gene`, `CorrectedModelSpec::default()`, plus the optional selected subject column/covariates. The browser shows the top corrected gene results and the server persists the complete result table as a private artifact.
+- Persists mapping/QC/gene artifacts under opaque job artifact UUIDs and exposes an authenticated artifact-download endpoint. Full unified HTML reports and polished browser-side artifact download controls remain later work.
+- Adds **multi-file upload selection** and **directory selection** in the browser. A selected batch is intentionally sent through the existing per-object upload API one file at a time: each file gets its own opaque UUID, streaming SHA-256, authorization check, and quota enforcement. Directory-relative paths are never used as server storage keys.
+- Keeps the existing per-file/per-project/object quotas, adds a default limit of **16 persisted jobs per project** (`CFS_MAX_JOBS`), and defaults to **one concurrent local scientific worker** (`CFS_MAX_CONCURRENT_JOBS=1`) so queued browser jobs cannot unexpectedly saturate a laptop. Frozen job snapshots are counted as retained logical project storage, so submitting a new job is rejected when its frozen inputs would exceed `CFS_MAX_PROJECT_BYTES`. Individual persisted job artifacts are capped at **128 MiB**. Project TTL/deletion removes the jobs, snapshots, and artifacts with the rest of the private project directory.
+- Advances the local API to **version 4** with `analysis_enabled=true`, `persistent_jobs=true`, `representative_gene_enabled=true`, and `batch_upload_enabled=true`. This does **not** mean the complete native multi-omics analysis stack is web-connected yet.
+- Keeps local-filesystem storage behind opaque project/object/job identifiers so the later S3/MinIO storage implementation can preserve the same browser contract.
+
+### Run and test Phase 3D
+
+```bash
+cd /home/singjc/Documents/github/cfs-expression-merger
+./scripts/run_web_local.sh
+```
+
+Open `http://127.0.0.1:8080`. Create/recover a temporary project, use **Choose files…** for multi-select or **Choose folder…** for a directory, assign the uploaded objects, run a mapping audit, and then submit a frozen job from the current mapping fingerprint. Use synthetic/non-patient data while validating this development phase. See `docs/web_development.md` for the storage layout, API/job contract, parity tests, restart/cancellation semantics, and representative gene-lane requirements.
+
+## What v0.16.5 adds
+
+- Adds **Phase 3C uploaded-object interpretation and mapping audit**. Uploaded objects remain opaque UUID-backed blobs, but each object can now be assigned an explicit 4C role: primary metadata, filtered/subset metadata, gene expression, transcript expression, BCR, BCR isotype, TCR alpha, TCR beta, immune infiltrate, merged gene-expression TSV, or merged transcript-expression TSV.
+- Sample-level modality roles require an explicit sample ID. The server does **not** infer modality or sample identity from filenames. Browser DTOs still expose object IDs/metadata only and never server filesystem paths.
+- Persists role/sample-ID assignments both in each private object record and in `manifests/inputs.json`, preserving the same object-ID boundary needed for a future S3/MinIO storage backend.
+- Adds defensive validation before scientific parsing. Web `.xlsx` inputs must be real XLSX/ZIP containers with required workbook entries and are bounded by ZIP entry-count, per-entry expanded-size, total expanded-size, and compression-ratio checks. Delimited text inputs are checked for UTF-8/NUL sanity. Legacy `.xls` is intentionally rejected by the Phase-3C web validator with a conversion message.
+- Reuses the **existing native scientific mapping path** rather than implementing a browser-specific mapper: primary metadata is materialized in private scratch space and loaded with the existing `load_metadata()`, a native `ProjectScan` is constructed from explicit object roles/sample IDs, and the existing `build_mapping()` produces the audit.
+- Adds authenticated `PUT /api/projects/{project_id}/objects/{object_id}/assignment` and `POST /api/projects/{project_id}/mapping-audit`. API health is now version 3 and reports `mapping_enabled=true` while `analysis_enabled=false`.
+- Adds browser controls for assigning roles/sample IDs, running mapping validation, previewing optional Case/Control counts from a metadata-defined comparison, reviewing matched/unmatched/ambiguous/metadata-only counts, per-modality coverage, warnings, and sample-level mapping rows.
+- Keeps corrected statistics, cross-modal QC, persistent analysis jobs, report generation, and S3/MinIO disabled until mapping parity is locally validated.
+
+### Run the Phase-3C local web app
+
+```bash
+cd /home/singjc/Documents/github/cfs-expression-merger
+./scripts/run_web_local.sh
+```
+
+Open `http://127.0.0.1:8080`, create/recover a project, upload harmless synthetic metadata/modality files, assign each object explicitly, and use **Cohort Analysis → Server-side mapping audit**. See `docs/web_development.md` for the role contract, API examples, validation limits, and native-parity checks.
+
+## What v0.16.4 adds
+
+- Adds **Phase 3B authenticated object upload** to the local web server. Every upload/list/delete request requires the project UUID plus the private recovery token established in Phase 3A.
+- Upload request bodies are **streamed by Axum/Tokio to a private scratch file** instead of being accumulated into one server-memory buffer. SHA-256 is calculated incrementally over the same byte stream before the object is finalized.
+- Stores each upload under an **opaque UUID object key** such as `inputs/<object-uuid>.bin`; the browser-supplied/original filename is preserved only as metadata and is never used as a filesystem path.
+- Adds object metadata records containing the opaque object ID, original filename, byte size, SHA-256, upload timestamp, and optional content type.
+- Adds configurable upload safety limits: per-file bytes, total project bytes, and object count. The development defaults are **64 MiB per file**, **512 MiB per project**, and **64 objects**. The server rejects over-limit uploads and removes partial scratch files.
+- Adds authenticated `GET /api/projects/{project_id}/objects`, `POST /api/projects/{project_id}/objects?filename=...`, and `DELETE /api/projects/{project_id}/objects/{object_id}` endpoints.
+- Adds browser file selection/upload, uploaded-object listing with SHA-256/object IDs, and individual object deletion. Project deletion and TTL expiry continue to remove the complete project directory including all uploaded bytes.
+- Keeps **scientific parsing, mapping/QC, corrected analysis, job execution, result/report persistence, and S3/MinIO disabled**. For Phase-3B validation, use harmless non-patient test files first.
+- Keeps the storage/API contract S3-friendly: browser code only sees project/object identifiers and metadata, never server filesystem paths. The current implementation remains local-filesystem backed for laptop testing.
+
+### Run the Phase-3B local web app
+
+```bash
+cd /home/singjc/Documents/github/cfs-expression-merger
+./scripts/run_web_local.sh
+```
+
+Open `http://127.0.0.1:8080`, create/recover a private project, then use **Cohort Analysis → Private uploaded objects** to choose and upload a harmless test file. See `docs/web_development.md` for curl tests, quota configuration, storage layout, and deletion verification.
+
+
+## What v0.16.3 adds
+
+- Adds a **native/web visual-parity pass** for the browser client. The native and WASM frontends now share the same `src/ui_theme.rs` visual constants instead of configuring appearance independently.
+- Applies the native dark palette, spacing, button sizing, accent color, hyperlink color, panel fills, and tooltip width to the WASM client.
+- Rebuilds the browser header to match the native application: the same 4C title/subtitle card, accent-colored product name, and the same primary navigation ordering. Browser/server status is kept as a compact right-side status control rather than a separate first-class navigation tab.
+- Uses the same dark page background in `web/index.html`, avoiding the flat gray/light bootstrap appearance seen in the first Phase-3A browser preview.
+- Keeps all Phase-3A project/recovery-token/storage behavior unchanged. This release is presentation-only plus shared-theme refactoring; no scientific or server lifecycle semantics change.
+
+## What v0.16.2 adds
+
+- Adds **Phase 3A** of the hosted architecture: a native Rust **`cfs-server`** binary built with Axum. It binds to `127.0.0.1:8080` by default and serves both the compiled `web/dist/` WASM application and the same-origin `/api` endpoints, so Python or `trunk serve` is no longer required at runtime.
+- Adds `GET /api/health`, `POST /api/projects`, `GET /api/projects/{project_id}`, and `DELETE /api/projects/{project_id}`. Upload and scientific-analysis endpoints remain deliberately disabled until the next phase.
+- Adds passwordless **capability-based project recovery**: project creation returns an opaque UUID plus an independent random 256-bit recovery token. Only the token's SHA-256 hash is persisted server-side; patient-data/content hashes are not used as authorization secrets.
+- Adds local temporary project persistence under a configurable storage root. The default is `~/.local/share/4c-cohort-explorer-web/`; each project receives isolated `inputs/`, `results/`, `reports/`, `manifests/`, and `scratch/` directories plus a small `project.json` lifecycle record.
+- Adds privacy-oriented TTL handling. Projects default to 24 hours of retention (configurable up to 7 days in this development phase), expired projects are removed on server startup and by an hourly cleanup task, and explicit deletion removes the whole project directory.
+- Connects the browser Cohort Analysis shell to `/api` using same-origin HTTP. Users can create, recover/refresh, and permanently delete a temporary project from the browser. Recovery credentials remain browser-memory-only in this phase and are not persisted to localStorage.
+- Adds `scripts/run_web_local.sh`, which builds the WASM frontend with Trunk and launches the Rust server. This is now the recommended local browser workflow; `trunk serve` is not required.
+- Keeps patient/sequencing file upload, mapping/QC, analysis jobs, result/report persistence, and S3/MinIO disabled until the storage lifecycle is validated independently.
+
+### Run the Phase-3A local web app
+
+One-time prerequisites:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
+```
+
+Then from the repository root:
+
+```bash
+cd /home/singjc/Documents/github/cfs-expression-merger
+./scripts/run_web_local.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080
+```
+
+The helper performs `trunk build --release` under `web/` and then runs `cargo run --release --bin cfs-server`. No Python HTTP server is required.
+
+For separate build/server steps:
+
+```bash
+cd /home/singjc/Documents/github/cfs-expression-merger/web
+trunk build --release
+
+cd /home/singjc/Documents/github/cfs-expression-merger
+cargo run --release --bin cfs-server
+```
+
+Useful local server configuration:
+
+```bash
+CFS_BIND=127.0.0.1:8080
+CFS_STORAGE_ROOT=/path/to/private/4c-storage
+CFS_WEB_DIST=/path/to/repo/web/dist
+CFS_DEFAULT_TTL_HOURS=24
+```
+
+See `docs/web_development.md` for API tests, privacy/storage details, recovery-token handling, and the Phase-3B upload boundary.
+
+## What v0.16.1 adds
+
+- Adds a standalone **WASM/browser shell** under `web/` using `eframe::WebRunner`, while leaving the native scientific package unchanged and fully local.
+- Reuses the canonical `src/analysis_docs.rs` directly from the browser crate, so the searchable analysis documentation and educational plots stay single-source across native GUI, HTML reports, and the web preview.
+- Adds browser navigation for **Merge & Export**, **Explore & QC**, **Metadata Builder**, **Cohort Analysis**, and **Docs**. Native-data operations are intentionally disabled until the local Axum/job-service phase; the browser does not pretend it can open arbitrary server/local `PathBuf` values.
+- Adds an in-memory Metadata Builder preview and a remote Cohort Analysis shell so browser editing/state interactions can be tested before uploads, job persistence, and storage are introduced.
+- Keeps the planned remote API endpoint visible but display-only. There is **no upload, patient-data persistence, recovery-token, S3, or analysis HTTP implementation in this phase**.
+- Adds `docs/web_development.md` and `web/README.md` with exact local build/run instructions using `wasm32-unknown-unknown` and Trunk.
+
+### Historical Phase-2 note
+
+v0.16.1 established the WASM browser shell. The current recommended local workflow is the v0.16.2 `cfs-server` flow above rather than `trunk serve`.
 
 ## What v0.16.0 adds
 
