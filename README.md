@@ -4,6 +4,15 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.16.0 adds
+
+- Introduces a library-level **`AnalysisBackend` execution boundary** for the Cohort Analysis workflow. The current desktop application uses `LocalBackend`, which delegates to the existing filesystem, mapping, outlier-QC, and unified-analysis functions so the scientific behavior remains unchanged.
+- Adds backend-neutral **project and metadata locator types** plus local/remote analysis request types. Native mode uses local directory/file locators today; future WASM/server work can use opaque remote project/object handles instead of pretending browser data are `PathBuf`s.
+- Routes the user-facing unified Cohort Analysis project scan, metadata loading, mapping audit construction, cross-modal outlier QC, and unified analysis execution through the backend interface.
+- Adds a concrete **`RemoteBackend` typed stub** that intentionally fails loudly because no HTTP client/server exists yet. This establishes the seam for the next WASM/API phases without adding networking or storage dependencies to the native application.
+- Keeps the hidden legacy analysis paths available for regression comparison; this phase is an architectural boundary only and does not change the corrected statistics, QC algorithms, reports, metadata schema, or file formats.
+- Displays the active execution backend in Cohort Analysis (`Local native` for the current desktop build).
+
 ## What v0.15.4 adds
 
 - Keeps the **Docs search bar** and expands the educational plots with more realistic sample-level toy data, clearer category labeling, and dedicated statistics explainers for concepts such as **Aitchison/CLR** and **PERMANOVA**. Matching sections automatically open, so terms such as `clonality`, `q value`, `PCA`, `PERMANOVA`, `Aitchison`, `outlier`, `pathway`, or `covariate` jump directly to the relevant explanation.

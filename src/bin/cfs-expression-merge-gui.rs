@@ -1,23 +1,25 @@
 use cfs_expression_merger::analysis::{
     CohortAnalysisSettingsSnapshot, CohortDefinitionSnapshot, CohortModalitySelection,
-    CorrectedAnalysisBundle, UnifiedCohortAnalysisRun, run_unified_cohort_analysis,
-    write_unified_analysis_tables,
+    CorrectedAnalysisBundle, UnifiedCohortAnalysisRun, write_unified_analysis_tables,
 };
 use cfs_expression_merger::analysis_docs::{
     AnalysisDocToyChart, AnalysisDocToyExample, analysis_doc_example_matches,
     analysis_doc_section_header_matches, analysis_doc_section_matches, analysis_doc_sections,
     analysis_doc_subsection_matches,
 };
+use cfs_expression_merger::backend::{
+    AnalysisBackend, LocalBackend, LocalOutlierRequest, LocalUnifiedAnalysisRequest,
+    MetadataLocator, OutlierAnalysisRequest, ProjectLocator, UnifiedAnalysisRequest,
+};
 use cfs_expression_merger::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, CohortComparison, CohortComparisonDefinition,
     CohortMapping, CohortModality, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
     ImmuneComparisonResult, MappingStatus, MetadataComparisonSpec, MetadataTable, ProjectScan,
-    TcrComparisonResult, build_comparison, build_comparison_definition, build_mapping,
-    load_metadata, normalize_sample_id, run_bcr_comparison, run_bcr_isotype_comparison,
-    run_gene_comparison, run_immune_infiltrate_comparison, run_tcr_comparison,
-    run_transcript_comparison, scan_project, write_bcr_isotype_values, write_bcr_sample_summaries,
-    write_feature_tests, write_immune_values, write_mapping_audit, write_mapping_audit_csv,
-    write_tcr_sample_summaries,
+    TcrComparisonResult, build_comparison, build_comparison_definition, load_metadata,
+    normalize_sample_id, run_bcr_comparison, run_bcr_isotype_comparison, run_gene_comparison,
+    run_immune_infiltrate_comparison, run_tcr_comparison, run_transcript_comparison,
+    write_bcr_isotype_values, write_bcr_sample_summaries, write_feature_tests, write_immune_values,
+    write_mapping_audit, write_mapping_audit_csv, write_tcr_sample_summaries,
 };
 use cfs_expression_merger::corrected::{
     AdjustedFeatureResult, AmbiguousCallPolicy, CorrectedCompositionResult,
@@ -48,7 +50,7 @@ use cfs_expression_merger::metadata::{
 use cfs_expression_merger::outliers::{
     CrossModalOutlierResult, OutlierConfig, OutlierConsensusRule, OutlierFilterSnapshot,
     OutlierScope, build_outlier_filter_snapshot, filter_comparison_excluding,
-    run_cross_modal_outlier_qc, write_outlier_audit_csv, write_outlier_filter_modalities_tsv,
+    write_outlier_audit_csv, write_outlier_filter_modalities_tsv,
     write_outlier_filter_snapshot_csv, write_outlier_filter_summary,
 };
 use cfs_expression_merger::report::{
@@ -71,7 +73,10 @@ use rfd::FileDialog;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{
+    Arc,
+    mpsc::{self, Receiver},
+};
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -305,6 +310,7 @@ struct MergeMetadataFileStatus {
 
 struct MergeApp {
     active_tab: AppTab,
+    analysis_backend: Arc<dyn AnalysisBackend>,
     files: Vec<PathBuf>,
     sample_filter: String,
     input_path_text: String,
@@ -347,8 +353,10 @@ struct MergeApp {
     docs_search: String,
 
     cohort_root: Option<PathBuf>,
+    cohort_project_source: Option<ProjectLocator>,
     cohort_scan: Option<ProjectScan>,
     cohort_metadata_path: Option<PathBuf>,
+    cohort_metadata_source: Option<MetadataLocator>,
     cohort_metadata: Option<MetadataTable>,
     cohort_mapping: Option<CohortMapping>,
     cohort_preset: ComparisonPreset,
@@ -392,6 +400,7 @@ struct MergeApp {
     corrected_pathway_effect: f64,
     corrected_ordination_color_by: String,
     focused_metadata_path: Option<PathBuf>,
+    focused_metadata_source: Option<MetadataLocator>,
     focused_metadata: Option<MetadataTable>,
     focused_mapping: Option<CohortMapping>,
     focused_run_exploratory_concordance: bool,
@@ -655,6 +664,7 @@ impl MergeApp {
 
         Self {
             active_tab: AppTab::Merge,
+            analysis_backend: Arc::new(LocalBackend),
             files: Vec::new(),
             sample_filter: String::new(),
             input_path_text: String::new(),
@@ -697,8 +707,10 @@ impl MergeApp {
             docs_search: String::new(),
 
             cohort_root: None,
+            cohort_project_source: None,
             cohort_scan: None,
             cohort_metadata_path: None,
+            cohort_metadata_source: None,
             cohort_metadata: None,
             cohort_mapping: None,
             cohort_preset: ComparisonPreset::HypVsTrueHc,
@@ -743,6 +755,7 @@ impl MergeApp {
             corrected_pathway_effect: 0.5,
             corrected_ordination_color_by: "Analysis group".to_string(),
             focused_metadata_path: None,
+            focused_metadata_source: None,
             focused_metadata: None,
             focused_mapping: None,
             focused_run_exploratory_concordance: true,
@@ -1098,7 +1111,7 @@ impl MergeApp {
                         dialog = dialog.set_directory(dir);
                     }
                     if let Some(root) = dialog.pick_folder() {
-                        match scan_project(&root) {
+                        match this.analysis_backend.scan_project(&ProjectLocator::local(root.clone())) {
                             Ok(scan) => {
                                 let mut seen = BTreeMap::<String, String>::new();
                                 for file in &scan.files {
@@ -1107,8 +1120,11 @@ impl MergeApp {
                                 }
                                 let samples = seen.into_values().collect::<Vec<_>>();
                                 this.cohort_root = Some(root.clone());
+                                this.cohort_project_source = Some(ProjectLocator::local(root.clone()));
                                 this.cohort_scan = Some(scan.clone());
-                                this.cohort_mapping = this.cohort_metadata.as_ref().map(|meta| build_mapping(&scan, meta));
+                                this.cohort_mapping = this.cohort_metadata.as_ref().and_then(|meta| {
+                                    this.analysis_backend.build_mapping(&scan, meta).ok()
+                                });
                                 this.last_directory = Some(root);
                                 this.metadata_builder = Some(new_standard_metadata(&samples));
                                 this.metadata_builder_path = None;
@@ -1152,7 +1168,7 @@ impl MergeApp {
                         dialog = dialog.set_directory(dir);
                     }
                     if let Some(path) = dialog.pick_file() {
-                        match load_metadata(&path) {
+                        match this.analysis_backend.load_metadata(&MetadataLocator::local(path.clone())) {
                             Ok(metadata) => {
                                 this.last_directory = path.parent().map(Path::to_path_buf);
                                 this.metadata_builder_path = Some(path.clone());
@@ -1455,12 +1471,13 @@ impl MergeApp {
                 if use_in_cohort {
                     let mut active = metadata.clone();
                     active.path = path.clone();
+                    self.cohort_metadata_source = Some(MetadataLocator::local(path.clone()));
                     self.cohort_metadata_path = Some(path);
                     self.cohort_metadata = Some(active.clone());
                     self.cohort_mapping = self
                         .cohort_scan
                         .as_ref()
-                        .map(|scan| build_mapping(scan, &active));
+                        .and_then(|scan| self.analysis_backend.build_mapping(scan, &active).ok());
                     self.cohort_use_filtered_metadata = false;
                     self.unified_results = None;
                     self.outlier_results = None;
@@ -2905,6 +2922,14 @@ impl MergeApp {
                 )
                 .weak(),
             );
+            ui.label(
+                egui::RichText::new(format!(
+                    "Execution backend: {}",
+                    this.analysis_backend.display_name()
+                ))
+                .small()
+                .weak(),
+            );
             ui.horizontal_wrapped(|ui| {
                 let choose = ui
                     .add_enabled(!this.cohort_running, egui::Button::new("Choose project folder…"))
@@ -2919,14 +2944,15 @@ impl MergeApp {
                         this.load_cohort_project(root);
                     }
                 }
-                if let Some(root) = this.cohort_root.clone() {
-                    ui.monospace(root.display().to_string());
-                    let root_clone = root.clone();
-                    let rescan = ui
-                        .add_enabled(!this.cohort_running, egui::Button::new("Rescan"))
-                        .on_hover_text("Rescan the same project root after new files or merged outputs have been added.");
-                    if rescan.clicked() {
-                        this.load_cohort_project(root_clone);
+                if let Some(source) = this.cohort_project_source.clone() {
+                    ui.monospace(source.display_name());
+                    if let Some(root) = source.local_path().map(Path::to_path_buf) {
+                        let rescan = ui
+                            .add_enabled(!this.cohort_running, egui::Button::new("Rescan"))
+                            .on_hover_text("Rescan the same local project root after new files or merged outputs have been added.");
+                        if rescan.clicked() {
+                            this.load_cohort_project(root);
+                        }
                     }
                 }
             });
@@ -2984,13 +3010,8 @@ impl MergeApp {
                             this.load_cohort_metadata_path(path);
                         }
                     }
-                    if let Some(path) = &this.cohort_metadata_path {
-                        ui.monospace(
-                            path.file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string(),
-                        );
+                    if let Some(source) = &this.cohort_metadata_source {
+                        ui.monospace(source.display_name());
                     } else if !scan.metadata_candidates.is_empty() {
                         ui.label(
                             egui::RichText::new(format!(
@@ -3067,7 +3088,7 @@ impl MergeApp {
             let mapping = self.focused_mapping.clone().or_else(|| {
                 self.cohort_scan
                     .as_ref()
-                    .map(|scan| build_mapping(scan, &metadata))
+                    .and_then(|scan| self.analysis_backend.build_mapping(scan, &metadata).ok())
             })?;
             Some((metadata, path, mapping, true))
         } else {
@@ -3076,7 +3097,7 @@ impl MergeApp {
             let mapping = self.cohort_mapping.clone().or_else(|| {
                 self.cohort_scan
                     .as_ref()
-                    .map(|scan| build_mapping(scan, &metadata))
+                    .and_then(|scan| self.analysis_backend.build_mapping(scan, &metadata).ok())
             })?;
             Some((metadata, path, mapping, false))
         }
@@ -3162,6 +3183,7 @@ impl MergeApp {
                 if this.focused_metadata.is_some() && ui.button("Clear filtered subset").clicked() {
                     this.focused_metadata = None;
                     this.focused_metadata_path = None;
+                    this.focused_metadata_source = None;
                     this.focused_mapping = None;
                     this.cohort_use_filtered_metadata = false;
                     this.unified_results = None;
@@ -3169,11 +3191,8 @@ impl MergeApp {
                     this.outlier_excluded_ids.clear();
                 }
             });
-            if let Some(path) = &this.focused_metadata_path {
-                ui.label(format!(
-                    "Filtered metadata: {}",
-                    path.file_name().and_then(|x| x.to_str()).unwrap_or("metadata")
-                ));
+            if let Some(source) = &this.focused_metadata_source {
+                ui.label(format!("Filtered metadata: {}", source.display_name()));
             }
             if this.focused_metadata.is_some() {
                 let (mut selected_id, columns, current_id) = this
@@ -4560,6 +4579,7 @@ impl MergeApp {
                     .clicked()
                 {
                     if let (Some(path), Some(meta)) = (this.cohort_metadata_path.clone(), this.cohort_metadata.clone()) {
+                        this.focused_metadata_source = Some(MetadataLocator::local(path.clone()));
                         this.focused_metadata_path = Some(path);
                         this.focused_metadata = Some(meta);
                         this.focused_results = None;
@@ -7761,30 +7781,31 @@ impl MergeApp {
             return;
         }
         let config = self.outlier_config.clone();
+        let backend = Arc::clone(&self.analysis_backend);
+        let request = OutlierAnalysisRequest::Local(LocalOutlierRequest {
+            scan,
+            comparison,
+            selected_modalities: modalities,
+            config,
+        });
         let (tx, rx) = mpsc::channel();
         self.cohort_receiver = Some(rx);
         self.cohort_running = true;
         self.cohort_progress = 0.0;
-        self.cohort_status = format!("Running sample outlier QC for {}…", comparison.name);
+        self.cohort_status = format!("Running sample outlier QC via {}…", backend.display_name());
         self.outlier_results = None;
         std::thread::spawn(move || {
-            let result = run_cross_modal_outlier_qc(
-                scan.merged_gene_tsv.as_deref(),
-                scan.merged_transcript_tsv.as_deref(),
-                &scan.files,
-                &comparison,
-                &modalities,
-                &config,
-                |done, total, msg| {
-                    let frac = if total == 0 {
-                        0.0
-                    } else {
-                        done as f32 / total as f32
-                    };
-                    let _ = tx.send(CohortWorkerMessage::Progress(frac, msg.to_string()));
-                },
-            )
-            .map_err(|e| format!("{e:#}"));
+            let mut progress = |done: usize, total: usize, msg: &str| {
+                let frac = if total == 0 {
+                    0.0
+                } else {
+                    done as f32 / total as f32
+                };
+                let _ = tx.send(CohortWorkerMessage::Progress(frac, msg.to_string()));
+            };
+            let result = backend
+                .run_outlier_qc(request, &mut progress)
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(CohortWorkerMessage::OutlierDone(result));
         });
     }
@@ -7930,33 +7951,40 @@ impl MergeApp {
             pbmc_diagnostics: diagnostics,
         };
 
+        let backend = Arc::clone(&self.analysis_backend);
+        let request = UnifiedAnalysisRequest::Local(LocalUnifiedAnalysisRequest {
+            scan,
+            metadata,
+            cohort,
+            settings,
+            qc_snapshot,
+        });
         let (tx, rx) = mpsc::channel();
         self.cohort_receiver = Some(rx);
         self.cohort_running = true;
         self.cohort_progress = 0.0;
-        self.cohort_status = format!("Running unified {}…", comparison.name);
+        self.cohort_status = format!(
+            "Running unified {} via {}…",
+            comparison.name,
+            backend.display_name()
+        );
         self.unified_results = None;
         self.corrected_results = None;
         self.focused_results = None;
         self.diagnostics_results = None;
         self.corrected_outlier_snapshot = None;
         std::thread::spawn(move || {
-            let result = run_unified_cohort_analysis(
-                &scan,
-                &metadata,
-                cohort,
-                settings,
-                qc_snapshot,
-                |done, total, message| {
-                    let fraction = if total == 0 {
-                        0.0
-                    } else {
-                        done as f32 / total as f32
-                    };
-                    let _ = tx.send(CohortWorkerMessage::Progress(fraction, message.to_string()));
-                },
-            )
-            .map_err(|error| format!("{error:#}"));
+            let mut progress = |done: usize, total: usize, message: &str| {
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    done as f32 / total as f32
+                };
+                let _ = tx.send(CohortWorkerMessage::Progress(fraction, message.to_string()));
+            };
+            let result = backend
+                .run_unified_analysis(request, &mut progress)
+                .map_err(|error| format!("{error:#}"));
             let _ = tx.send(CohortWorkerMessage::UnifiedDone(result));
         });
     }
@@ -8253,8 +8281,12 @@ impl MergeApp {
     }
 
     fn load_cohort_project(&mut self, root: PathBuf) {
-        match scan_project(&root) {
+        match self
+            .analysis_backend
+            .scan_project(&ProjectLocator::local(root.clone()))
+        {
             Ok(scan) => {
+                self.cohort_project_source = Some(ProjectLocator::local(root.clone()));
                 self.cohort_root = Some(root);
                 self.cohort_status = format!(
                     "Project scanned: {} supported files across {} parsed sample IDs.",
@@ -8277,6 +8309,7 @@ impl MergeApp {
                 } else {
                     self.cohort_metadata = None;
                     self.cohort_metadata_path = None;
+                    self.cohort_metadata_source = None;
                     self.cohort_mapping = None;
                 }
                 self.rebuild_focused_mapping();
@@ -8288,10 +8321,14 @@ impl MergeApp {
     }
 
     fn load_cohort_metadata_path(&mut self, path: PathBuf) {
-        match load_metadata(&path) {
+        match self
+            .analysis_backend
+            .load_metadata(&MetadataLocator::local(path.clone()))
+        {
             Ok(meta) => {
                 let rows = meta.rows.len();
                 let id_column = meta.id_column.clone();
+                self.cohort_metadata_source = Some(MetadataLocator::local(path.clone()));
                 self.cohort_metadata_path = Some(path);
                 self.cohort_metadata = Some(meta);
                 self.cohort_results = None;
@@ -8315,16 +8352,26 @@ impl MergeApp {
 
     fn rebuild_cohort_mapping(&mut self) {
         self.cohort_mapping = match (&self.cohort_scan, &self.cohort_metadata) {
-            (Some(scan), Some(meta)) => Some(build_mapping(scan, meta)),
+            (Some(scan), Some(meta)) => match self.analysis_backend.build_mapping(scan, meta) {
+                Ok(mapping) => Some(mapping),
+                Err(error) => {
+                    self.cohort_status = format!("Sample mapping failed: {error:#}");
+                    None
+                }
+            },
             _ => None,
         };
     }
 
     fn load_focused_metadata_path(&mut self, path: PathBuf) {
-        match load_metadata(&path) {
+        match self
+            .analysis_backend
+            .load_metadata(&MetadataLocator::local(path.clone()))
+        {
             Ok(meta) => {
                 let rows = meta.rows.len();
                 let id_column = meta.id_column.clone();
+                self.focused_metadata_source = Some(MetadataLocator::local(path.clone()));
                 self.focused_metadata_path = Some(path);
                 self.focused_metadata = Some(meta);
                 self.focused_results = None;
@@ -8343,7 +8390,13 @@ impl MergeApp {
 
     fn rebuild_focused_mapping(&mut self) {
         self.focused_mapping = match (&self.cohort_scan, &self.focused_metadata) {
-            (Some(scan), Some(meta)) => Some(build_mapping(scan, meta)),
+            (Some(scan), Some(meta)) => match self.analysis_backend.build_mapping(scan, meta) {
+                Ok(mapping) => Some(mapping),
+                Err(error) => {
+                    self.cohort_status = format!("Filtered cohort mapping failed: {error:#}");
+                    None
+                }
+            },
             _ => None,
         };
     }
