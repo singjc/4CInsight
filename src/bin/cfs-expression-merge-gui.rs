@@ -3,6 +3,7 @@ use cfs_expression_merger::analysis::{
     CorrectedAnalysisBundle, UnifiedCohortAnalysisRun, run_unified_cohort_analysis,
     write_unified_analysis_tables,
 };
+use cfs_expression_merger::analysis_docs::analysis_doc_sections;
 use cfs_expression_merger::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, CohortComparison, CohortComparisonDefinition,
     CohortMapping, CohortModality, ComparisonPreset, FeatureTestResult, GeneComparisonResult,
@@ -9187,20 +9188,45 @@ impl MergeApp {
             ui.add_space(10.0);
             this.render_docs_workflow_overview(ui);
             ui.add_space(10.0);
-            this.docs_section_overview(ui);
-            ui.add_space(8.0);
-            this.docs_section_exploratory(ui);
-            ui.add_space(8.0);
-            this.docs_section_diagnostics(ui);
-            ui.add_space(8.0);
-            this.docs_section_corrected(ui);
-            ui.add_space(8.0);
-            this.docs_section_focused(ui);
-            ui.add_space(8.0);
-            this.docs_section_plots(ui);
+            this.render_shared_analysis_docs(ui);
             ui.add_space(8.0);
             this.docs_section_references(ui);
         });
+    }
+
+    fn render_shared_analysis_docs(&self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new(
+                "Detailed method and interpretation reference. The same canonical explanations are embedded in both unified HTML report styles so a report reader can look up exactly what a statistic means without returning to the application.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+        for section in analysis_doc_sections() {
+            egui::CollapsingHeader::new(section.title)
+                .default_open(section.default_open)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(section.summary).italics());
+                    ui.add_space(8.0);
+                    for subsection in section.subsections {
+                        ui.label(egui::RichText::new(subsection.title).strong());
+                        ui.add_space(3.0);
+                        for paragraph in subsection.paragraphs {
+                            ui.label(*paragraph);
+                            ui.add_space(4.0);
+                        }
+                        for bullet in subsection.bullets {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("•");
+                                ui.label(*bullet);
+                            });
+                        }
+                        ui.add_space(9.0);
+                    }
+                });
+            ui.add_space(4.0);
+        }
     }
 
     fn render_docs_workflow_overview(&self, ui: &mut egui::Ui) {

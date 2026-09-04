@@ -18,6 +18,14 @@ The **corrected / standard analysis is the primary inferential engine**. Cross-m
 
 Both HTML report styles and the technical table export are generated from the **same frozen completed analysis run**. Exporting a different report does not rerun statistics or change sample inclusion.
 
+### Detailed in-app and report documentation (v0.15.2)
+
+The desktop **Docs** workspace now contains a much more detailed method-and-interpretation reference intended for readers without a statistics background. The same canonical reference is embedded in both the simplified and full unified HTML reports. The report version also begins with the exact settings used for that completed run (expression support thresholds, covariates/subject handling, repertoire rarefaction and ambiguity policy, composition thresholds/pseudocount, PERMANOVA permutations, pathway thresholds, QC rule, and diagnostic thresholds).
+
+A particularly important repertoire clarification is that **BCR/TCR clonality is a per-sample summary**. For each sample the app calculates Shannon entropy from the complete clonotype abundance distribution and then computes `1 - Shannon / ln(observed richness)`. Each sample therefore has one clonality value. The adjusted Case-versus-Control model then compares those sample-level clonality values. Clonality is not calculated separately for each V gene or each individual clonotype; V/D/J/V-J composition tests are separate CLR/Aitchison analyses.
+
+The in-app/report guide also explains, in implementation-specific terms, raw-count normalization and NB2 expression modelling, transcript DTU, matched-depth rarefaction, clonotype sharing, Morisita-Horn/Jaccard distances, BCR-isotype composition, ssGSEA interpretation, pathway hypergeometric ORA, cross-modal robust-distance QC, candidate robustness diagnostics, and the meaning of p/q values, FDR, effects, PCA/PCoA, PERMANOVA, and dendrograms.
+
 ## 1. Cohort & metadata
 
 Start by choosing the project folder and loading the primary sample metadata table.

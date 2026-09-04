@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod analysis_docs;
 pub mod cohort;
 pub mod corrected;
 pub mod diagnostics;

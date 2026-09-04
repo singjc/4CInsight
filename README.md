@@ -4,6 +4,14 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains both a command-line interface and an `egui` desktop interface. The desktop application is intended to let a collaborator select the reports, validate the sample names, choose exactly which measurements to export, merge the matrix, and perform lightweight QC/exploration without using R.
 
+## What v0.15.2 adds
+
+- Replaces the short GUI analysis notes with a **shared, detailed lay-person analysis reference** covering cohort definition, mapping, cross-modal QC, corrected gene/transcript models, DTU, BCR/TCR repertoire analysis, BCR isotype composition, immune ssGSEA, pathway ORA, PBMC/confounding diagnostics, candidate prioritization, ordinations, PERMANOVA, and statistical terminology.
+- Explains the concrete values used by the Rust implementation rather than giving only generic definitions: expression count source/normalization/filtering, NB2 effect scale, repeated-subject handling, CLR pseudocount/filtering, rarefaction depth/repeats, repertoire-sharing definitions, outlier robust distance, pathway foreground/background, and robustness thresholds.
+- Clarifies repertoire terminology in particular: **clonality is calculated once per sample across the complete clonotype abundance distribution**, then those per-sample clonality values are compared between Case and Control. It is not a per-V-gene or per-clone-type comparison.
+- Adds a shared statistical glossary explaining effect/beta, adjusted log2 fold change, standard error, p value, BH q/FDR, dispersion, richness, Shannon diversity, clonality, CLR/Aitchison distance, Morisita-Horn, Jaccard, rarefaction, PCA/PCoA, and PERMANOVA.
+- Embeds the **same canonical documentation** in both unified HTML report styles. Each report also records the exact settings used by that completed run before the expandable method/interpretation guide, so collaborators can understand both the method and the concrete thresholds that produced their results.
+
 ## What v0.15.1 adds
 
 - Adds a dedicated **Metadata Builder** desktop tab for creating, curating, validating, and exporting a standardized one-row-per-sample multi-omics metadata TSV.

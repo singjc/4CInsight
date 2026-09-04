@@ -1,4 +1,5 @@
 use crate::analysis::UnifiedCohortAnalysisRun;
+use crate::analysis_docs::analysis_doc_sections;
 use crate::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, BcrSampleSummary, CohortComparison,
     CohortComparisonDefinition, CohortMapping, CohortModality, FeatureTestResult,
@@ -2196,6 +2197,8 @@ pub fn generate_unified_detailed_html_report(
     });
     report.add_section(candidate);
 
+    report.add_section(build_unified_analysis_documentation(run));
+
     let mut limitations = ReportSection::new("Warnings, assumptions, and limitations");
     limitations.add_content(html! {
         p { "4C Cohort Explorer supports discovery, robustness assessment, and candidate prioritization. Results are preliminary and must not be described as validated clinical biomarkers without independent replication/validation." }
@@ -2298,6 +2301,8 @@ pub fn generate_unified_simplified_html_report(
         report.add_section(structure);
     }
 
+    report.add_section(build_unified_analysis_documentation(run));
+
     let mut limitations = ReportSection::new("Confidence and limitations");
     limitations.add_content(html! {
         ul {
@@ -2324,6 +2329,106 @@ pub fn generate_unified_simplified_html_report(
     })?;
     make_report_self_contained(path)?;
     Ok(())
+}
+
+fn build_unified_analysis_documentation(run: &UnifiedCohortAnalysisRun) -> ReportSection {
+    let mut section = ReportSection::new("Analysis guide: what the methods and values mean");
+    let subject = run
+        .settings
+        .corrected
+        .subject_column
+        .as_deref()
+        .unwrap_or("none selected");
+    let covariates = if run.settings.corrected.covariates.is_empty() {
+        "none selected".to_string()
+    } else {
+        run.settings.corrected.covariates.join(", ")
+    };
+    let qc_description = run.qc_snapshot.as_ref().map(|qc| {
+        let cfg = &qc.audit.config;
+        let rule = if cfg.consensus_rule == OutlierConsensusRule::AtLeastN {
+            format!("{} (N={})", cfg.consensus_rule.display_name(), cfg.at_least_n)
+        } else {
+            cfg.consensus_rule.display_name().to_string()
+        };
+        format!(
+            "scope {}; robust-distance threshold {:.3}; consensus {}; minimum available modalities {}; reviewed exclusions {}; applied to primary analysis {}",
+            cfg.scope.display_name(),
+            cfg.robust_distance_threshold,
+            rule,
+            cfg.min_available_modalities,
+            qc.excluded_ids.len(),
+            if qc.applied_to_analysis { "yes" } else { "no" }
+        )
+    });
+    let diagnostics_description = run.settings.pbmc_diagnostics.as_ref().map(|cfg| {
+        format!(
+            "enabled; top variable PCA genes {}; robust outlier threshold {:.3}; low-count threshold {:.3}; minimum supported fraction {:.3}; top-two contribution warning threshold {:.3}; top candidates {}",
+            cfg.pca_features,
+            cfg.outlier_z_threshold,
+            cfg.low_count_threshold,
+            cfg.low_count_min_fraction,
+            cfg.top2_contribution_threshold,
+            cfg.top_candidates
+        )
+    });
+    section.add_content(html! {
+        p {
+            "This appendix is intentionally written for readers who are not expected to know the statistical terminology in advance. "
+            "The GUI Docs workspace and both unified HTML report styles use the same canonical explanations below. "
+            "The first block records the values used for this completed run; the expandable sections then explain what those values and outputs mean."
+        }
+        h3 { "Settings used in this completed run" }
+        ul {
+            li { strong { "Subject / repeated-measure column: " } (subject) }
+            li { strong { "Covariates: " } (covariates) }
+            li { strong { "Expression support filter: " } "normalized count >= " (fmt(run.settings.corrected.min_count)) " in at least " (format!("{:.1}%", 100.0 * run.settings.corrected.min_fraction_samples)) " of modeled samples (with the implementation also requiring at least 3 samples)." }
+            li { strong { "Repertoire composition filter: " } "mean fraction >= " (fmt(run.settings.corrected.composition_min_mean)) "; prevalence >= " (format!("{:.1}%", 100.0 * run.settings.corrected.composition_min_prevalence)) "; CLR pseudocount " (fmt_sci(run.settings.corrected.clr_pseudocount)) "." }
+            li { strong { "PERMANOVA permutations: " } (run.settings.corrected.permutations) }
+            li { strong { "Repertoire rarefaction: " } (run.settings.corrected.rarefaction_reps) " replicate(s), depth cap " (run.settings.corrected.rarefaction_cap) "." }
+            li { strong { "Ambiguous V/D/J call policy: " } (run.settings.corrected.ambiguous_policy.display_name()) }
+            li { strong { "Dedicated BCR-isotype Undetermined handling: " } (if run.settings.corrected.exclude_undetermined_isotype { "exclude and renormalize" } else { "retain in composition" }) }
+            li { strong { "Candidate display limits: " } (run.settings.candidate.top_genes) " genes, " (run.settings.candidate.top_transcripts) " transcripts, " (run.settings.candidate.top_pathways) " pathways, " (run.settings.candidate.top_other) " other signals; minimum candidate gene |log2FC| " (fmt(run.settings.candidate.min_gene_abs_log2fc)) "." }
+            @if run.settings.modalities.pathway {
+                li { strong { "Pathway foreground: " } "gene BH q <= " (fmt(run.settings.pathway_q_threshold)) " and |adjusted log2FC| >= " (fmt(run.settings.pathway_effect_threshold)) "." }
+            }
+            li { strong { "Exploratory TPM direction annotation: " } (if run.settings.exploratory_direction_check { "enabled" } else { "disabled" }) }
+            @if let Some(text) = qc_description.as_ref() {
+                li { strong { "Cross-modal QC snapshot: " } (text) }
+            } @else {
+                li { strong { "Cross-modal QC snapshot: " } "none attached to this completed run." }
+            }
+            @if let Some(text) = diagnostics_description.as_ref() {
+                li { strong { "PBMC/source/composition diagnostics: " } (text) }
+            } @else {
+                li { strong { "PBMC/source/composition diagnostics: " } "disabled for this run." }
+            }
+        }
+        p {
+            em { "Reading tip: " }
+            "A displayed Case mean and Control mean are descriptive summaries. The fitted group coefficient is the model-based Case-versus-Control effect after selected covariates, and it can therefore differ from the raw difference between those means."
+        }
+        @for doc in analysis_doc_sections() {
+            details {
+                summary { strong { (doc.title) } " — " (doc.summary) }
+                p { em { (doc.summary) } }
+                @for subsection in doc.subsections {
+                    h4 { (subsection.title) }
+                    @for paragraph in subsection.paragraphs {
+                        p { (paragraph) }
+                    }
+                    @if !subsection.bullets.is_empty() {
+                        ul {
+                            @for bullet in subsection.bullets {
+                                li { (bullet) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    section
 }
 
 fn build_unified_diagnostics_overview(result: &PbmcDiagnosticsResult) -> ReportSection {
