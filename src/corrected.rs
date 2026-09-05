@@ -24,6 +24,7 @@ use crate::metadata::row_matching_ids;
 use anyhow::{Context, Result, anyhow, bail};
 use calamine::{Data, Reader, Xlsx, open_workbook};
 use csv::ReaderBuilder;
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -3503,47 +3504,56 @@ mod tests {
     }
 }
 
+#[derive(Serialize)]
+struct AdjustedFeatureExportRow<'a> {
+    feature: &'a str,
+    secondary_id: &'a str,
+    n_samples: usize,
+    n_subjects: usize,
+    n_case: usize,
+    n_control: usize,
+    mean_case: f64,
+    mean_control: f64,
+    beta_group: f64,
+    robust_se: f64,
+    z_value: f64,
+    p_value: f64,
+    q_value: f64,
+    subject_effect: f64,
+    subject_p_value: f64,
+    subject_q_value: f64,
+    method: &'a str,
+}
+
 pub fn write_adjusted_tests(path: &Path, tests: &[AdjustedFeatureResult]) -> Result<()> {
-    let mut w = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
-    w.write_record([
-        "feature",
-        "secondary_id",
-        "n_samples",
-        "n_subjects",
-        "n_case",
-        "n_control",
-        "mean_case",
-        "mean_control",
-        "beta_group",
-        "robust_se",
-        "z_value",
-        "p_value",
-        "q_value",
-        "subject_effect",
-        "subject_p_value",
-        "subject_q_value",
-        "method",
-    ])?;
+    // This writer is used by the largest technical exports (especially
+    // transcript abundance and DTU).  Serializing borrowed rows avoids the
+    // previous 17 String allocations/clones per feature while preserving
+    // csv's escaping and numeric formatting semantics.
+    let mut w = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     for r in tests {
-        w.write_record(vec![
-            r.feature.clone(),
-            r.secondary_id.clone(),
-            r.n_samples.to_string(),
-            r.n_subjects.to_string(),
-            r.n_case.to_string(),
-            r.n_control.to_string(),
-            r.mean_case.to_string(),
-            r.mean_control.to_string(),
-            r.beta_group.to_string(),
-            r.robust_se.to_string(),
-            r.z_value.to_string(),
-            r.p_value.to_string(),
-            r.q_value.to_string(),
-            r.subject_effect.to_string(),
-            r.subject_p_value.to_string(),
-            r.subject_q_value.to_string(),
-            r.method.clone(),
-        ])?;
+        w.serialize(AdjustedFeatureExportRow {
+            feature: &r.feature,
+            secondary_id: &r.secondary_id,
+            n_samples: r.n_samples,
+            n_subjects: r.n_subjects,
+            n_case: r.n_case,
+            n_control: r.n_control,
+            mean_case: r.mean_case,
+            mean_control: r.mean_control,
+            beta_group: r.beta_group,
+            robust_se: r.robust_se,
+            z_value: r.z_value,
+            p_value: r.p_value,
+            q_value: r.q_value,
+            subject_effect: r.subject_effect,
+            subject_p_value: r.subject_p_value,
+            subject_q_value: r.subject_q_value,
+            method: &r.method,
+        })?;
     }
     w.flush()?;
     Ok(())
@@ -3577,23 +3587,28 @@ pub fn write_pathway_ora(path: &Path, result: &CorrectedPathwayResult) -> Result
     Ok(())
 }
 
+#[derive(Serialize)]
+struct DtuGeneExportRow<'a> {
+    gene_id: &'a str,
+    n_transcripts: usize,
+    p_value_simes: f64,
+    q_value_bh: f64,
+    max_abs_clr_effect: f64,
+}
+
 pub fn write_dtu_gene_tests(path: &Path, tests: &[DtuGeneResult]) -> Result<()> {
-    let mut w = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
-    w.write_record([
-        "gene_id",
-        "n_transcripts",
-        "p_value_simes",
-        "q_value_bh",
-        "max_abs_clr_effect",
-    ])?;
+    let mut w = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     for r in tests {
-        w.write_record([
-            r.gene_id.clone(),
-            r.n_transcripts.to_string(),
-            r.p_value.to_string(),
-            r.q_value.to_string(),
-            r.max_abs_clr_effect.to_string(),
-        ])?;
+        w.serialize(DtuGeneExportRow {
+            gene_id: &r.gene_id,
+            n_transcripts: r.n_transcripts,
+            p_value_simes: r.p_value,
+            q_value_bh: r.q_value,
+            max_abs_clr_effect: r.max_abs_clr_effect,
+        })?;
     }
     w.flush()?;
     Ok(())

@@ -570,7 +570,7 @@ use crate::outliers::{
     write_outlier_filter_modalities_tsv, write_outlier_filter_snapshot_csv,
     write_outlier_filter_summary,
 };
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use std::fs;
 use std::path::Path;
 
@@ -622,6 +622,11 @@ where
     progress(1, STAGES, "Technical tables: sample mapping audit");
 
     if let Some(result) = run.primary.gene.as_ref() {
+        progress(
+            1,
+            STAGES,
+            "Technical tables: writing corrected gene expression",
+        );
         write_adjusted_tests(&outdir.join("gene_adjusted_tests.tsv"), &result.tests)?;
         if let Some(ordination) = result.pca.as_ref() {
             write_ordination(&outdir.join("gene_pca.tsv"), ordination)?;
@@ -633,24 +638,63 @@ where
             fs::write(outdir.join("gene_warnings.txt"), result.warnings.join("\n"))?;
         }
     }
-    progress(2, STAGES, "Technical tables: corrected gene expression");
+    progress(
+        2,
+        STAGES,
+        "Technical tables: corrected gene expression complete",
+    );
     if let Some(result) = run.primary.transcript.as_ref() {
-        write_adjusted_tests(&outdir.join("transcript_adjusted_tests.tsv"), &result.tests)?;
+        let abundance_path = outdir.join("transcript_adjusted_tests.tsv");
+        if let Some(dtu) = result.dtu.as_ref() {
+            progress(
+                2,
+                STAGES,
+                &format!(
+                    "Technical tables: writing transcript abundance ({}) + DTU transcript ({}) rows in parallel",
+                    result.tests.len(),
+                    dtu.transcript_tests.len()
+                ),
+            );
+            let dtu_transcript_path = outdir.join("transcript_dtu_transcript_tests.tsv");
+            let dtu_gene_path = outdir.join("transcript_dtu_gene_tests.tsv");
+            let (abundance_result, dtu_transcript_result, dtu_gene_result) =
+                std::thread::scope(|scope| {
+                    let abundance =
+                        scope.spawn(|| write_adjusted_tests(&abundance_path, &result.tests));
+                    let dtu_transcript = scope.spawn(|| {
+                        write_adjusted_tests(&dtu_transcript_path, &dtu.transcript_tests)
+                    });
+                    let dtu_gene =
+                        scope.spawn(|| write_dtu_gene_tests(&dtu_gene_path, &dtu.gene_tests));
+                    (abundance.join(), dtu_transcript.join(), dtu_gene.join())
+                });
+            abundance_result
+                .map_err(|_| anyhow!("transcript abundance export worker panicked"))??;
+            dtu_transcript_result
+                .map_err(|_| anyhow!("transcript DTU transcript export worker panicked"))??;
+            dtu_gene_result
+                .map_err(|_| anyhow!("transcript DTU gene export worker panicked"))??;
+        } else {
+            progress(
+                2,
+                STAGES,
+                &format!(
+                    "Technical tables: writing corrected transcript abundance ({} rows)",
+                    result.tests.len()
+                ),
+            );
+            write_adjusted_tests(&abundance_path, &result.tests)?;
+        }
+        progress(
+            2,
+            STAGES,
+            "Technical tables: transcript abundance/DTU rows written",
+        );
         if let Some(ordination) = result.pca.as_ref() {
             write_ordination(&outdir.join("transcript_pca.tsv"), ordination)?;
         }
         if let Some(tree) = result.dendrogram.as_ref() {
             write_dendrogram(&outdir.join("transcript_dendrogram_leaf_order.tsv"), tree)?;
-        }
-        if let Some(dtu) = result.dtu.as_ref() {
-            write_adjusted_tests(
-                &outdir.join("transcript_dtu_transcript_tests.tsv"),
-                &dtu.transcript_tests,
-            )?;
-            write_dtu_gene_tests(
-                &outdir.join("transcript_dtu_gene_tests.tsv"),
-                &dtu.gene_tests,
-            )?;
         }
         if !result.warnings.is_empty() {
             fs::write(
@@ -662,7 +706,7 @@ where
     progress(
         3,
         STAGES,
-        "Technical tables: corrected transcript expression and DTU",
+        "Technical tables: corrected transcript expression and DTU complete",
     );
 
     for (stage, prefix, label, result) in [
