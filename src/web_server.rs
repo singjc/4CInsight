@@ -683,6 +683,13 @@ struct StoredJobRecord {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct JobWorkerProgress {
+    done: usize,
+    total: usize,
+    message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSummaryResponse {
     pub job_id: String,
@@ -1971,6 +1978,34 @@ impl LocalProjectStore {
         Ok(record)
     }
 
+    async fn update_job_progress(
+        &self,
+        project_id: Uuid,
+        job_id: Uuid,
+        progress: JobWorkerProgress,
+    ) -> Result<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let mut record = self.read_job_record(project_id, job_id).await?;
+        if record.status != JobStatus::Running || record.cancel_requested {
+            return Ok(());
+        }
+        let message = if progress.total > 0 {
+            let percent = ((progress.done.min(progress.total) as f64 / progress.total as f64)
+                * 100.0)
+                .round() as usize;
+            format!("{percent}% — {}", progress.message)
+        } else {
+            progress.message
+        };
+        if record.progress_message == message {
+            return Ok(());
+        }
+        record.progress_message = message;
+        record.updated_unix_seconds = unix_seconds()?;
+        write_json_atomic(&self.job_record_path(project_id, job_id), &record).await?;
+        Ok(())
+    }
+
     async fn cancel_job_authorized(
         &self,
         project_id: Uuid,
@@ -2106,8 +2141,25 @@ impl LocalProjectStore {
             )
             .await;
         let job_dir = self.job_dir(project_id, job_id);
-        let result =
-            tokio::task::spawn_blocking(move || execute_frozen_job(&job_dir, &snapshot)).await;
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<JobWorkerProgress>();
+        let mut worker = tokio::task::spawn_blocking(move || {
+            execute_frozen_job(&job_dir, &snapshot, |done, total, message| {
+                let _ = progress_tx.send(JobWorkerProgress {
+                    done,
+                    total,
+                    message: message.to_string(),
+                });
+            })
+        });
+        let result = loop {
+            tokio::select! {
+                result = &mut worker => break result,
+                Some(progress) = progress_rx.recv() => {
+                    let _ = self.update_job_progress(project_id, job_id, progress).await;
+                }
+            }
+        };
         let scientific = match result {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
@@ -2983,7 +3035,15 @@ fn selected_qc_modalities(scan: &ProjectScan) -> Vec<CohortModality> {
     selected
 }
 
-fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<JobResultSummary> {
+fn execute_frozen_job<F>(
+    job_dir: &FsPath,
+    snapshot: &StoredJobSnapshot,
+    mut progress: F,
+) -> Result<JobResultSummary>
+where
+    F: FnMut(usize, usize, &str),
+{
+    progress(0, 1000, "Validating frozen mapping and input snapshot");
     let snapshot_root = job_dir.join("snapshot");
     let mapping_request = MappingAuditRequest {
         comparison_column: Some(snapshot.request.comparison_column.clone()),
@@ -3006,9 +3066,15 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
         &serde_json::to_vec_pretty(&mapping)?,
         &mut artifact_budget,
     )?);
+    progress(
+        30,
+        1000,
+        "Frozen mapping validated; reconstructing native inputs",
+    );
 
     let (metadata, scan, original_comparison) =
         build_snapshot_native_context(&snapshot_root, &snapshot.objects, &snapshot.request)?;
+    progress(50, 1000, "Native frozen inputs reconstructed");
     let mut warnings = Vec::new();
     let mut qc_native = None;
     let qc = if snapshot.request.run_qc {
@@ -3027,7 +3093,11 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
                 &original_comparison,
                 &selected,
                 &OutlierConfig::default(),
-                |_done, _total, _message| {},
+                |done, total, message| {
+                    let denom = total.max(1);
+                    let scaled = 50 + done.min(denom) * 100 / denom;
+                    progress(scaled, 1000, &format!("Cross-modal QC — {message}"));
+                },
             ) {
                 Ok(result) => {
                     let summary = QcResultSummary {
@@ -3073,6 +3143,7 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
     } else {
         None
     };
+    progress(150, 1000, "Frozen QC stage complete");
 
     if snapshot.request.run_full_unified {
         let reviewed_exclusions = snapshot
@@ -3225,18 +3296,33 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
             pbmc_diagnostics,
         };
 
+        progress(160, 1000, "Starting native unified multi-omics analysis");
         let run = run_unified_cohort_analysis(
             &scan,
             &metadata,
             cohort,
             settings,
             qc_snapshot,
-            |_done, _total, _message| {},
+            |done, total, message| {
+                let denom = total.max(1);
+                let scaled = 160 + done.min(denom) * 650 / denom;
+                progress(scaled, 1000, message);
+            },
         )?;
+        progress(
+            815,
+            1000,
+            "Native unified analysis complete; preparing browser result summary",
+        );
         warnings.extend(run.warnings.clone());
         let unified = summarize_unified_run(&run);
         let gene = run.primary.gene.as_ref().map(summarize_corrected_gene);
 
+        progress(
+            835,
+            1000,
+            "Browser visualization payload prepared; persisting result summary",
+        );
         artifacts.push(persist_job_artifact_budgeted(
             job_dir,
             "unified_result_summary.json",
@@ -3250,7 +3336,13 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
             &mut artifacts,
             &mut warnings,
             &mut artifact_budget,
+            |done, total, message| {
+                let denom = total.max(1);
+                let scaled = 850 + done.min(denom) * 145 / denom;
+                progress(scaled, 1000, message);
+            },
         )?;
+        progress(1000, 1000, "Frozen unified job complete");
 
         return Ok(JobResultSummary {
             mapping,
@@ -3286,7 +3378,11 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
                 "Raw Count",
                 "Gene",
                 &spec,
-                |_done, _total, _message| {},
+                |done, total, message| {
+                    let denom = total.max(1);
+                    let scaled = 200 + done.min(denom) * 750 / denom;
+                    progress(scaled, 1000, message);
+                },
             ) {
                 Ok(result) => {
                     let summary = summarize_corrected_gene(&result);
@@ -3318,6 +3414,7 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
         None
     };
 
+    progress(1000, 1000, "Frozen representative job complete");
     Ok(JobResultSummary {
         mapping,
         qc,
@@ -3833,13 +3930,17 @@ fn unified_modality_summary(
     }
 }
 
-fn persist_unified_run_artifacts(
+fn persist_unified_run_artifacts<F>(
     job_dir: &FsPath,
     run: &UnifiedCohortAnalysisRun,
     artifacts: &mut Vec<JobArtifactSummary>,
     warnings: &mut Vec<String>,
     artifact_budget: &mut u64,
-) -> Result<()> {
+    mut progress: F,
+) -> Result<()>
+where
+    F: FnMut(usize, usize, &str),
+{
     let scratch = job_dir.join("snapshot").join("scratch");
     std::fs::create_dir_all(&scratch)?;
     let temp = tempfile::Builder::new()
@@ -3847,7 +3948,8 @@ fn persist_unified_run_artifacts(
         .tempdir_in(&scratch)
         .context("failed to create temporary unified export directory")?;
 
-    for (name, generator) in [
+    progress(0, 10, "Preparing unified report exports");
+    for (report_index, (name, generator)) in [
         (
             "simplified_report.html",
             generate_unified_simplified_html_report
@@ -3858,7 +3960,11 @@ fn persist_unified_run_artifacts(
             generate_unified_detailed_html_report
                 as fn(&FsPath, &UnifiedCohortAnalysisRun) -> Result<()>,
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        progress(1 + report_index * 3, 10, &format!("Generating {name}"));
         let path = temp.path().join(name);
         match generator(&path, run) {
             Ok(()) => match std::fs::read(&path) {
@@ -3884,6 +3990,7 @@ fn persist_unified_run_artifacts(
         }
     }
 
+    progress(7, 10, "Generating native technical result tables");
     match write_unified_analysis_tables(temp.path(), run) {
         Ok(table_root) => {
             let mut files = Vec::new();
@@ -3921,6 +4028,7 @@ fn persist_unified_run_artifacts(
             "Could not materialize the complete unified technical table set: {error:#}"
         )),
     }
+    progress(10, 10, "Unified reports and technical tables retained");
     Ok(())
 }
 

@@ -203,6 +203,37 @@ pub fn run_pbmc_diagnostics<F>(
     comparison: &CohortComparison,
     corrected_spec: &CorrectedModelSpec,
     config: &PbmcDiagnosticsConfig,
+    progress: F,
+) -> Result<PbmcDiagnosticsResult>
+where
+    F: FnMut(usize, usize, &str),
+{
+    run_pbmc_diagnostics_with_baseline(
+        merged_gene_tsv,
+        files,
+        metadata,
+        comparison,
+        corrected_spec,
+        config,
+        None,
+        progress,
+    )
+}
+
+/// Run PBMC/confounding diagnostics while optionally reusing the corrected
+/// gene result already produced by the primary unified analysis.
+///
+/// The web unified workflow calls this form so diagnostics do not refit an
+/// identical baseline model.  Native callers that do not already have a
+/// corrected result can continue using [`run_pbmc_diagnostics`].
+pub fn run_pbmc_diagnostics_with_baseline<F>(
+    merged_gene_tsv: &Path,
+    files: &[DetectedCohortFile],
+    metadata: &MetadataTable,
+    comparison: &CohortComparison,
+    corrected_spec: &CorrectedModelSpec,
+    config: &PbmcDiagnosticsConfig,
+    precomputed_baseline: Option<&CorrectedExpressionResult>,
     mut progress: F,
 ) -> Result<PbmcDiagnosticsResult>
 where
@@ -350,41 +381,76 @@ where
             sensitivity_excluded.contains(&normalize_sample_id(&row.sample_id));
     }
 
-    progress(3, 8, "Running baseline corrected gene analysis");
-    let baseline_gene = match run_corrected_expression(
-        merged_gene_tsv,
-        metadata,
-        comparison,
-        "Raw Count",
-        "Gene",
-        corrected_spec,
-        |_done, _total, _msg| {},
-    ) {
-        Ok(r) => Some(r),
-        Err(e) => {
-            warnings.push(format!("Baseline corrected gene analysis failed: {e:#}"));
-            None
+    let baseline_gene = if let Some(existing) = precomputed_baseline {
+        progress(
+            3,
+            8,
+            "Reusing primary corrected gene analysis for PBMC baseline",
+        );
+        warnings.push(
+            "PBMC/confounding diagnostics reused the already-completed primary corrected gene result as the baseline sensitivity model."
+                .to_string(),
+        );
+        Some(existing.clone())
+    } else {
+        progress(3, 8, "Running baseline corrected gene analysis");
+        match run_corrected_expression(
+            merged_gene_tsv,
+            metadata,
+            comparison,
+            "Raw Count",
+            "Gene",
+            corrected_spec,
+            |_done, _total, _msg| {},
+        ) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                warnings.push(format!("Baseline corrected gene analysis failed: {e:#}"));
+                None
+            }
         }
     };
 
-    progress(4, 8, "Running QC-restricted sensitivity analysis");
-    let filtered_metadata = filter_metadata(metadata, &sensitivity_excluded)?;
-    let qc_restricted_gene = match run_corrected_expression(
-        merged_gene_tsv,
-        &filtered_metadata,
-        comparison,
-        "Raw Count",
-        "Gene",
-        corrected_spec,
-        |_done, _total, _msg| {},
-    ) {
-        Ok(r) => Some(r),
-        Err(e) => {
-            warnings.push(format!(
-                "QC-restricted gene analysis could not be completed: {e:#}"
-            ));
-            None
+    let sensitivity_changes_comparison = sensitivity_excluded
+        .iter()
+        .any(|sample_id| comparison.is_case_id(sample_id) || comparison.is_control_id(sample_id));
+    let filtered_metadata = if sensitivity_changes_comparison {
+        filter_metadata(metadata, &sensitivity_excluded)?
+    } else {
+        metadata.clone()
+    };
+    let qc_restricted_gene = if sensitivity_changes_comparison {
+        progress(4, 8, "Running QC-restricted sensitivity analysis");
+        match run_corrected_expression(
+            merged_gene_tsv,
+            &filtered_metadata,
+            comparison,
+            "Raw Count",
+            "Gene",
+            corrected_spec,
+            |_done, _total, _msg| {},
+        ) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                warnings.push(format!(
+                    "QC-restricted gene analysis could not be completed: {e:#}"
+                ));
+                None
+            }
         }
+    } else {
+        progress(
+            4,
+            8,
+            "No PBMC sensitivity exclusions affect this comparison; reusing baseline",
+        );
+        if !sensitivity_excluded.is_empty() {
+            warnings.push(
+                "PBMC sensitivity exclusions did not intersect the active Case/Control comparison; the QC-restricted result reuses the baseline model without a redundant refit."
+                    .to_string(),
+            );
+        }
+        baseline_gene.clone()
     };
 
     progress(

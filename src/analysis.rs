@@ -177,7 +177,7 @@ use crate::corrected::{
     run_corrected_expression, run_corrected_immune, run_corrected_isotype,
     run_corrected_repertoire, run_pathway_ora,
 };
-use crate::diagnostics::run_pbmc_diagnostics;
+use crate::diagnostics::run_pbmc_diagnostics_with_baseline;
 use crate::focused::{annotate_focused_candidate_robustness, build_focused_candidate_summary};
 use anyhow::Result;
 
@@ -464,13 +464,14 @@ where
             "PBMC / confounding sensitivity diagnostics",
         );
         if let Some(path) = scan.merged_gene_tsv.as_deref() {
-            match run_pbmc_diagnostics(
+            match run_pbmc_diagnostics_with_baseline(
                 path,
                 &scan.files,
                 metadata,
                 &comparison,
                 &spec,
                 config,
+                primary.gene.as_ref(),
                 |done, total, msg| {
                     let denom = total.max(1);
                     let overall = stage * 1000 + (done * 1000 / denom);
