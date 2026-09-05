@@ -15,8 +15,8 @@ use crate::{
     },
     cohort::{
         CohortComparison, CohortComparisonDefinition, CohortModality, DetectedCohortFile,
-        MappingStatus, MetadataComparisonSpec, MetadataTable, ProjectScan, build_custom_comparison,
-        build_mapping, load_metadata,
+        MappingStatus, MetadataComparisonSpec, MetadataTable, ProjectScan,
+        build_custom_comparison, build_mapping, load_metadata,
     },
     corrected::{
         AdjustedFeatureResult, CorrectedExpressionResult, CorrectedModelSpec,
@@ -24,9 +24,7 @@ use crate::{
     },
     diagnostics::PbmcDiagnosticsConfig,
     input_conventions::{FilenameInputKind, classify_input_filename},
-    metadata::{
-        canonical_sample_id, unique_values as metadata_unique_values, validate_standard_metadata,
-    },
+    metadata::{canonical_sample_id, unique_values as metadata_unique_values, validate_standard_metadata},
     outliers::{
         OutlierConfig, build_outlier_filter_snapshot, filter_comparison_excluding,
         run_cross_modal_outlier_qc,
@@ -1829,8 +1827,9 @@ impl LocalProjectStore {
                 "freezing this job would exceed the project storage quota; delete old projects/jobs or raise CFS_MAX_PROJECT_BYTES"
             );
         }
-        let artifact_budget_bytes = max_project_bytes
-            .saturating_sub(project.storage_bytes.saturating_add(logical_snapshot_bytes));
+        let artifact_budget_bytes = max_project_bytes.saturating_sub(
+            project.storage_bytes.saturating_add(logical_snapshot_bytes),
+        );
         if assigned
             .iter()
             .filter(|object| object.role == UploadedInputRole::PrimaryMetadata)
@@ -2272,11 +2271,7 @@ impl LocalProjectStore {
                 records.push(record);
             }
         }
-        records.sort_by(|a, b| {
-            a.name
-                .cmp(&b.name)
-                .then_with(|| a.artifact_id.cmp(&b.artifact_id))
-        });
+        records.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.artifact_id.cmp(&b.artifact_id)));
         Ok(records)
     }
 
@@ -2654,7 +2649,9 @@ fn build_server_metadata_profile(
 
     let suggested_comparison_column = columns
         .iter()
-        .find(|column| column.name == "analysis_group" && column.distinct_nonempty_values >= 2)
+        .find(|column| {
+            column.name == "analysis_group" && column.distinct_nonempty_values >= 2
+        })
         .map(|column| column.name.clone())
         .or_else(|| {
             columns
@@ -3067,11 +3064,7 @@ where
         &serde_json::to_vec_pretty(&mapping)?,
         &mut artifact_budget,
     )?);
-    progress(
-        30,
-        1000,
-        "Frozen mapping validated; reconstructing native inputs",
-    );
+    progress(30, 1000, "Frozen mapping validated; reconstructing native inputs");
 
     let (metadata, scan, original_comparison) =
         build_snapshot_native_context(&snapshot_root, &snapshot.objects, &snapshot.request)?;
@@ -3209,10 +3202,7 @@ where
         let modalities = CohortModalitySelection {
             gene: scan.merged_gene_tsv.is_some(),
             transcript: scan.merged_transcript_tsv.is_some(),
-            bcr: scan
-                .files
-                .iter()
-                .any(|file| file.modality == CohortModality::Bcr),
+            bcr: scan.files.iter().any(|file| file.modality == CohortModality::Bcr),
             bcr_isotype: scan
                 .files
                 .iter()
@@ -3235,8 +3225,8 @@ where
             bail!("no frozen modality is available for the unified native analysis");
         }
 
-        let comparison_definition =
-            CohortComparisonDefinition::MetadataValues(MetadataComparisonSpec {
+        let comparison_definition = CohortComparisonDefinition::MetadataValues(
+            MetadataComparisonSpec {
                 column: snapshot.request.comparison_column.trim().to_string(),
                 case_values: snapshot
                     .request
@@ -3258,7 +3248,8 @@ where
                 ),
                 case_label: "Case".to_string(),
                 control_label: "Control".to_string(),
-            });
+            },
+        );
         let cohort = CohortDefinitionSnapshot {
             project_root: scan.root.clone(),
             metadata_path: metadata.path.clone(),
@@ -3272,20 +3263,19 @@ where
             mapping: build_mapping(&scan, &metadata),
         };
 
-        let pbmc_diagnostics =
-            if snapshot.request.run_pbmc_diagnostics && scan.merged_gene_tsv.is_some() {
-                let mut config = PbmcDiagnosticsConfig::default();
-                config.subject_column = corrected.subject_column.clone();
-                config.batch_column =
-                    normalized_optional_string(snapshot.request.pbmc_batch_column.as_deref());
-                config.family_column =
-                    normalized_optional_string(snapshot.request.pbmc_family_column.as_deref());
-                config.sensitivity_column =
-                    normalized_optional_string(snapshot.request.pbmc_sensitivity_column.as_deref());
-                Some(config)
-            } else {
-                None
-            };
+        let pbmc_diagnostics = if snapshot.request.run_pbmc_diagnostics
+            && scan.merged_gene_tsv.is_some()
+        {
+            let mut config = PbmcDiagnosticsConfig::default();
+            config.subject_column = corrected.subject_column.clone();
+            config.batch_column = normalized_optional_string(snapshot.request.pbmc_batch_column.as_deref());
+            config.family_column = normalized_optional_string(snapshot.request.pbmc_family_column.as_deref());
+            config.sensitivity_column =
+                normalized_optional_string(snapshot.request.pbmc_sensitivity_column.as_deref());
+            Some(config)
+        } else {
+            None
+        };
         let settings = CohortAnalysisSettingsSnapshot {
             modalities,
             corrected,
@@ -3310,20 +3300,12 @@ where
                 progress(scaled, 1000, message);
             },
         )?;
-        progress(
-            815,
-            1000,
-            "Native unified analysis complete; preparing browser result summary",
-        );
+        progress(815, 1000, "Native unified analysis complete; preparing browser result summary");
         warnings.extend(run.warnings.clone());
         let unified = summarize_unified_run(&run);
         let gene = run.primary.gene.as_ref().map(summarize_corrected_gene);
 
-        progress(
-            835,
-            1000,
-            "Browser visualization payload prepared; persisting result summary",
-        );
+        progress(835, 1000, "Browser visualization payload prepared; persisting result summary");
         artifacts.push(persist_job_artifact_budgeted(
             job_dir,
             "unified_result_summary.json",
@@ -3479,10 +3461,7 @@ fn summarize_unified_run(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSumma
     if run.settings.modalities.transcript {
         modalities.push(unified_modality_summary(
             "Transcript expression",
-            run.primary
-                .transcript
-                .as_ref()
-                .map(|result| result.tests.len()),
+            run.primary.transcript.as_ref().map(|result| result.tests.len()),
             run.primary.transcript_error.as_deref(),
         ));
     }
@@ -3503,10 +3482,7 @@ fn summarize_unified_run(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSumma
     if run.settings.modalities.bcr_isotype {
         modalities.push(unified_modality_summary(
             "BCR isotype",
-            run.primary
-                .bcr_isotype
-                .as_ref()
-                .map(|result| result.tests.len()),
+            run.primary.bcr_isotype.as_ref().map(|result| result.tests.len()),
             run.primary.bcr_isotype_error.as_deref(),
         ));
     }
@@ -3548,10 +3524,7 @@ fn summarize_unified_run(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSumma
     if run.settings.modalities.pathway {
         modalities.push(unified_modality_summary(
             "Pathway ORA",
-            run.primary
-                .pathway
-                .as_ref()
-                .map(|result| result.tests.len()),
+            run.primary.pathway.as_ref().map(|result| result.tests.len()),
             run.primary.pathway_error.as_deref(),
         ));
     }
@@ -3726,7 +3699,10 @@ fn expression_visualization(
                 && row.q_value >= 0.0
         })
         .collect::<Vec<_>>();
-    let significant_q05 = valid.iter().filter(|(_, row)| row.q_value <= 0.05).count();
+    let significant_q05 = valid
+        .iter()
+        .filter(|(_, row)| row.q_value <= 0.05)
+        .count();
 
     let mut ranked = valid.clone();
     ranked.sort_by(|(_, a), (_, b)| {
@@ -3953,13 +3929,11 @@ where
     for (report_index, (name, generator)) in [
         (
             "simplified_report.html",
-            generate_unified_simplified_html_report
-                as fn(&FsPath, &UnifiedCohortAnalysisRun) -> Result<()>,
+            generate_unified_simplified_html_report as fn(&FsPath, &UnifiedCohortAnalysisRun) -> Result<()>,
         ),
         (
             "full_report.html",
-            generate_unified_detailed_html_report
-                as fn(&FsPath, &UnifiedCohortAnalysisRun) -> Result<()>,
+            generate_unified_detailed_html_report as fn(&FsPath, &UnifiedCohortAnalysisRun) -> Result<()>,
         ),
     ]
     .into_iter()
@@ -3993,32 +3967,27 @@ where
     }
 
     progress(700, 1000, "Generating native technical result tables");
-    match write_unified_analysis_tables_with_progress(temp.path(), run, |done, total, message| {
-        let denom = total.max(1);
-        let scaled = 700 + done.min(denom) * 180 / denom;
-        progress(scaled, 1000, message);
-    }) {
+    match write_unified_analysis_tables_with_progress(
+        temp.path(),
+        run,
+        |done, total, message| {
+            let denom = total.max(1);
+            let scaled = 700 + done.min(denom) * 180 / denom;
+            progress(scaled, 1000, message);
+        },
+    ) {
         Ok(table_root) => {
             let mut files = Vec::new();
             collect_regular_files(&table_root, &mut files)?;
             files.sort();
-            let total_files = files.len().max(1);
-            progress(
-                880,
-                1000,
-                &format!(
-                    "Retaining {} native technical table artifact(s)",
-                    files.len()
-                ),
-            );
-            for (index, path) in files.into_iter().enumerate() {
+            let mut pending = Vec::new();
+            for path in files {
                 let relative = path.strip_prefix(&table_root).unwrap_or(&path);
                 let artifact_name = format!(
                     "tables__{}",
                     relative
                         .to_string_lossy()
-                        .replace('/', "__")
-                        .replace('\\', "__")
+                        .replace('/', "__").replace('\\', "__")
                 );
                 let metadata = std::fs::metadata(&path)?;
                 if metadata.len() > MAX_JOB_ARTIFACT_BYTES || metadata.len() > *artifact_budget {
@@ -4028,25 +3997,45 @@ where
                     ));
                     continue;
                 }
-                let media_type = artifact_media_type(&path);
-                artifacts.push(persist_job_artifact_file_budgeted(
-                    job_dir,
-                    &artifact_name,
-                    media_type,
-                    &path,
-                    artifact_budget,
-                )?);
-                let scaled = 880 + (index + 1) * 115 / total_files;
-                progress(
-                    scaled,
-                    1000,
-                    &format!(
-                        "Retaining native technical tables ({}/{})",
-                        index + 1,
-                        total_files
-                    ),
-                );
+                *artifact_budget = artifact_budget.saturating_sub(metadata.len());
+                pending.push(PendingArtifactFile {
+                    source_path: path.clone(),
+                    name: artifact_name,
+                    media_type: artifact_media_type(&path).to_string(),
+                    byte_size: metadata.len(),
+                });
             }
+
+            let retained_count = pending.len();
+            let retained_bytes = pending
+                .iter()
+                .map(|item| item.byte_size)
+                .sum::<u64>();
+            progress(
+                880,
+                1000,
+                &format!(
+                    "Retaining {retained_count} native technical table artifact(s) ({})",
+                    format_binary_bytes(retained_bytes)
+                ),
+            );
+            let retained = persist_job_artifact_files_parallel(
+                job_dir,
+                pending,
+                |done, total, name, byte_size| {
+                    let denom = total.max(1);
+                    let scaled = 880 + done.min(denom) * 115 / denom;
+                    progress(
+                        scaled,
+                        1000,
+                        &format!(
+                            "Retaining native technical tables ({done}/{total}) · {name} ({})",
+                            format_binary_bytes(byte_size)
+                        ),
+                    );
+                },
+            )?;
+            artifacts.extend(retained);
         }
         Err(error) => warnings.push(format!(
             "Could not materialize the complete unified technical table set: {error:#}"
@@ -4155,6 +4144,212 @@ fn persist_job_artifact_budgeted(
     Ok(artifact)
 }
 
+
+#[derive(Debug)]
+struct PendingArtifactFile {
+    source_path: PathBuf,
+    name: String,
+    media_type: String,
+    byte_size: u64,
+}
+
+#[derive(Debug)]
+struct MovedArtifactFile {
+    artifact_id: Uuid,
+    data_path: PathBuf,
+    record_path: PathBuf,
+    name: String,
+    media_type: String,
+    byte_size: u64,
+}
+
+#[derive(Debug)]
+enum ArtifactFinalizeEvent {
+    Started(usize),
+    Finished(usize, Result<JobArtifactSummary>),
+}
+
+/// Move a batch of already-materialized technical tables into opaque artifact
+/// storage and finalize their SHA-256 metadata with bounded parallelism.
+///
+/// The expensive part of local Phase-3E table retention is reading the table
+/// bytes back once for their integrity hashes.  Doing that strictly serially
+/// makes the entire job wait behind every large table in sequence.  The files
+/// already live on the same private filesystem, so their move into artifact
+/// storage is metadata-only in the normal case.  We then use a small bounded
+/// worker pool for checksum/finalization.  This preserves independent opaque
+/// artifact IDs and per-artifact SHA-256 values without creating a second copy
+/// of each table.
+fn persist_job_artifact_files_parallel<F>(
+    job_dir: &FsPath,
+    pending: Vec<PendingArtifactFile>,
+    mut progress: F,
+) -> Result<Vec<JobArtifactSummary>>
+where
+    F: FnMut(usize, usize, &str, u64),
+{
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let artifacts_dir = job_dir.join("artifacts");
+    std::fs::create_dir_all(&artifacts_dir)?;
+
+    let mut moved = Vec::with_capacity(pending.len());
+    for item in pending {
+        let artifact_id = Uuid::new_v4();
+        let data_path = artifacts_dir.join(format!("{artifact_id}.bin"));
+        let record_path = artifacts_dir.join(format!("{artifact_id}.json"));
+        if let Err(rename_error) = std::fs::rename(&item.source_path, &data_path) {
+            std::fs::copy(&item.source_path, &data_path).with_context(|| {
+                format!(
+                    "failed to retain generated artifact '{}' after atomic move failed: {rename_error}",
+                    item.name
+                )
+            })?;
+            std::fs::remove_file(&item.source_path).with_context(|| {
+                format!(
+                    "failed to remove scratch artifact '{}' after fallback copy",
+                    item.name
+                )
+            })?;
+        }
+        set_private_file_permissions_sync(&data_path)?;
+        moved.push(MovedArtifactFile {
+            artifact_id,
+            data_path,
+            record_path,
+            name: item.name,
+            media_type: item.media_type,
+            byte_size: item.byte_size,
+        });
+    }
+
+    let total = moved.len();
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    let workers = total.min(available.min(4)).max(1);
+    let mut work_order = (0..total).collect::<Vec<_>>();
+    work_order.sort_by_key(|&index| std::cmp::Reverse(moved[index].byte_size));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (tx, rx) = std::sync::mpsc::channel::<ArtifactFinalizeEvent>();
+    let mut completed = 0usize;
+    let mut summaries = vec![None; total];
+    let mut active = std::collections::BTreeSet::new();
+
+    std::thread::scope(|scope| -> Result<()> {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let moved = &moved;
+            let work_order = &work_order;
+            let next = &next;
+            scope.spawn(move || loop {
+                use std::sync::atomic::Ordering;
+                let work_position = next.fetch_add(1, Ordering::Relaxed);
+                if work_position >= work_order.len() {
+                    break;
+                }
+                let index = work_order[work_position];
+                if tx.send(ArtifactFinalizeEvent::Started(index)).is_err() {
+                    break;
+                }
+                let result = finalize_moved_artifact(&moved[index]);
+                if tx
+                    .send(ArtifactFinalizeEvent::Finished(index, result))
+                    .is_err()
+                {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+
+        while completed < total {
+            match rx
+                .recv()
+                .context("technical-artifact checksum worker stopped unexpectedly")?
+            {
+                ArtifactFinalizeEvent::Started(index) => {
+                    active.insert(index);
+                    let active_bytes = active
+                        .iter()
+                        .map(|&active_index| moved[active_index].byte_size)
+                        .sum::<u64>();
+                    progress(
+                        completed,
+                        total,
+                        &format!(
+                            "checksumming {} file(s), including {}",
+                            active.len(),
+                            moved[index].name
+                        ),
+                        active_bytes,
+                    );
+                }
+                ArtifactFinalizeEvent::Finished(index, result) => {
+                    active.remove(&index);
+                    let summary = result?;
+                    completed += 1;
+                    progress(
+                        completed,
+                        total,
+                        &format!("finalized {}", moved[index].name),
+                        moved[index].byte_size,
+                    );
+                    summaries[index] = Some(summary);
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    summaries
+        .into_iter()
+        .enumerate()
+        .map(|(index, summary)| {
+            summary.ok_or_else(|| anyhow::anyhow!("technical artifact {index} was not finalized"))
+        })
+        .collect()
+}
+
+fn finalize_moved_artifact(item: &MovedArtifactFile) -> Result<JobArtifactSummary> {
+    let sha256 = sha256_file_sync(&item.data_path)?;
+    let record = StoredJobArtifactRecord {
+        schema_version: 1,
+        artifact_id: item.artifact_id,
+        name: item.name.clone(),
+        media_type: item.media_type.clone(),
+        byte_size: item.byte_size,
+        sha256: sha256.clone(),
+    };
+    std::fs::write(&item.record_path, serde_json::to_vec(&record)?)?;
+    set_private_file_permissions_sync(&item.record_path)?;
+    Ok(JobArtifactSummary {
+        artifact_id: item.artifact_id.to_string(),
+        name: record.name,
+        media_type: record.media_type,
+        byte_size: record.byte_size,
+        sha256,
+    })
+}
+
+fn format_binary_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let value = bytes as f64;
+    if value >= GIB {
+        format!("{:.2} GiB", value / GIB)
+    } else if value >= MIB {
+        format!("{:.2} MiB", value / MIB)
+    } else if value >= KIB {
+        format!("{:.2} KiB", value / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Retain an already-materialized local artifact without reading the complete
 /// file into memory and writing it a second time.  Phase 3E report/table
 /// exporters materialize files under the job's private scratch directory, so
@@ -4230,7 +4425,7 @@ fn sha256_file_sync(path: &FsPath) -> Result<String> {
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("failed to open artifact {} for hashing", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 8 * 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
@@ -4855,12 +5050,7 @@ async fn download_all_job_artifacts(
     let uncompressed_bytes = records
         .iter()
         .try_fold(0u64, |total, record| total.checked_add(record.byte_size))
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "artifact byte count overflow",
-            )
-        })?;
+        .ok_or_else(|| ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "artifact byte count overflow"))?;
     if uncompressed_bytes > MAX_BULK_DOWNLOAD_UNCOMPRESSED_BYTES {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -4931,7 +5121,9 @@ async fn download_job_artifact(
     }
 }
 
-fn build_job_artifact_zip(entries: Vec<(StoredJobArtifactRecord, PathBuf)>) -> Result<Vec<u8>> {
+fn build_job_artifact_zip(
+    entries: Vec<(StoredJobArtifactRecord, PathBuf)>,
+) -> Result<Vec<u8>> {
     let manifest = entries
         .iter()
         .map(|(record, _)| record.clone())
@@ -4952,7 +5144,8 @@ fn build_job_artifact_zip(entries: Vec<(StoredJobArtifactRecord, PathBuf)>) -> R
             let data = std::fs::read(&path).with_context(|| {
                 format!(
                     "failed to read retained artifact '{}' ({})",
-                    record.name, record.artifact_id
+                    record.name,
+                    record.artifact_id
                 )
             })?;
             if data.len() as u64 != record.byte_size {
@@ -5244,6 +5437,66 @@ mod tests {
 
         assert!(infer_auto_assignment_from_filename("cohort_sample_metadata.xlsx").is_none());
         assert!(infer_auto_assignment_from_filename("h.all.v2026.1.Hs.symbols.gmt").is_none());
+    }
+
+    #[test]
+    fn parallel_file_artifact_retention_preserves_hashes_and_names() {
+        let temp = TempDir::new().unwrap();
+        let job_dir = temp.path().join("job");
+        let scratch = job_dir.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        let mut pending = Vec::new();
+        let mut expected = Vec::new();
+        for (index, size) in [17usize, 8_193, 131_111, 1_048_777, 65_537]
+            .into_iter()
+            .enumerate()
+        {
+            let name = format!("tables__test_{index}.tsv");
+            let path = scratch.join(format!("source_{index}.tsv"));
+            let bytes = (0..size)
+                .map(|offset| ((offset + index * 31) % 251) as u8)
+                .collect::<Vec<_>>();
+            std::fs::write(&path, &bytes).unwrap();
+            expected.push((name.clone(), bytes));
+            pending.push(PendingArtifactFile {
+                source_path: path,
+                name,
+                media_type: "text/tab-separated-values; charset=utf-8".to_string(),
+                byte_size: size as u64,
+            });
+        }
+
+        let mut progress_events = 0usize;
+        let retained = persist_job_artifact_files_parallel(
+            &job_dir,
+            pending,
+            |_, _, _, _| progress_events += 1,
+        )
+        .unwrap();
+        assert_eq!(retained.len(), expected.len());
+        assert!(progress_events >= expected.len());
+
+        for (summary, (expected_name, bytes)) in retained.iter().zip(expected.iter()) {
+            assert_eq!(&summary.name, expected_name);
+            assert_eq!(summary.byte_size, bytes.len() as u64);
+            assert_eq!(summary.sha256, hex::encode(Sha256::digest(bytes)));
+            let artifact_id = Uuid::parse_str(&summary.artifact_id).unwrap();
+            let data_path = job_dir
+                .join("artifacts")
+                .join(format!("{artifact_id}.bin"));
+            let record_path = job_dir
+                .join("artifacts")
+                .join(format!("{artifact_id}.json"));
+            assert_eq!(
+                std::fs::read(data_path).unwrap().as_slice(),
+                bytes.as_slice()
+            );
+            let record: StoredJobArtifactRecord =
+                serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+            assert_eq!(record.name.as_str(), expected_name.as_str());
+            assert_eq!(record.sha256, summary.sha256);
+        }
     }
 
     #[test]
