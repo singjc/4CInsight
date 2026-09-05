@@ -579,6 +579,23 @@ pub fn write_unified_analysis_tables(
     parent: &Path,
     run: &UnifiedCohortAnalysisRun,
 ) -> Result<PathBuf> {
+    write_unified_analysis_tables_with_progress(parent, run, |_, _, _| {})
+}
+
+/// Export the complete technical table set from a frozen unified run while
+/// reporting coarse-grained materialization progress.  The progress callback
+/// is intentionally presentation-only: it does not alter which tables are
+/// generated or any scientific result.
+pub fn write_unified_analysis_tables_with_progress<F>(
+    parent: &Path,
+    run: &UnifiedCohortAnalysisRun,
+    mut progress: F,
+) -> Result<PathBuf>
+where
+    F: FnMut(usize, usize, &str),
+{
+    const STAGES: usize = 12;
+    progress(0, STAGES, "Preparing technical table export");
     let safe_name: String = run
         .primary
         .comparison
@@ -602,6 +619,7 @@ pub fn write_unified_analysis_tables(
         &outdir.join("sample_mapping_audit.csv"),
         &run.cohort.mapping,
     )?;
+    progress(1, STAGES, "Technical tables: sample mapping audit");
 
     if let Some(result) = run.primary.gene.as_ref() {
         write_adjusted_tests(&outdir.join("gene_adjusted_tests.tsv"), &result.tests)?;
@@ -615,6 +633,7 @@ pub fn write_unified_analysis_tables(
             fs::write(outdir.join("gene_warnings.txt"), result.warnings.join("\n"))?;
         }
     }
+    progress(2, STAGES, "Technical tables: corrected gene expression");
     if let Some(result) = run.primary.transcript.as_ref() {
         write_adjusted_tests(&outdir.join("transcript_adjusted_tests.tsv"), &result.tests)?;
         if let Some(ordination) = result.pca.as_ref() {
@@ -640,11 +659,22 @@ pub fn write_unified_analysis_tables(
             )?;
         }
     }
+    progress(3, STAGES, "Technical tables: corrected transcript expression and DTU");
 
-    for (prefix, result) in [
-        ("bcr", run.primary.bcr.as_ref()),
-        ("tcr_alpha", run.primary.tcr_alpha.as_ref()),
-        ("tcr_beta", run.primary.tcr_beta.as_ref()),
+    for (stage, prefix, label, result) in [
+        (4, "bcr", "BCR repertoire", run.primary.bcr.as_ref()),
+        (
+            5,
+            "tcr_alpha",
+            "TCR alpha repertoire",
+            run.primary.tcr_alpha.as_ref(),
+        ),
+        (
+            6,
+            "tcr_beta",
+            "TCR beta repertoire",
+            run.primary.tcr_beta.as_ref(),
+        ),
     ] {
         if let Some(result) = result {
             write_corrected_repertoire_samples(
@@ -711,6 +741,7 @@ pub fn write_unified_analysis_tables(
                 )?;
             }
         }
+        progress(stage, STAGES, &format!("Technical tables: {label}"));
     }
 
     if let Some(result) = run.primary.bcr_isotype.as_ref() {
@@ -731,6 +762,7 @@ pub fn write_unified_analysis_tables(
             )?;
         }
     }
+    progress(7, STAGES, "Technical tables: BCR isotype composition");
     if let Some(result) = run.primary.immune.as_ref() {
         write_adjusted_tests(&outdir.join("immune_adjusted_tests.tsv"), &result.tests)?;
         if let Some(ordination) = result.pca.as_ref() {
@@ -749,6 +781,7 @@ pub fn write_unified_analysis_tables(
     if let Some(result) = run.primary.pathway.as_ref() {
         write_pathway_ora(&outdir.join("pathway_ora.tsv"), result)?;
     }
+    progress(8, STAGES, "Technical tables: immune and pathway results");
     if let Some(result) = run.exploratory_support.gene.as_ref() {
         write_feature_tests(
             &outdir.join("supporting_gene_tpm_direction_tests.tsv"),
@@ -766,13 +799,16 @@ pub fn write_unified_analysis_tables(
         write_outlier_filter_modalities_tsv(&outdir.join("sample_outlier_qc_modalities.tsv"), qc)?;
         write_outlier_filter_summary(&outdir.join("sample_outlier_qc_summary.txt"), qc)?;
     }
+    progress(9, STAGES, "Technical tables: supporting expression and QC provenance");
 
     let candidate_dir = outdir.join("key_findings");
     write_key_findings_tables(&candidate_dir, &run.candidates)?;
+    progress(10, STAGES, "Technical tables: candidate prioritization");
 
     if let Some(diagnostics) = run.diagnostics.as_ref() {
         write_pbmc_diagnostics_tables(&outdir.join("pbmc_confounding_diagnostics"), diagnostics)?;
     }
+    progress(11, STAGES, "Technical tables: PBMC/confounding diagnostics");
 
     let comparison_definition = match &run.cohort.comparison_definition {
         CohortComparisonDefinition::Preset(preset) => {
@@ -838,5 +874,6 @@ pub fn write_unified_analysis_tables(
         }
     }
     fs::write(outdir.join("analysis_summary.txt"), summary)?;
+    progress(STAGES, STAGES, "Technical table materialization complete");
     Ok(outdir)
 }
