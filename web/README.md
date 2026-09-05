@@ -2,7 +2,7 @@
 
 This directory contains the WASM/`eframe` browser client for 4C Cohort Explorer.
 
-## Current status: Phase 3D.2 native-like high-throughput ingest (v0.16.8)
+## Current status: Phase 3E.2 metadata-driven comparison configuration (v0.16.10)
 
 The browser is served by the native Rust `cfs-server` and now supports:
 
@@ -17,14 +17,19 @@ The browser is served by the native Rust `cfs-server` and now supports:
 - explicit manual role/sample-ID correction for custom/ambiguous inputs;
 - defensive workbook/text validation;
 - the existing native metadata loader and sample mapping audit;
+- authenticated primary-metadata profiling with metadata-backed grouping-field selection;
+- multi-select Case/Control value controls with row counts and stale-mapping invalidation;
 - mapping-snapshot fingerprints that detect stale inputs;
 - persistent frozen asynchronous analysis jobs;
 - the existing native cross-modal outlier/QC path from the frozen job snapshot;
-- one representative native corrected gene-expression lane when a `merged_gene_expression` TSV is assigned;
-- persisted private mapping/QC/gene artifacts and an authenticated artifact endpoint;
+- full frozen native unified cohort analysis across every available corrected modality;
+- reviewed QC exclusions with frozen provenance (automatic flags are never silently removed);
+- native pathway/PBMC/confounding/robustness/candidate-prioritization layers where their inputs are available;
+- simplified and full HTML reports generated from the same completed native unified result;
+- authenticated browser artifact/report downloads and terminal persisted-job deletion;
 - shared 4C visual theme and canonical Docs/search/toy plots.
 
-The complete native transcript/BCR/TCR/isotype/immune/pathway corrected-analysis stack and unified HTML report/export workflow are **not** connected to remote jobs yet.
+The browser now executes that unified scientific stack on the native Rust server. S3/MinIO and production public-host deployment hardening remain later phases; local filesystem + localhost stay the development defaults.
 
 ## Run locally
 
@@ -92,11 +97,11 @@ The object table shows unresolved files by default; use **Show all uploaded obje
 
 Every file still gets an independent opaque object ID, integrity hash, deletion operation, and quota check. Folder-relative paths and original filenames are not storage keys or authorization credentials.
 
-## Frozen Phase-3D jobs
+## Frozen Phase-3E unified jobs
 
-After uploaded objects have explicit roles and the current mapping audit succeeds, the mapping result contains a fingerprint. Job submission must present that exact fingerprint. Uploading, deleting, or reassigning an input makes the old mapping stale and requires a new mapping audit before another job can be submitted.
+After uploaded objects have explicit roles and the current mapping audit succeeds, a new job freezes the exact assigned input bytes and logical manifest. The server reconstructs the native cohort state from that immutable snapshot and calls the existing unified Rust analysis workflow. Browser code does not reproduce corrected statistics.
 
-A submitted job freezes the current assigned input bytes and logical manifest before scientific execution. Persisted states are:
+Persisted states remain:
 
 ```text
 queued
@@ -105,15 +110,13 @@ running
 complete / failed / cancelled
 ```
 
-The browser polls the local server while a job is active and can list/open persisted jobs after page refresh or project recovery.
+Before submission, an opened QC result can be reviewed sample-by-sample. Automatic flags are prompts only. Checked exclusions are sent as explicit overrides, rerun against the new frozen QC audit, and recorded in the native QC provenance used by reports.
 
-Phase 3D scientific scope is deliberately narrow:
+Every corrected modality actually present in the frozen project is enabled automatically. Pathway ORA additionally requires a deliberately assigned `pathway_gmt` object. Optional subject/covariate and PBMC diagnostic columns are frozen in the request. Fault-tolerant modality errors are reported in the unified result rather than replacing the native behavior.
 
-- native mapping audit from the frozen snapshot;
-- native cross-modal/sample outlier QC where usable modalities are present;
-- optional representative corrected **gene expression** using the assigned merged gene-expression TSV, `Raw Count`, `Gene`, and `CorrectedModelSpec::default()` plus optional subject/covariates.
+On completion, the job persists a unified summary, native technical tables, and both simplified and detailed HTML reports generated from the same `UnifiedCohortAnalysisRun`. **Open results** loads a persisted result below the history table. **Download** performs an authenticated fetch and saves through a temporary browser Blob URL; the recovery token is never embedded in the download URL. Terminal jobs can be deleted independently of their project/source uploads.
 
-This is a parity bridge, not a second scientific implementation.
+Older Phase-3D job records are still readable and display their representative gene result when no unified payload exists.
 
 ## Build checks
 

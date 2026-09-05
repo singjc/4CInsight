@@ -1,4 +1,4 @@
-//! Same-origin Phase-3D.2 client for the local `cfs-server` API.
+//! Same-origin Phase-3E.2 client for the local `cfs-server` API.
 
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -17,6 +17,14 @@ pub struct HealthResponse {
     pub analysis_enabled: bool,
     pub persistent_jobs: bool,
     pub representative_gene_enabled: bool,
+    #[serde(default)]
+    pub unified_analysis_enabled: bool,
+    #[serde(default)]
+    pub metadata_profile_enabled: bool,
+    #[serde(default)]
+    pub report_download_enabled: bool,
+    #[serde(default)]
+    pub job_deletion_enabled: bool,
     pub batch_upload_enabled: bool,
     pub storage_backend: String,
     #[serde(default)]
@@ -102,6 +110,33 @@ pub struct AutoAssignObjectsResponse {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetadataValueCount {
+    pub value: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetadataColumnProfile {
+    pub name: String,
+    pub distinct_nonempty_values: usize,
+    pub comparison_ready: bool,
+    pub values_truncated: bool,
+    pub values: Vec<MetadataValueCount>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetadataProfileResponse {
+    pub metadata_object_id: String,
+    pub metadata_sha256: String,
+    pub metadata_rows: usize,
+    pub metadata_id_column: String,
+    pub suggested_comparison_column: Option<String>,
+    pub columns: Vec<MetadataColumnProfile>,
+    pub validation_errors: Vec<String>,
+    pub validation_warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MappingAuditRequest {
     pub comparison_column: Option<String>,
@@ -152,6 +187,15 @@ pub struct SubmitJobRequest {
     pub covariates: Vec<String>,
     pub run_qc: bool,
     pub run_gene_corrected: bool,
+    pub run_full_unified: bool,
+    pub excluded_sample_ids: Vec<String>,
+    pub run_exploratory_direction_check: bool,
+    pub run_pbmc_diagnostics: bool,
+    pub pbmc_batch_column: Option<String>,
+    pub pbmc_family_column: Option<String>,
+    pub pbmc_sensitivity_column: Option<String>,
+    pub pathway_q_threshold: f64,
+    pub pathway_effect_threshold: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,8 +220,41 @@ pub struct JobResultSummary {
     pub mapping: MappingAuditResponse,
     pub qc: Option<QcResultSummary>,
     pub gene: Option<GeneCorrectedSummary>,
+    #[serde(default)]
+    pub unified: Option<UnifiedAnalysisSummary>,
     pub warnings: Vec<String>,
     pub artifacts: Vec<JobArtifactSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnifiedAnalysisSummary {
+    pub comparison_name: String,
+    pub case_samples: usize,
+    pub control_samples: usize,
+    pub excluded_sample_ids: Vec<String>,
+    pub modalities: Vec<UnifiedModalitySummary>,
+    pub exploratory_gene_available: bool,
+    pub exploratory_transcript_available: bool,
+    pub pbmc_diagnostics_available: bool,
+    pub candidates: Vec<UnifiedCandidateSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnifiedModalitySummary {
+    pub modality: String,
+    pub status: String,
+    pub result_items: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnifiedCandidateSummary {
+    pub rank: usize,
+    pub modality: String,
+    pub feature: String,
+    pub effect: f64,
+    pub q_value: f64,
+    pub evidence: String,
+    pub robustness: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -237,6 +314,13 @@ pub struct JobArtifactSummary {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CancelJobResponse {
     pub job: JobSummaryResponse,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeleteJobResponse {
+    pub job_id: String,
+    pub deleted: bool,
+    pub project: ProjectSummaryResponse,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -384,6 +468,20 @@ pub async fn auto_assign_objects(
     decode(response).await
 }
 
+pub async fn metadata_profile(
+    project_id: &str,
+    recovery_token: &str,
+) -> Result<MetadataProfileResponse, String> {
+    let response = Request::get(&format!(
+        "{API_ROOT}/projects/{project_id}/metadata-profile"
+    ))
+    .header("Authorization", &format!("Bearer {recovery_token}"))
+    .send()
+    .await
+    .map_err(|error| format!("metadata-profile request failed: {error}"))?;
+    decode(response).await
+}
+
 pub async fn run_mapping_audit(
     project_id: &str,
     recovery_token: &str,
@@ -459,6 +557,48 @@ pub async fn cancel_job(
         .await
         .map_err(|error| format!("job cancellation request failed: {error}"))?;
     decode(response).await
+}
+
+pub async fn delete_stored_job(
+    project_id: &str,
+    recovery_token: &str,
+    job_id: &str,
+) -> Result<DeleteJobResponse, String> {
+    let response = Request::delete(&format!(
+        "{API_ROOT}/projects/{project_id}/jobs/{job_id}/stored"
+    ))
+    .header("Authorization", &format!("Bearer {recovery_token}"))
+    .send()
+    .await
+    .map_err(|error| format!("stored job deletion request failed: {error}"))?;
+    decode(response).await
+}
+
+pub async fn download_job_artifact(
+    project_id: &str,
+    recovery_token: &str,
+    job_id: &str,
+    artifact_id: &str,
+) -> Result<Vec<u8>, String> {
+    let response = Request::get(&format!(
+        "{API_ROOT}/projects/{project_id}/jobs/{job_id}/artifacts/{artifact_id}"
+    ))
+    .header("Authorization", &format!("Bearer {recovery_token}"))
+    .send()
+    .await
+    .map_err(|error| format!("artifact download request failed: {error}"))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "server returned no readable error body".to_string());
+        return Err(format!("server returned HTTP {status}: {body}"));
+    }
+    response
+        .binary()
+        .await
+        .map_err(|error| format!("failed to read artifact bytes: {error}"))
 }
 
 async fn decode<T: DeserializeOwned>(response: Response) -> Result<T, String> {

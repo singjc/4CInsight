@@ -1,22 +1,33 @@
 //! Local web server for the 4C Cohort Explorer browser client.
 //!
-//! Phase 3D.2 adds native-like high-throughput ingest on top of the frozen,
-//! persistent local analysis-job path: shared filename conventions, validated
-//! automatic role/sample assignment, and bounded concurrent request streaming.
-//! Jobs still snapshot a validated object-role manifest and reuse the native
-//! mapping/QC and representative corrected gene-expression engines. The complete
-//! unified multi-omics/report stack remains intentionally deferred.
+//! Phase 3E.2 extends frozen unified native jobs with authenticated metadata
+//! profiling for native-parity comparison configuration. The server reconstructs
+//! metadata and scientific state from opaque private objects; the browser only
+//! selects metadata-backed grouping values and submits the frozen definition.
+//! Existing native multi-omics statistics and report generation remain the
+//! scientific implementation, and authorization/storage semantics stay opaque.
 
 use crate::{
-    cohort::{
-        CohortComparison, CohortModality, DetectedCohortFile, MappingStatus,
-        MetadataComparisonSpec, MetadataTable, ProjectScan, build_custom_comparison, build_mapping,
-        load_metadata,
+    analysis::{
+        CohortAnalysisSettingsSnapshot, CohortDefinitionSnapshot, CohortModalitySelection,
+        UnifiedCohortAnalysisRun, run_unified_cohort_analysis, write_unified_analysis_tables,
     },
-    corrected::{CorrectedModelSpec, run_corrected_expression},
+    cohort::{
+        CohortComparison, CohortComparisonDefinition, CohortModality, DetectedCohortFile,
+        MappingStatus, MetadataComparisonSpec, MetadataTable, ProjectScan, build_custom_comparison,
+        build_mapping, load_metadata,
+    },
+    corrected::{CorrectedExpressionResult, CorrectedModelSpec, run_corrected_expression},
+    diagnostics::PbmcDiagnosticsConfig,
     input_conventions::{FilenameInputKind, classify_input_filename},
-    metadata::canonical_sample_id,
-    outliers::{OutlierConfig, run_cross_modal_outlier_qc},
+    metadata::{
+        canonical_sample_id, unique_values as metadata_unique_values, validate_standard_metadata,
+    },
+    outliers::{
+        OutlierConfig, build_outlier_filter_snapshot, filter_comparison_excluding,
+        run_cross_modal_outlier_qc,
+    },
+    report::{generate_unified_detailed_html_report, generate_unified_simplified_html_report},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -36,7 +47,7 @@ use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     env,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
@@ -76,6 +87,7 @@ const UPLOAD_SCRATCH_MAX_AGE_SECONDS: u64 = 6 * 60 * 60;
 const MAX_XLSX_ENTRIES: usize = 4_096;
 const MAX_XLSX_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_XLSX_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_METADATA_PROFILE_VALUES: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaProfile {
@@ -286,6 +298,7 @@ pub enum UploadedInputRole {
     ImmuneInfiltrate,
     MergedGeneExpression,
     MergedTranscriptExpression,
+    PathwayGmt,
 }
 
 impl UploadedInputRole {
@@ -296,6 +309,7 @@ impl UploadedInputRole {
                 | Self::FilteredMetadata
                 | Self::MergedGeneExpression
                 | Self::MergedTranscriptExpression
+                | Self::PathwayGmt
         )
     }
 
@@ -427,6 +441,10 @@ pub struct HealthResponse {
     pub analysis_enabled: bool,
     pub persistent_jobs: bool,
     pub representative_gene_enabled: bool,
+    pub unified_analysis_enabled: bool,
+    pub metadata_profile_enabled: bool,
+    pub report_download_enabled: bool,
+    pub job_deletion_enabled: bool,
     pub batch_upload_enabled: bool,
     pub storage_backend: &'static str,
     pub quota_profile: &'static str,
@@ -491,6 +509,33 @@ pub struct AutoAssignObjectsResponse {
     pub validation_failed: usize,
     pub objects: Vec<ObjectSummary>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataValueCount {
+    pub value: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataColumnProfile {
+    pub name: String,
+    pub distinct_nonempty_values: usize,
+    pub comparison_ready: bool,
+    pub values_truncated: bool,
+    pub values: Vec<MetadataValueCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataProfileResponse {
+    pub metadata_object_id: String,
+    pub metadata_sha256: String,
+    pub metadata_rows: usize,
+    pub metadata_id_column: String,
+    pub suggested_comparison_column: Option<String>,
+    pub columns: Vec<MetadataColumnProfile>,
+    pub validation_errors: Vec<String>,
+    pub validation_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,10 +612,36 @@ pub struct SubmitJobRequest {
     pub run_qc: bool,
     #[serde(default = "default_true")]
     pub run_gene_corrected: bool,
+    #[serde(default)]
+    pub run_full_unified: bool,
+    #[serde(default)]
+    pub excluded_sample_ids: Vec<String>,
+    #[serde(default = "default_true")]
+    pub run_exploratory_direction_check: bool,
+    #[serde(default = "default_true")]
+    pub run_pbmc_diagnostics: bool,
+    #[serde(default)]
+    pub pbmc_batch_column: Option<String>,
+    #[serde(default)]
+    pub pbmc_family_column: Option<String>,
+    #[serde(default)]
+    pub pbmc_sensitivity_column: Option<String>,
+    #[serde(default = "default_pathway_q_threshold")]
+    pub pathway_q_threshold: f64,
+    #[serde(default = "default_pathway_effect_threshold")]
+    pub pathway_effect_threshold: f64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_pathway_q_threshold() -> f64 {
+    0.05
+}
+
+fn default_pathway_effect_threshold() -> f64 {
+    0.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,6 +652,8 @@ struct StoredJobSnapshot {
     created_unix_seconds: u64,
     input_manifest_sha256: String,
     mapping_snapshot_sha256: String,
+    #[serde(default)]
+    artifact_budget_bytes: u64,
     request: SubmitJobRequest,
     objects: Vec<StoredObjectRecord>,
 }
@@ -622,8 +695,41 @@ pub struct JobResultSummary {
     pub mapping: MappingAuditResponse,
     pub qc: Option<QcResultSummary>,
     pub gene: Option<GeneCorrectedSummary>,
+    #[serde(default)]
+    pub unified: Option<UnifiedAnalysisSummary>,
     pub warnings: Vec<String>,
     pub artifacts: Vec<JobArtifactSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedAnalysisSummary {
+    pub comparison_name: String,
+    pub case_samples: usize,
+    pub control_samples: usize,
+    pub excluded_sample_ids: Vec<String>,
+    pub modalities: Vec<UnifiedModalitySummary>,
+    pub exploratory_gene_available: bool,
+    pub exploratory_transcript_available: bool,
+    pub pbmc_diagnostics_available: bool,
+    pub candidates: Vec<UnifiedCandidateSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedModalitySummary {
+    pub modality: String,
+    pub status: String,
+    pub result_items: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedCandidateSummary {
+    pub rank: usize,
+    pub modality: String,
+    pub feature: String,
+    pub effect: f64,
+    pub q_value: f64,
+    pub evidence: String,
+    pub robustness: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -693,6 +799,13 @@ struct StoredJobArtifactRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelJobResponse {
     pub job: JobSummaryResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteJobResponse {
+    pub job_id: String,
+    pub deleted: bool,
+    pub project: ProjectSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1302,6 +1415,7 @@ impl LocalProjectStore {
                 | UploadedInputRole::FilteredMetadata
                 | UploadedInputRole::MergedGeneExpression
                 | UploadedInputRole::MergedTranscriptExpression
+                | UploadedInputRole::PathwayGmt
         ) && objects
             .iter()
             .any(|other| other.object_id != object_id && other.role == request.role)
@@ -1432,6 +1546,35 @@ impl LocalProjectStore {
             objects: current.iter().map(ObjectSummary::from).collect(),
             warnings,
         })
+    }
+
+    async fn metadata_profile_authorized(
+        &self,
+        project_id: Uuid,
+        token: &str,
+    ) -> Result<MetadataProfileResponse> {
+        let (project_dir, primary) = {
+            let _guard = self.mutation_lock.lock().await;
+            let mut project = self.authorize_record(project_id, token).await?;
+            let objects = self.list_object_records(project_id).await?;
+            let primary = objects
+                .iter()
+                .filter(|object| object.role == UploadedInputRole::PrimaryMetadata)
+                .cloned()
+                .collect::<Vec<_>>();
+            if primary.len() != 1 {
+                bail!(
+                    "assign exactly one uploaded object as primary_metadata before loading metadata fields"
+                );
+            }
+            project.last_accessed_unix_seconds = unix_seconds()?;
+            write_json_atomic(&self.project_record_path(project_id), &project).await?;
+            (self.project_dir(project_id), primary[0].clone())
+        };
+
+        tokio::task::spawn_blocking(move || build_server_metadata_profile(&project_dir, &primary))
+            .await
+            .context("metadata-profile task failed")?
     }
 
     async fn mapping_audit_authorized(
@@ -1566,6 +1709,8 @@ impl LocalProjectStore {
                 "freezing this job would exceed the project storage quota; delete old projects/jobs or raise CFS_MAX_PROJECT_BYTES"
             );
         }
+        let artifact_budget_bytes = max_project_bytes
+            .saturating_sub(project.storage_bytes.saturating_add(logical_snapshot_bytes));
         if assigned
             .iter()
             .filter(|object| object.role == UploadedInputRole::PrimaryMetadata)
@@ -1653,6 +1798,7 @@ impl LocalProjectStore {
             created_unix_seconds: now,
             input_manifest_sha256: current_input_manifest_sha256,
             mapping_snapshot_sha256: request.mapping_snapshot_sha256.clone(),
+            artifact_budget_bytes,
             request,
             objects: assigned,
         };
@@ -1738,6 +1884,30 @@ impl LocalProjectStore {
         Ok(job_summary_from_record(&record))
     }
 
+    async fn delete_job_authorized(
+        &self,
+        project_id: Uuid,
+        token: &str,
+        job_id: Uuid,
+    ) -> Result<(bool, ProjectSummary)> {
+        let _guard = self.mutation_lock.lock().await;
+        let mut project = self.authorize_record(project_id, token).await?;
+        let record = self.read_job_record(project_id, job_id).await?;
+        if !record.status.is_terminal() {
+            bail!("only terminal persisted jobs can be deleted; cancel the job first");
+        }
+        let job_dir = self.job_dir(project_id, job_id);
+        let deleted = match fs::remove_dir_all(&job_dir).await {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error).context("failed to delete persisted job directory"),
+        };
+        self.reconcile_record_storage(&mut project).await?;
+        project.last_accessed_unix_seconds = unix_seconds()?;
+        write_json_atomic(&self.project_record_path(project_id), &project).await?;
+        Ok((deleted, ProjectSummary::from(&project)))
+    }
+
     async fn is_job_cancel_requested(&self, project_id: Uuid, job_id: Uuid) -> Result<bool> {
         let _guard = self.mutation_lock.lock().await;
         let record = self.read_job_record(project_id, job_id).await?;
@@ -1814,7 +1984,11 @@ impl LocalProjectStore {
                 project_id,
                 job_id,
                 JobStatus::Running,
-                "Running native mapping/QC and representative corrected gene lane",
+                if snapshot.request.run_full_unified {
+                    "Running frozen native unified multi-omics analysis"
+                } else {
+                    "Running native mapping/QC and representative corrected gene lane"
+                },
                 None,
                 None,
             )
@@ -1875,7 +2049,11 @@ impl LocalProjectStore {
                 project_id,
                 job_id,
                 JobStatus::Complete,
-                "Native Phase-3D job complete",
+                if scientific.unified.is_some() {
+                    "Native Phase-3E unified job complete"
+                } else {
+                    "Native Phase-3D job complete"
+                },
                 Some(scientific),
                 None,
             )
@@ -2137,6 +2315,12 @@ fn validate_object_for_role(
             }
             validate_text_container(path)
         }
+        UploadedInputRole::PathwayGmt => {
+            if ext != "gmt" {
+                bail!("pathway gene-set role requires a .gmt file");
+            }
+            validate_text_container(path)
+        }
         UploadedInputRole::Unassigned => Ok(()),
     }
 }
@@ -2225,6 +2409,72 @@ fn materialize_metadata_object(
         }
     }
     Ok(target)
+}
+
+fn build_server_metadata_profile(
+    project_dir: &FsPath,
+    primary: &StoredObjectRecord,
+) -> Result<MetadataProfileResponse> {
+    if primary.role != UploadedInputRole::PrimaryMetadata {
+        bail!("metadata profile requires an object assigned as primary_metadata");
+    }
+    let data_path = project_dir
+        .join("inputs")
+        .join(format!("{}.bin", primary.object_id));
+    validate_object_for_role(&data_path, &primary.original_name, primary.role)?;
+
+    let scratch = project_dir.join("scratch");
+    std::fs::create_dir_all(&scratch)?;
+    let temp = tempfile::Builder::new()
+        .prefix("metadata-profile-")
+        .tempdir_in(&scratch)
+        .context("failed to create private metadata-profile scratch directory")?;
+    let metadata_path =
+        materialize_metadata_object(temp.path(), &data_path, &primary.original_name)?;
+    let metadata = load_metadata(&metadata_path)?;
+    let validation = validate_standard_metadata(&metadata);
+
+    let mut columns = Vec::with_capacity(metadata.columns.len());
+    for name in &metadata.columns {
+        let counts = metadata_unique_values(&metadata, name);
+        let distinct_nonempty_values = counts.len();
+        let values_truncated = distinct_nonempty_values > MAX_METADATA_PROFILE_VALUES;
+        let values = counts
+            .into_iter()
+            .take(MAX_METADATA_PROFILE_VALUES)
+            .map(|(value, count)| MetadataValueCount { value, count })
+            .collect::<Vec<_>>();
+        columns.push(MetadataColumnProfile {
+            name: name.clone(),
+            distinct_nonempty_values,
+            comparison_ready: name != &metadata.id_column
+                && (2..=20).contains(&distinct_nonempty_values),
+            values_truncated,
+            values,
+        });
+    }
+
+    let suggested_comparison_column = columns
+        .iter()
+        .find(|column| column.name == "analysis_group" && column.distinct_nonempty_values >= 2)
+        .map(|column| column.name.clone())
+        .or_else(|| {
+            columns
+                .iter()
+                .find(|column| column.comparison_ready)
+                .map(|column| column.name.clone())
+        });
+
+    Ok(MetadataProfileResponse {
+        metadata_object_id: primary.object_id.to_string(),
+        metadata_sha256: primary.sha256.clone(),
+        metadata_rows: metadata.rows.len(),
+        metadata_id_column: metadata.id_column,
+        suggested_comparison_column,
+        columns,
+        validation_errors: validation.errors,
+        validation_warnings: validation.warnings,
+    })
 }
 
 fn build_server_mapping_audit(
@@ -2503,16 +2753,12 @@ fn build_snapshot_native_context(
     }
     let scratch = snapshot_root.join("scratch");
     std::fs::create_dir_all(&scratch)?;
-    let temp = tempfile::Builder::new()
-        .prefix("job-metadata-")
-        .tempdir_in(&scratch)
-        .context("failed to create job metadata scratch directory")?;
     let primary_object = primary[0];
     let primary_data = snapshot_root
         .join("inputs")
         .join(format!("{}.bin", primary_object.object_id));
     let metadata_path =
-        materialize_metadata_object(temp.path(), &primary_data, &primary_object.original_name)?;
+        materialize_metadata_object(&scratch, &primary_data, &primary_object.original_name)?;
     let metadata = load_metadata(&metadata_path)?;
     let mut scan = ProjectScan {
         root: snapshot_root.to_path_buf(),
@@ -2607,16 +2853,19 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
         snapshot.mapping_snapshot_sha256.clone(),
     )?;
     let mut artifacts = Vec::new();
-    artifacts.push(persist_job_artifact(
+    let mut artifact_budget = snapshot.artifact_budget_bytes;
+    artifacts.push(persist_job_artifact_budgeted(
         job_dir,
         "mapping_audit.json",
         "application/json",
         &serde_json::to_vec_pretty(&mapping)?,
+        &mut artifact_budget,
     )?);
 
-    let (metadata, scan, comparison) =
+    let (metadata, scan, original_comparison) =
         build_snapshot_native_context(&snapshot_root, &snapshot.objects, &snapshot.request)?;
     let mut warnings = Vec::new();
+    let mut qc_native = None;
     let qc = if snapshot.request.run_qc {
         let selected = selected_qc_modalities(&scan);
         if selected.is_empty() {
@@ -2630,7 +2879,7 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
                 scan.merged_gene_tsv.as_deref(),
                 scan.merged_transcript_tsv.as_deref(),
                 &scan.files,
-                &comparison,
+                &original_comparison,
                 &selected,
                 &OutlierConfig::default(),
                 |_done, _total, _message| {},
@@ -2660,12 +2909,14 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
                             .collect(),
                         warnings: result.warnings.clone(),
                     };
-                    artifacts.push(persist_job_artifact(
+                    artifacts.push(persist_job_artifact_budgeted(
                         job_dir,
                         "qc_summary.json",
                         "application/json",
                         &serde_json::to_vec_pretty(&summary)?,
+                        &mut artifact_budget,
                     )?);
+                    qc_native = Some(result);
                     Some(summary)
                 }
                 Err(error) => {
@@ -2677,6 +2928,194 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
     } else {
         None
     };
+
+    if snapshot.request.run_full_unified {
+        let reviewed_exclusions = snapshot
+            .request
+            .excluded_sample_ids
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        let (comparison, qc_snapshot) = if let Some(audit) = qc_native.as_ref() {
+            let filtered = filter_comparison_excluding(&original_comparison, &reviewed_exclusions);
+            let qc_snapshot = build_outlier_filter_snapshot(
+                audit,
+                &reviewed_exclusions,
+                &original_comparison,
+                &filtered,
+                !reviewed_exclusions.is_empty(),
+            );
+            (filtered, Some(qc_snapshot))
+        } else {
+            if !reviewed_exclusions.is_empty() {
+                warnings.push(
+                    "Reviewed sample exclusions were supplied but no frozen QC audit was available; exclusions were not applied"
+                        .to_string(),
+                );
+            }
+            (original_comparison.clone(), None)
+        };
+
+        if comparison.case_ids.is_empty() || comparison.control_ids.is_empty() {
+            bail!(
+                "reviewed QC exclusions leave an empty Case or Control cohort; revise the exclusions before submitting the unified job"
+            );
+        }
+
+        let mut corrected = CorrectedModelSpec::default();
+        corrected.subject_column = snapshot
+            .request
+            .subject_column
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        corrected.covariates = snapshot
+            .request
+            .covariates
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+
+        let pathway_gmt_path = snapshot
+            .objects
+            .iter()
+            .find(|object| object.role == UploadedInputRole::PathwayGmt)
+            .map(|object| {
+                snapshot_root
+                    .join("inputs")
+                    .join(format!("{}.bin", object.object_id))
+            });
+        let modalities = CohortModalitySelection {
+            gene: scan.merged_gene_tsv.is_some(),
+            transcript: scan.merged_transcript_tsv.is_some(),
+            bcr: scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::Bcr),
+            bcr_isotype: scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::BcrIsotype),
+            tcr_alpha: scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::TcrAlpha),
+            tcr_beta: scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::TcrBeta),
+            immune: scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::ImmuneInfiltrate),
+            pathway: scan.merged_gene_tsv.is_some() && pathway_gmt_path.is_some(),
+        };
+        if !modalities.any_primary() {
+            bail!("no frozen modality is available for the unified native analysis");
+        }
+
+        let comparison_definition =
+            CohortComparisonDefinition::MetadataValues(MetadataComparisonSpec {
+                column: snapshot.request.comparison_column.trim().to_string(),
+                case_values: snapshot
+                    .request
+                    .case_values
+                    .iter()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect(),
+                control_values: snapshot
+                    .request
+                    .control_values
+                    .iter()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect(),
+                name: format!(
+                    "Web unified job: {}",
+                    snapshot.request.comparison_column.trim()
+                ),
+                case_label: "Case".to_string(),
+                control_label: "Control".to_string(),
+            });
+        let cohort = CohortDefinitionSnapshot {
+            project_root: scan.root.clone(),
+            metadata_path: metadata.path.clone(),
+            metadata_id_column: metadata.id_column.clone(),
+            uses_filtered_metadata_subset: snapshot
+                .objects
+                .iter()
+                .any(|object| object.role == UploadedInputRole::FilteredMetadata),
+            comparison_definition,
+            comparison,
+            mapping: build_mapping(&scan, &metadata),
+        };
+
+        let pbmc_diagnostics =
+            if snapshot.request.run_pbmc_diagnostics && scan.merged_gene_tsv.is_some() {
+                let mut config = PbmcDiagnosticsConfig::default();
+                config.subject_column = corrected.subject_column.clone();
+                config.batch_column =
+                    normalized_optional_string(snapshot.request.pbmc_batch_column.as_deref());
+                config.family_column =
+                    normalized_optional_string(snapshot.request.pbmc_family_column.as_deref());
+                config.sensitivity_column =
+                    normalized_optional_string(snapshot.request.pbmc_sensitivity_column.as_deref());
+                Some(config)
+            } else {
+                None
+            };
+        let settings = CohortAnalysisSettingsSnapshot {
+            modalities,
+            corrected,
+            pathway_gmt_path,
+            pathway_q_threshold: snapshot.request.pathway_q_threshold,
+            pathway_effect_threshold: snapshot.request.pathway_effect_threshold,
+            exploratory_direction_check: snapshot.request.run_exploratory_direction_check,
+            candidate: crate::focused::FocusedCandidateSettings::default(),
+            pbmc_diagnostics,
+        };
+
+        let run = run_unified_cohort_analysis(
+            &scan,
+            &metadata,
+            cohort,
+            settings,
+            qc_snapshot,
+            |_done, _total, _message| {},
+        )?;
+        warnings.extend(run.warnings.clone());
+        let unified = summarize_unified_run(&run);
+        let gene = run.primary.gene.as_ref().map(summarize_corrected_gene);
+
+        artifacts.push(persist_job_artifact_budgeted(
+            job_dir,
+            "unified_result_summary.json",
+            "application/json",
+            &serde_json::to_vec_pretty(&unified)?,
+            &mut artifact_budget,
+        )?);
+        persist_unified_run_artifacts(
+            job_dir,
+            &run,
+            &mut artifacts,
+            &mut warnings,
+            &mut artifact_budget,
+        )?;
+
+        return Ok(JobResultSummary {
+            mapping,
+            qc,
+            gene,
+            unified: Some(unified),
+            warnings,
+            artifacts,
+        });
+    }
 
     let gene = if snapshot.request.run_gene_corrected {
         if let Some(path) = scan.merged_gene_tsv.as_deref() {
@@ -2698,50 +3137,21 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
             match run_corrected_expression(
                 path,
                 &metadata,
-                &comparison,
+                &original_comparison,
                 "Raw Count",
                 "Gene",
                 &spec,
                 |_done, _total, _message| {},
             ) {
                 Ok(result) => {
-                    let mut ranked = result.tests.clone();
-                    ranked.sort_by(|a, b| {
-                        a.q_value
-                            .total_cmp(&b.q_value)
-                            .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
-                            .then_with(|| a.feature.cmp(&b.feature))
-                    });
-                    let summary = GeneCorrectedSummary {
-                        n_input_samples: result.n_input_samples,
-                        n_model_samples: result.n_model_samples,
-                        n_subjects: result.n_subjects,
-                        tested_features: result.tested_features,
-                        filtered_features: result.filtered_features,
-                        model_description: result.model_description.clone(),
-                        top_features: ranked
-                            .iter()
-                            .take(50)
-                            .map(|item| GeneFeatureSummary {
-                                feature: item.feature.clone(),
-                                secondary_id: item.secondary_id.clone(),
-                                n_samples: item.n_samples,
-                                mean_case: item.mean_case,
-                                mean_control: item.mean_control,
-                                beta_group: item.beta_group,
-                                robust_se: item.robust_se,
-                                p_value: item.p_value,
-                                q_value: item.q_value,
-                            })
-                            .collect(),
-                        warnings: result.warnings.clone(),
-                    };
+                    let summary = summarize_corrected_gene(&result);
                     let tsv = corrected_gene_result_tsv(&result)?;
-                    artifacts.push(persist_job_artifact(
+                    artifacts.push(persist_job_artifact_budgeted(
                         job_dir,
                         "gene_corrected_results.tsv",
                         "text/tab-separated-values",
                         &tsv,
+                        &mut artifact_budget,
                     )?);
                     Some(summary)
                 }
@@ -2767,9 +3177,337 @@ fn execute_frozen_job(job_dir: &FsPath, snapshot: &StoredJobSnapshot) -> Result<
         mapping,
         qc,
         gene,
+        unified: None,
         warnings,
         artifacts,
     })
+}
+
+fn normalized_optional_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn summarize_corrected_gene(result: &CorrectedExpressionResult) -> GeneCorrectedSummary {
+    let mut ranked = result.tests.clone();
+    ranked.sort_by(|a, b| {
+        a.q_value
+            .total_cmp(&b.q_value)
+            .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
+            .then_with(|| a.feature.cmp(&b.feature))
+    });
+    GeneCorrectedSummary {
+        n_input_samples: result.n_input_samples,
+        n_model_samples: result.n_model_samples,
+        n_subjects: result.n_subjects,
+        tested_features: result.tested_features,
+        filtered_features: result.filtered_features,
+        model_description: result.model_description.clone(),
+        top_features: ranked
+            .iter()
+            .take(50)
+            .map(|item| GeneFeatureSummary {
+                feature: item.feature.clone(),
+                secondary_id: item.secondary_id.clone(),
+                n_samples: item.n_samples,
+                mean_case: item.mean_case,
+                mean_control: item.mean_control,
+                beta_group: item.beta_group,
+                robust_se: item.robust_se,
+                p_value: item.p_value,
+                q_value: item.q_value,
+            })
+            .collect(),
+        warnings: result.warnings.clone(),
+    }
+}
+
+fn summarize_unified_run(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSummary {
+    let mut modalities = Vec::new();
+    if run.settings.modalities.gene {
+        modalities.push(unified_modality_summary(
+            "Gene expression",
+            run.primary.gene.as_ref().map(|result| result.tests.len()),
+            run.primary.gene_error.as_deref(),
+        ));
+    }
+    if run.settings.modalities.transcript {
+        modalities.push(unified_modality_summary(
+            "Transcript expression",
+            run.primary
+                .transcript
+                .as_ref()
+                .map(|result| result.tests.len()),
+            run.primary.transcript_error.as_deref(),
+        ));
+    }
+    if run.settings.modalities.bcr {
+        modalities.push(unified_modality_summary(
+            "BCR",
+            run.primary.bcr.as_ref().map(|result| {
+                result.metric_tests.len()
+                    + result
+                        .compositions
+                        .iter()
+                        .map(|composition| composition.tests.len())
+                        .sum::<usize>()
+            }),
+            run.primary.bcr_error.as_deref(),
+        ));
+    }
+    if run.settings.modalities.bcr_isotype {
+        modalities.push(unified_modality_summary(
+            "BCR isotype",
+            run.primary
+                .bcr_isotype
+                .as_ref()
+                .map(|result| result.tests.len()),
+            run.primary.bcr_isotype_error.as_deref(),
+        ));
+    }
+    if run.settings.modalities.tcr_alpha {
+        modalities.push(unified_modality_summary(
+            "TCR alpha",
+            run.primary.tcr_alpha.as_ref().map(|result| {
+                result.metric_tests.len()
+                    + result
+                        .compositions
+                        .iter()
+                        .map(|composition| composition.tests.len())
+                        .sum::<usize>()
+            }),
+            run.primary.tcr_alpha_error.as_deref(),
+        ));
+    }
+    if run.settings.modalities.tcr_beta {
+        modalities.push(unified_modality_summary(
+            "TCR beta",
+            run.primary.tcr_beta.as_ref().map(|result| {
+                result.metric_tests.len()
+                    + result
+                        .compositions
+                        .iter()
+                        .map(|composition| composition.tests.len())
+                        .sum::<usize>()
+            }),
+            run.primary.tcr_beta_error.as_deref(),
+        ));
+    }
+    if run.settings.modalities.immune {
+        modalities.push(unified_modality_summary(
+            "Immune infiltrate",
+            run.primary.immune.as_ref().map(|result| result.tests.len()),
+            run.primary.immune_error.as_deref(),
+        ));
+    }
+    if run.settings.modalities.pathway {
+        modalities.push(unified_modality_summary(
+            "Pathway ORA",
+            run.primary
+                .pathway
+                .as_ref()
+                .map(|result| result.tests.len()),
+            run.primary.pathway_error.as_deref(),
+        ));
+    }
+
+    let mut candidates = Vec::new();
+    for row in run.candidates.genes.iter().take(15) {
+        candidates.push(UnifiedCandidateSummary {
+            rank: row.rank,
+            modality: "Gene".to_string(),
+            feature: row.gene.clone(),
+            effect: row.adjusted_log2fc,
+            q_value: row.q_value,
+            evidence: row.evidence.clone(),
+            robustness: row.robustness.clone(),
+        });
+    }
+    for row in run.candidates.pathways.iter().take(12) {
+        candidates.push(UnifiedCandidateSummary {
+            rank: row.rank,
+            modality: "Pathway".to_string(),
+            feature: row.pathway.clone(),
+            effect: row.odds_ratio,
+            q_value: row.q_value,
+            evidence: row.evidence.clone(),
+            robustness: None,
+        });
+    }
+    for row in run.candidates.other.iter().take(20) {
+        candidates.push(UnifiedCandidateSummary {
+            rank: row.rank,
+            modality: row.modality.clone(),
+            feature: row.feature.clone(),
+            effect: row.effect,
+            q_value: row.q_value,
+            evidence: row.evidence.clone(),
+            robustness: None,
+        });
+    }
+
+    UnifiedAnalysisSummary {
+        comparison_name: run.primary.comparison.name.clone(),
+        case_samples: run.case_n(),
+        control_samples: run.control_n(),
+        excluded_sample_ids: run
+            .qc_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.excluded_ids.clone())
+            .unwrap_or_default(),
+        modalities,
+        exploratory_gene_available: run.exploratory_support.gene.is_some(),
+        exploratory_transcript_available: run.exploratory_support.transcript.is_some(),
+        pbmc_diagnostics_available: run.diagnostics.is_some(),
+        candidates,
+    }
+}
+
+fn unified_modality_summary(
+    modality: &str,
+    result_items: Option<usize>,
+    error: Option<&str>,
+) -> UnifiedModalitySummary {
+    match (result_items, error) {
+        (Some(count), _) => UnifiedModalitySummary {
+            modality: modality.to_string(),
+            status: "complete".to_string(),
+            result_items: count,
+        },
+        (None, Some(error)) => UnifiedModalitySummary {
+            modality: modality.to_string(),
+            status: format!("failed: {error}"),
+            result_items: 0,
+        },
+        (None, None) => UnifiedModalitySummary {
+            modality: modality.to_string(),
+            status: "not available".to_string(),
+            result_items: 0,
+        },
+    }
+}
+
+fn persist_unified_run_artifacts(
+    job_dir: &FsPath,
+    run: &UnifiedCohortAnalysisRun,
+    artifacts: &mut Vec<JobArtifactSummary>,
+    warnings: &mut Vec<String>,
+    artifact_budget: &mut u64,
+) -> Result<()> {
+    let scratch = job_dir.join("snapshot").join("scratch");
+    std::fs::create_dir_all(&scratch)?;
+    let temp = tempfile::Builder::new()
+        .prefix("phase3e-export-")
+        .tempdir_in(&scratch)
+        .context("failed to create temporary unified export directory")?;
+
+    for (name, generator) in [
+        (
+            "simplified_report.html",
+            generate_unified_simplified_html_report
+                as fn(&FsPath, &UnifiedCohortAnalysisRun) -> Result<()>,
+        ),
+        (
+            "full_report.html",
+            generate_unified_detailed_html_report
+                as fn(&FsPath, &UnifiedCohortAnalysisRun) -> Result<()>,
+        ),
+    ] {
+        let path = temp.path().join(name);
+        match generator(&path, run) {
+            Ok(()) => match std::fs::read(&path) {
+                Ok(bytes)
+                    if bytes.len() as u64 <= MAX_JOB_ARTIFACT_BYTES
+                        && bytes.len() as u64 <= *artifact_budget =>
+                {
+                    artifacts.push(persist_job_artifact_budgeted(
+                        job_dir,
+                        name,
+                        "text/html; charset=utf-8",
+                        &bytes,
+                        artifact_budget,
+                    )?);
+                }
+                Ok(bytes) => warnings.push(format!(
+                    "{name} was generated ({} bytes) but exceeds the available retained-artifact budget or per-artifact limit and was not retained",
+                    bytes.len()
+                )),
+                Err(error) => warnings.push(format!("Could not read generated {name}: {error}")),
+            },
+            Err(error) => warnings.push(format!("Could not generate {name}: {error:#}")),
+        }
+    }
+
+    match write_unified_analysis_tables(temp.path(), run) {
+        Ok(table_root) => {
+            let mut files = Vec::new();
+            collect_regular_files(&table_root, &mut files)?;
+            files.sort();
+            for path in files {
+                let relative = path.strip_prefix(&table_root).unwrap_or(&path);
+                let artifact_name = format!(
+                    "tables__{}",
+                    relative
+                        .to_string_lossy()
+                        .replace('/', "__")
+                        .replace('\\', "__")
+                );
+                let metadata = std::fs::metadata(&path)?;
+                if metadata.len() > MAX_JOB_ARTIFACT_BYTES || metadata.len() > *artifact_budget {
+                    warnings.push(format!(
+                        "Result table {} exceeds the available retained-artifact budget or per-artifact limit and was not retained",
+                        relative.display()
+                    ));
+                    continue;
+                }
+                let bytes = std::fs::read(&path)?;
+                let media_type = artifact_media_type(&path);
+                artifacts.push(persist_job_artifact_budgeted(
+                    job_dir,
+                    &artifact_name,
+                    media_type,
+                    &bytes,
+                    artifact_budget,
+                )?);
+            }
+        }
+        Err(error) => warnings.push(format!(
+            "Could not materialize the complete unified technical table set: {error:#}"
+        )),
+    }
+    Ok(())
+}
+
+fn collect_regular_files(root: &FsPath, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_regular_files(&path, out)?;
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn artifact_media_type(path: &FsPath) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "html" => "text/html; charset=utf-8",
+        "json" => "application/json",
+        "csv" => "text/csv; charset=utf-8",
+        "tsv" => "text/tab-separated-values; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
 }
 
 fn corrected_gene_result_tsv(
@@ -2822,6 +3560,25 @@ fn corrected_gene_result_tsv(
     Ok(writer.into_inner().map_err(|error| error.into_error())?)
 }
 
+fn persist_job_artifact_budgeted(
+    job_dir: &FsPath,
+    name: &str,
+    media_type: &str,
+    bytes: &[u8],
+    remaining_budget: &mut u64,
+) -> Result<JobArtifactSummary> {
+    let byte_size = u64::try_from(bytes.len()).context("artifact is too large")?;
+    if byte_size > *remaining_budget {
+        bail!(
+            "job artifact '{}' would exceed the retained project-storage budget reserved when the frozen snapshot was created",
+            name
+        );
+    }
+    let artifact = persist_job_artifact(job_dir, name, media_type, bytes)?;
+    *remaining_budget = remaining_budget.saturating_sub(byte_size);
+    Ok(artifact)
+}
+
 fn persist_job_artifact(
     job_dir: &FsPath,
     name: &str,
@@ -2830,7 +3587,7 @@ fn persist_job_artifact(
 ) -> Result<JobArtifactSummary> {
     let byte_size = u64::try_from(bytes.len()).context("artifact is too large")?;
     if byte_size > MAX_JOB_ARTIFACT_BYTES {
-        bail!("job artifact exceeds the configured Phase-3D artifact safety limit");
+        bail!("job artifact exceeds the configured per-artifact safety limit");
     }
     let artifacts_dir = job_dir.join("artifacts");
     std::fs::create_dir_all(&artifacts_dir)?;
@@ -2953,6 +3710,10 @@ pub async fn run_local_web_server(config: WebServerConfig) -> Result<()> {
             axum::routing::put(assign_object),
         )
         .route(
+            "/api/projects/{project_id}/metadata-profile",
+            get(get_metadata_profile),
+        )
+        .route(
             "/api/projects/{project_id}/mapping-audit",
             post(run_mapping_audit),
         )
@@ -2963,6 +3724,10 @@ pub async fn run_local_web_server(config: WebServerConfig) -> Result<()> {
         .route(
             "/api/projects/{project_id}/jobs/{job_id}",
             get(get_job).delete(cancel_job),
+        )
+        .route(
+            "/api/projects/{project_id}/jobs/{job_id}/stored",
+            axum::routing::delete(delete_stored_job),
         )
         .route(
             "/api/projects/{project_id}/jobs/{job_id}/artifacts/{artifact_id}",
@@ -3050,7 +3815,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         app_version: env!("CARGO_PKG_VERSION"),
-        api_version: 6,
+        api_version: 8,
         default_ttl_hours: state.default_ttl_hours,
         max_ttl_hours: MAX_TTL_HOURS,
         upload_enabled: true,
@@ -3058,6 +3823,10 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         analysis_enabled: true,
         persistent_jobs: true,
         representative_gene_enabled: true,
+        unified_analysis_enabled: true,
+        metadata_profile_enabled: true,
+        report_download_enabled: true,
+        job_deletion_enabled: true,
         batch_upload_enabled: true,
         storage_backend: "local-filesystem",
         quota_profile: state.quota_profile.as_str(),
@@ -3237,6 +4006,23 @@ async fn auto_assign_objects(
     }
 }
 
+async fn get_metadata_profile(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<MetadataProfileResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let token = bearer_token(&headers)?;
+    match state
+        .store
+        .metadata_profile_authorized(project_id, token)
+        .await
+    {
+        Ok(response) => Ok(Json(response)),
+        Err(error) => Err(map_input_error(error)),
+    }
+}
+
 async fn run_mapping_audit(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -3349,6 +4135,29 @@ async fn cancel_job(
         .await
     {
         Ok(job) => Ok(Json(CancelJobResponse { job })),
+        Err(error) => Err(map_authorization_or_not_found(error)),
+    }
+}
+
+async fn delete_stored_job(
+    State(state): State<AppState>,
+    Path((project_id, job_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<DeleteJobResponse>, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let job_id = Uuid::parse_str(&job_id)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid job UUID"))?;
+    let token = bearer_token(&headers)?;
+    match state
+        .store
+        .delete_job_authorized(project_id, token, job_id)
+        .await
+    {
+        Ok((deleted, project)) => Ok(Json(DeleteJobResponse {
+            job_id: job_id.to_string(),
+            deleted,
+            project,
+        })),
         Err(error) => Err(map_authorization_or_not_found(error)),
     }
 }
@@ -3781,6 +4590,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(assigned.role, UploadedInputRole::PrimaryMetadata);
+        let profile = store
+            .metadata_profile_authorized(project_id, &token)
+            .await
+            .unwrap();
+        assert_eq!(profile.metadata_rows, 2);
+        assert_eq!(profile.metadata_id_column, "sample_id");
+        assert_eq!(
+            profile.suggested_comparison_column.as_deref(),
+            Some("analysis_group")
+        );
+        let grouping = profile
+            .columns
+            .iter()
+            .find(|column| column.name == "analysis_group")
+            .unwrap();
+        assert!(grouping.comparison_ready);
+        assert_eq!(grouping.distinct_nonempty_values, 2);
+        assert_eq!(
+            grouping
+                .values
+                .iter()
+                .map(|item| (item.value.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            vec![("Case", 1), ("Control", 1)]
+        );
         let audit = store
             .mapping_audit_authorized(
                 project_id,
@@ -3870,6 +4704,15 @@ mod tests {
                     covariates: Vec::new(),
                     run_qc: false,
                     run_gene_corrected: false,
+                    run_full_unified: false,
+                    excluded_sample_ids: Vec::new(),
+                    run_exploratory_direction_check: false,
+                    run_pbmc_diagnostics: false,
+                    pbmc_batch_column: None,
+                    pbmc_family_column: None,
+                    pbmc_sensitivity_column: None,
+                    pathway_q_threshold: default_pathway_q_threshold(),
+                    pathway_effect_threshold: default_pathway_effect_threshold(),
                 },
                 16,
                 512 * 1024 * 1024,
@@ -3896,6 +4739,16 @@ mod tests {
             .unwrap();
         assert_eq!(completed.summary.status, JobStatus::Complete);
         assert_eq!(completed.result.unwrap().mapping.metadata_rows, 2);
+
+        let (deleted, project_after_delete) = store
+            .delete_job_authorized(project_id, &token, job_id)
+            .await
+            .unwrap();
+        assert!(deleted);
+        assert_eq!(project_after_delete.job_count, 0);
+        assert_eq!(project_after_delete.job_snapshot_bytes, 0);
+        assert_eq!(project_after_delete.job_artifact_bytes, 0);
+        assert!(!store.job_dir(project_id, job_id).exists());
     }
 
     #[tokio::test]

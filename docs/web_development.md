@@ -1,12 +1,8 @@
 # 4C Cohort Explorer web development
 
-## Current status: Phase 3D.2 native-like high-throughput ingest (v0.16.8)
+## Current status: Phase 3E.2 metadata-driven comparison configuration (v0.16.10)
 
-The browser client now runs through the native Rust `cfs-server` and supports private temporary projects, authenticated opaque-object storage, native-like folder scanning, automatic standard role/sample-ID assignment, bounded concurrent uploads, the existing native mapping audit, frozen persistent jobs, native cross-modal QC, and one representative corrected gene-expression lane.
-
-Phase 3D.2 is primarily a **large-cohort ingest usability/performance iteration**. It addresses the realistic case where one cohort contains hundreds of gene-expression workbooks plus BCR/TCR/isotype/immune files: users should not have to upload them serially or manually assign a role to every standard 4C filename.
-
-The full desktop scientific stack is **not** web-connected yet. Phase 3D remains a parity bridge: browser/server ingest ultimately feeds the same native mapping/QC/scientific functions rather than creating a second browser-side implementation.
+Phase 3D.2 has been exercised on a realistic private project with 2,140 uploaded objects / 4.21 GiB, and Phase 3E.1 has produced full unified report/table artifacts. Phase 3E.2 keeps that validated scientific job architecture and removes free-text cohort grouping from the browser: comparison columns and value counts are now loaded directly from the assigned primary metadata and selected with native-like controls.
 
 ```text
 Desktop
@@ -14,28 +10,41 @@ Desktop
         ↓
     LocalBackend
         ↓
-    existing Rust filesystem + complete scientific analysis
+    existing Rust unified scientific analysis
 
-Browser (Phase 3D.2)
+Browser (Phase 3E.2)
     egui / eframe WebRunner (WASM)
-        ↓ same-origin HTTP
+        ↓ same-origin HTTP + bearer capability
     cfs-server (Axum, native Rust)
         ├── /       → web/dist static assets
         └── /api/*
-              ├── project capability/lifecycle API
-              ├── bounded concurrent opaque-object uploads
-              ├── shared native filename conventions
-              ├── validated automatic role/sample-ID assignment
-              ├── native mapping-audit API
-              └── frozen persistent job API
+              ├── private project/object lifecycle
+              ├── bounded native-like ingest + assignment
+              ├── authenticated primary-metadata profile
+              ├── metadata-backed Case/Control selection
+              ├── native mapping + frozen QC review
+              ├── immutable persisted job snapshots
+              ├── existing run_unified_cohort_analysis()
+              ├── simplified + full reports from one result
+              ├── authenticated artifact downloads
+              └── terminal per-job deletion
                         ↓
                private local filesystem storage
                         ↓
-               existing native mapping / QC /
-               representative gene-corrected engine
+               existing native scientific engine
 ```
 
-The browser crate remains separate under `web/`; workbook parsing, report writers, and the scientific engine continue to compile and run natively rather than inside WASM. `src/input_conventions.rs` is pure shared classification logic imported by native scanning, the server, and WASM, while the browser continues to reuse `src/analysis_docs.rs` and `src/ui_theme.rs` for single-source docs/theme behavior.
+No corrected statistical engine is implemented in WASM. The browser freezes configuration and review choices; native Rust reconstructs the cohort and performs the analysis. Opaque project/object/job/artifact IDs keep the contract compatible with a future operator-managed S3/MinIO backend.
+
+### Metadata-backed comparison selection
+
+Once exactly one uploaded object is assigned the `primary_metadata` role, the browser requests an authenticated metadata profile from the server. `cfs-server` validates and privately materializes that opaque object, parses it with the existing native `load_metadata()`, and returns the metadata column names plus bounded distinct-value counts. Filesystem paths are never returned to the browser.
+
+The browser uses that profile for one grouping-field dropdown and multi-select Case/Control value dropdowns. The sets are mutually exclusive. `analysis_group` is suggested when usable; otherwise the first low-cardinality categorical column is suggested. Exact labels `Case` and `Control` are preselected only when they actually exist, so arbitrary phenotype labels are never assigned a disease/control orientation by guesswork.
+
+These selections are not cosmetic. The mapping fingerprint contains the grouping column plus both selected value sets. The same values are repeated in `SubmitJobRequest`, reconstructed as the native `MetadataComparisonSpec`, and frozen into the job before `run_unified_cohort_analysis()`. Changing a field/value selection invalidates the current browser mapping snapshot and forces a new audit before submission. Rows selected for neither side are outside that comparison.
+
+Automatic QC flags remain review prompts. Only explicit user-reviewed exclusions are applied to a new frozen analysis, and the resulting native `OutlierFilterSnapshot` is retained in the completed run/report provenance. A GMT library is also deliberate: folder ingest continues to skip GMT files; a user can add one with **Choose files…** and assign the singleton `pathway_gmt` role.
 
 ## Run the local web application
 
@@ -474,81 +483,35 @@ This limitation is explicit rather than pretending a native CPU-bound call was i
 
 ---
 
-## Scientific execution scope in Phase 3D
+## Scientific execution scope in Phase 3E.1
 
-### Mapping
+A new browser job requests `run_full_unified=true`. From the immutable snapshot the server rebuilds the native metadata table, `ProjectScan`, comparison, current mapping, corrected model, modality selection, reviewed QC exclusions, pathway configuration, and optional PBMC/confounding configuration, then calls the existing `run_unified_cohort_analysis()`.
 
-Every job rebuilds mapping from the frozen snapshot using the same native mapping code and persists a private `mapping_audit.json` artifact.
+Available native layers are selected from the frozen inputs:
 
-### Cross-modal/sample QC
+- corrected gene and transcript expression;
+- corrected BCR and TCR alpha/beta repertoire analyses;
+- BCR-isotype composition;
+- corrected immune-infiltrate analysis;
+- pathway ORA when merged gene expression plus an explicitly assigned GMT are present;
+- exploratory expression direction-concordance support;
+- PBMC/confounding diagnostics when enabled and usable;
+- robustness annotations and focused candidate prioritization.
 
-When requested, the worker selects the usable frozen QC representations and calls the existing:
+The existing unified run remains fault tolerant: an individual modality error is reported in the unified result instead of being replaced with a browser-specific fallback calculation. Older persisted Phase-3D records remain readable and continue to display their representative-gene payload.
 
-```rust
-run_cross_modal_outlier_qc(...)
-```
-
-with `OutlierConfig::default()`.
-
-Available representations can include merged gene/transcript tables and assigned BCR/BCR-isotype/TCR/immune workbooks. If the frozen project cannot form a usable QC representation, the job records a warning rather than fabricating a QC result.
-
-A `qc_summary.json` artifact is persisted when QC succeeds.
-
-### Representative corrected gene-expression lane
-
-This is the only corrected inferential lane connected in Phase 3D.
-
-Requirements:
-
-- an object explicitly assigned `merged_gene_expression`;
-- a current valid mapping/comparison;
-- the merged TSV uses the same schema expected by native mode.
-
-The worker calls the existing native:
-
-```rust
-run_corrected_expression(
-    ...,
-    "Raw Count",
-    "Gene",
-    &CorrectedModelSpec::default(),
-    ...,
-)
-```
-
-with the optional requested subject column/covariates added to the model specification.
-
-The browser summary shows up to the top 50 results ordered by q value and then absolute group effect. The server persists **all** tested gene rows as:
+The completed job persists an authorization-protected unified summary and the native technical table tree. Both HTML exports are generated from that same completed `UnifiedCohortAnalysisRun`:
 
 ```text
-gene_corrected_results.tsv
+simplified_report.html
+full_report.html
 ```
 
-under an opaque private artifact ID.
-
-No new web-only count model, normalization, p-value, q-value, or QC algorithm was introduced.
-
-### Still intentionally not connected
-
-Phase 3D does not yet expose the complete unified remote analysis stack:
-
-- corrected transcript abundance / DTU;
-- complete BCR/TCR corrected repertoire output;
-- BCR-isotype corrected composition output;
-- immune corrected output;
-- pathway ORA;
-- PBMC/confounding diagnostics;
-- candidate prioritization/full unified result object;
-- simplified/full HTML report generation;
-- polished in-browser artifact download controls;
-- S3/MinIO;
-- user account/login system.
-
-The private authenticated artifact endpoint exists, but the browser currently presents artifact IDs/hashes rather than a finished download UX.
+Downloads use bearer-authenticated `fetch` followed by a temporary browser Blob URL. The recovery capability is therefore not placed in a report URL/query string. Terminal jobs can be deleted using the separate stored-job deletion endpoint; source uploads and the containing project are retained.
 
 ---
 
-## Phase-3D API health
+## Phase-3E API health
 
 ```bash
 curl -s http://127.0.0.1:8080/api/health
@@ -559,12 +522,16 @@ Expected capabilities include:
 ```json
 {
   "status": "ok",
-  "api_version": 6,
+  "api_version": 8,
   "upload_enabled": true,
   "mapping_enabled": true,
   "analysis_enabled": true,
   "persistent_jobs": true,
   "representative_gene_enabled": true,
+  "unified_analysis_enabled": true,
+  "metadata_profile_enabled": true,
+  "report_download_enabled": true,
+  "job_deletion_enabled": true,
   "batch_upload_enabled": true,
   "storage_backend": "local-filesystem",
   "max_concurrent_jobs": 1,
@@ -572,11 +539,11 @@ Expected capabilities include:
 }
 ```
 
-`analysis_enabled=true` means the **narrow Phase-3D server job lane** is available; it must not be interpreted as complete desktop/web analysis parity.
+`analysis_enabled=true` plus `unified_analysis_enabled=true` means the frozen unified native lane is available. `metadata_profile_enabled=true` means the browser can populate comparison controls directly from authenticated primary metadata. It does not imply production public-host hardening or S3/MinIO deployment.
 
 ---
 
-## Recommended Phase-3D validation sequence
+## Recommended Phase-3E.2 validation sequence
 
 Use harmless synthetic/non-patient data first.
 
@@ -705,6 +672,4 @@ For private patient data, a self-hosted server using a secure local/NAS path rem
 
 ## Next web milestone
 
-Do **not** immediately replace every native analysis path until Phase-3D parity has been validated locally.
-
-The next logical milestone is Phase 3E: expand the frozen job to the complete unified cohort-analysis result/report contract while continuing to call the existing native scientific functions. That phase should also add polished authenticated artifact downloads and decide how/when raw uploads can be deleted after a completed privacy-first run.
+After Phase 3E.2 is locally validated for metadata-selection parity in addition to scientific/report parity, the next infrastructure phase is an operator-managed S3/MinIO storage implementation behind the existing opaque storage contract plus HTTPS/reverse-proxy/deployment hardening. Do not introduce a login/account system merely for localhost development.

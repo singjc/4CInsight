@@ -1,9 +1,8 @@
 //! Browser-side transport-shaped state for the hosted 4C client.
 //!
-//! Phase 3D.2 connects private project lifecycle, bounded authenticated batch
-//! upload, native-like automatic role/sample assignment, mapping, and frozen job
-//! operations to `cfs-server`. Native QC and one representative corrected gene
-//! lane are enabled while the rest of the scientific stack remains disabled.
+//! Phase 3E.2 connects private project lifecycle, bounded authenticated batch
+//! upload, native-like automatic role/sample assignment, mapping, and frozen
+//! unified native analysis/report jobs to `cfs-server`.
 
 #[derive(Debug, Clone)]
 pub struct RemoteProjectSummary {
@@ -44,7 +43,7 @@ pub struct RemoteBackendCapabilities {
 }
 
 impl RemoteBackendCapabilities {
-    pub const PHASE3D: Self = Self {
+    pub const PHASE3E: Self = Self {
         project_lifecycle: true,
         upload: true,
         mapping: true,

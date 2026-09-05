@@ -14,12 +14,19 @@ use analysis_docs::{
     analysis_doc_section_header_matches, analysis_doc_section_matches, analysis_doc_sections,
     analysis_doc_subsection_matches,
 };
-use api::{HealthResponse, MappingAuditResponse, ObjectSummaryResponse, ProjectSummaryResponse};
+use api::{
+    HealthResponse, MappingAuditResponse, MetadataProfileResponse, ObjectSummaryResponse,
+    ProjectSummaryResponse,
+};
 use contract::{RemoteBackendCapabilities, RemoteProjectSummary};
 use eframe::egui;
 use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points};
 use futures_util::{StreamExt, stream};
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 use wasm_bindgen::{JsCast, closure::Closure, prelude::*};
 
 #[wasm_bindgen(start)]
@@ -112,6 +119,10 @@ struct RemoteApiState {
     objects: Vec<ObjectSummaryResponse>,
     assignment_roles: BTreeMap<String, String>,
     assignment_sample_ids: BTreeMap<String, String>,
+    metadata_profile: Option<MetadataProfileResponse>,
+    comparison_field: String,
+    case_values: BTreeSet<String>,
+    control_values: BTreeSet<String>,
     mapping_audit: Option<MappingAuditResponse>,
     selected_upload_count: usize,
     selected_upload_total_size: u64,
@@ -123,6 +134,15 @@ struct RemoteApiState {
     show_all_uploaded_objects: bool,
     analysis_subject_column: String,
     analysis_covariates: String,
+    analysis_batch_column: String,
+    analysis_family_column: String,
+    analysis_sensitivity_column: String,
+    analysis_run_exploratory: bool,
+    analysis_run_pbmc_diagnostics: bool,
+    analysis_pathway_q_threshold: f64,
+    analysis_pathway_effect_threshold: f64,
+    reviewed_exclusions: BTreeSet<String>,
+    job_delete_armed: Option<String>,
     jobs: Vec<api::JobSummaryResponse>,
     active_job: Option<api::JobDetailResponse>,
 }
@@ -144,6 +164,10 @@ impl Default for RemoteApiState {
             objects: Vec::new(),
             assignment_roles: BTreeMap::new(),
             assignment_sample_ids: BTreeMap::new(),
+            metadata_profile: None,
+            comparison_field: String::new(),
+            case_values: BTreeSet::new(),
+            control_values: BTreeSet::new(),
             mapping_audit: None,
             selected_upload_count: 0,
             selected_upload_total_size: 0,
@@ -155,6 +179,15 @@ impl Default for RemoteApiState {
             show_all_uploaded_objects: false,
             analysis_subject_column: String::new(),
             analysis_covariates: String::new(),
+            analysis_batch_column: String::new(),
+            analysis_family_column: String::new(),
+            analysis_sensitivity_column: String::new(),
+            analysis_run_exploratory: true,
+            analysis_run_pbmc_diagnostics: true,
+            analysis_pathway_q_threshold: 0.05,
+            analysis_pathway_effect_threshold: 0.5,
+            reviewed_exclusions: BTreeSet::new(),
+            job_delete_armed: None,
             jobs: Vec::new(),
             active_job: None,
         }
@@ -165,9 +198,6 @@ struct WebShellApp {
     tab: WebTab,
     docs_query: String,
     metadata_rows: Vec<MetadataDraftRow>,
-    comparison_field: String,
-    case_values: String,
-    control_values: String,
     remote: Rc<RefCell<RemoteApiState>>,
     pending_uploads: Rc<RefCell<Vec<web_sys::File>>>,
     capabilities: RemoteBackendCapabilities,
@@ -198,12 +228,9 @@ impl WebShellApp {
                     notes: "Illustrative browser-only draft row".to_string(),
                 },
             ],
-            comparison_field: "analysis_group".to_string(),
-            case_values: "Case".to_string(),
-            control_values: "Control".to_string(),
             remote,
             pending_uploads: Rc::new(RefCell::new(Vec::new())),
-            capabilities: RemoteBackendCapabilities::PHASE3D,
+            capabilities: RemoteBackendCapabilities::PHASE3E,
         };
         app.refresh_health(cc.egui_ctx.clone());
         app
@@ -270,9 +297,11 @@ impl WebShellApp {
                     state.objects.clear();
                     state.assignment_roles.clear();
                     state.assignment_sample_ids.clear();
+                    clear_metadata_profile_state(&mut state);
                     state.mapping_audit = None;
                     state.jobs.clear();
                     state.active_job = None;
+                    state.reviewed_exclusions.clear();
                     state.selected_upload_count = 0;
                     state.selected_upload_total_size = 0;
                     state.selected_upload_skipped_count = 0;
@@ -322,6 +351,16 @@ impl WebShellApp {
                 Ok(_) => Some(api::list_jobs(&project_id, &token).await),
                 Err(_) => None,
             };
+            let metadata_profile_result = match &objects_result {
+                Some(Ok(objects))
+                    if objects
+                        .iter()
+                        .any(|object| object.role == "primary_metadata") =>
+                {
+                    Some(api::metadata_profile(&project_id, &token).await)
+                }
+                _ => None,
+            };
             let mut state = remote.borrow_mut();
             state.busy = false;
             match project_result {
@@ -339,12 +378,23 @@ impl WebShellApp {
                         Some(Err(error)) => state.last_error = Some(error),
                         None => {}
                     }
+                    match metadata_profile_result {
+                        Some(Ok(profile)) => apply_metadata_profile(&mut state, profile),
+                        Some(Err(error)) => {
+                            clear_metadata_profile_state(&mut state);
+                            state.last_error = Some(format!(
+                                "Project recovered, but primary metadata fields could not be loaded: {error}"
+                            ));
+                        }
+                        None => clear_metadata_profile_state(&mut state),
+                    }
                     match jobs_result {
                         Some(Ok(jobs)) => state.jobs = jobs,
                         Some(Err(error)) => state.last_error = Some(error),
                         None => {}
                     }
                     state.active_job = None;
+                    state.reviewed_exclusions.clear();
                 }
                 Err(error) => {
                     state.status_message = "Project recovery failed".to_string();
@@ -395,9 +445,11 @@ impl WebShellApp {
                     state.objects.clear();
                     state.assignment_roles.clear();
                     state.assignment_sample_ids.clear();
+                    clear_metadata_profile_state(&mut state);
                     state.mapping_audit = None;
                     state.jobs.clear();
                     state.active_job = None;
+                    state.reviewed_exclusions.clear();
                     state.selected_upload_count = 0;
                     state.selected_upload_total_size = 0;
                     state.selected_upload_skipped_count = 0;
@@ -685,6 +737,7 @@ impl WebShellApp {
             }
             state.mapping_audit = None;
             state.active_job = None;
+            state.reviewed_exclusions.clear();
             if failed_files.is_empty() {
                 state.selected_upload_count = 0;
                 state.selected_upload_total_size = 0;
@@ -738,7 +791,7 @@ impl WebShellApp {
 
     fn delete_remote_object(&self, object_id: String, ctx: egui::Context) {
         let remote = self.remote.clone();
-        let (project_id, token) = {
+        let (project_id, token, was_primary_metadata) = {
             let mut state = remote.borrow_mut();
             if state.busy {
                 return;
@@ -754,7 +807,11 @@ impl WebShellApp {
             state.busy = true;
             state.last_error = None;
             state.status_message = format!("Deleting uploaded object {object_id}…");
-            (project_id, token)
+            let was_primary_metadata = state
+                .objects
+                .iter()
+                .any(|object| object.object_id == object_id && object.role == "primary_metadata");
+            (project_id, token, was_primary_metadata)
         };
         wasm_bindgen_futures::spawn_local(async move {
             let result = api::delete_object(&project_id, &token, &object_id).await;
@@ -768,6 +825,9 @@ impl WebShellApp {
                         .retain(|item| item.object_id != deleted.object_id);
                     state.assignment_roles.remove(&deleted.object_id);
                     state.assignment_sample_ids.remove(&deleted.object_id);
+                    if was_primary_metadata {
+                        clear_metadata_profile_state(&mut state);
+                    }
                     state.mapping_audit = None;
                     state.status_message = "Uploaded object deleted".to_string();
                     state.last_error = None;
@@ -787,7 +847,7 @@ impl WebShellApp {
 
     fn save_object_assignment(&self, object_id: String, ctx: egui::Context) {
         let remote = self.remote.clone();
-        let (project_id, token, role, sample_id) = {
+        let (project_id, token, role, sample_id, was_primary_metadata) = {
             let mut state = remote.borrow_mut();
             if state.busy {
                 return;
@@ -813,11 +873,20 @@ impl WebShellApp {
             state.busy = true;
             state.last_error = None;
             state.status_message = "Saving uploaded-object role assignment…".to_string();
-            (project_id, token, role, sample_id)
+            let was_primary_metadata = state
+                .objects
+                .iter()
+                .any(|object| object.object_id == object_id && object.role == "primary_metadata");
+            (project_id, token, role, sample_id, was_primary_metadata)
         };
         wasm_bindgen_futures::spawn_local(async move {
             let result =
                 api::assign_object(&project_id, &token, &object_id, &role, sample_id).await;
+            let profile_result = if result.is_ok() && role == "primary_metadata" {
+                Some(api::metadata_profile(&project_id, &token).await)
+            } else {
+                None
+            };
             let mut state = remote.borrow_mut();
             state.busy = false;
             match result {
@@ -830,9 +899,22 @@ impl WebShellApp {
                         *existing = assigned.object;
                     }
                     sync_assignment_drafts(&mut state);
+                    if role == "primary_metadata" {
+                        match profile_result {
+                            Some(Ok(profile)) => apply_metadata_profile(&mut state, profile),
+                            Some(Err(error)) => {
+                                clear_metadata_profile_state(&mut state);
+                                state.last_error = Some(format!(
+                                    "Primary metadata was assigned, but its fields could not be loaded: {error}"
+                                ));
+                            }
+                            None => {}
+                        }
+                    } else if was_primary_metadata {
+                        clear_metadata_profile_state(&mut state);
+                    }
                     state.mapping_audit = None;
                     state.status_message = "Input role assignment saved".to_string();
-                    state.last_error = None;
                 }
                 Err(error) => {
                     state.status_message = "Input role assignment failed".to_string();
@@ -876,6 +958,7 @@ impl WebShellApp {
                     sync_assignment_drafts(&mut state);
                     state.mapping_audit = None;
                     state.active_job = None;
+                    state.reviewed_exclusions.clear();
                     state.status_message = format!(
                         "Native auto-detection assigned {} object(s) · {} already assigned · {} failed validation · {} unresolved",
                         response.assigned,
@@ -899,12 +982,63 @@ impl WebShellApp {
         });
     }
 
+    fn refresh_remote_metadata_profile(&self, ctx: egui::Context) {
+        let remote = self.remote.clone();
+        let (project_id, token) = {
+            let mut state = remote.borrow_mut();
+            if state.busy {
+                return;
+            }
+            let project_id = state.recovery_project_id.trim().to_string();
+            let token = state.recovery_token.trim().to_string();
+            if project_id.is_empty() || token.is_empty() {
+                state.last_error = Some(
+                    "Project credentials are required to load primary metadata fields.".to_string(),
+                );
+                return;
+            }
+            if !state
+                .objects
+                .iter()
+                .any(|object| object.role == "primary_metadata")
+            {
+                state.last_error = Some(
+                    "Assign exactly one uploaded object as Primary metadata first.".to_string(),
+                );
+                return;
+            }
+            state.busy = true;
+            state.last_error = None;
+            state.status_message = "Loading categorical fields from primary metadata…".to_string();
+            (project_id, token)
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = api::metadata_profile(&project_id, &token).await;
+            let mut state = remote.borrow_mut();
+            state.busy = false;
+            match result {
+                Ok(profile) => {
+                    apply_metadata_profile(&mut state, profile);
+                    state.mapping_audit = None;
+                    state.status_message =
+                        "Primary metadata fields loaded for comparison selection".to_string();
+                    state.last_error = None;
+                }
+                Err(error) => {
+                    clear_metadata_profile_state(&mut state);
+                    state.mapping_audit = None;
+                    state.status_message = "Primary metadata profiling failed".to_string();
+                    state.last_error = Some(error);
+                }
+            }
+            drop(state);
+            ctx.request_repaint();
+        });
+    }
+
     fn run_remote_mapping_audit(&self, ctx: egui::Context) {
         let remote = self.remote.clone();
-        let comparison_column = self.comparison_field.trim().to_string();
-        let case_values = split_comparison_values(&self.case_values);
-        let control_values = split_comparison_values(&self.control_values);
-        let (project_id, token) = {
+        let (project_id, token, comparison_column, case_values, control_values) = {
             let mut state = remote.borrow_mut();
             if state.busy {
                 return;
@@ -916,20 +1050,32 @@ impl WebShellApp {
                     Some("Project credentials are required to run the mapping audit.".to_string());
                 return;
             }
+            let comparison_column = state.comparison_field.trim().to_string();
+            let case_values = state.case_values.iter().cloned().collect::<Vec<_>>();
+            let control_values = state.control_values.iter().cloned().collect::<Vec<_>>();
+            if comparison_column.is_empty() || case_values.is_empty() || control_values.is_empty() {
+                state.last_error = Some(
+                    "Select a metadata grouping field plus at least one Case and one Control value before running the mapping audit."
+                        .to_string(),
+                );
+                return;
+            }
             state.busy = true;
             state.last_error = None;
             state.status_message = "Running native server-side sample mapping audit…".to_string();
-            (project_id, token)
+            (
+                project_id,
+                token,
+                comparison_column,
+                case_values,
+                control_values,
+            )
         };
         wasm_bindgen_futures::spawn_local(async move {
             let result = api::run_mapping_audit(
                 &project_id,
                 &token,
-                if comparison_column.is_empty() {
-                    None
-                } else {
-                    Some(comparison_column)
-                },
+                Some(comparison_column),
                 case_values,
                 control_values,
             )
@@ -955,16 +1101,33 @@ impl WebShellApp {
 
     fn submit_remote_job(&self, ctx: egui::Context) {
         let remote = self.remote.clone();
-        let comparison_column = self.comparison_field.trim().to_string();
-        let case_values = split_comparison_values(&self.case_values);
-        let control_values = split_comparison_values(&self.control_values);
-        let (project_id, token, mapping_snapshot_sha256, subject_column, covariates) = {
+        let (
+            project_id,
+            token,
+            mapping_snapshot_sha256,
+            comparison_column,
+            case_values,
+            control_values,
+            subject_column,
+            covariates,
+            excluded_sample_ids,
+            run_exploratory_direction_check,
+            run_pbmc_diagnostics,
+            pbmc_batch_column,
+            pbmc_family_column,
+            pbmc_sensitivity_column,
+            pathway_q_threshold,
+            pathway_effect_threshold,
+        ) = {
             let mut state = remote.borrow_mut();
             if state.busy {
                 return;
             }
             let project_id = state.recovery_project_id.trim().to_string();
             let token = state.recovery_token.trim().to_string();
+            let comparison_column = state.comparison_field.trim().to_string();
+            let case_values = state.case_values.iter().cloned().collect::<Vec<_>>();
+            let control_values = state.control_values.iter().cloned().collect::<Vec<_>>();
             let mapping_snapshot_sha256 = match state.mapping_audit.as_ref() {
                 Some(mapping) => mapping.mapping_snapshot_sha256.clone(),
                 None => {
@@ -986,7 +1149,7 @@ impl WebShellApp {
                 );
                 return;
             }
-            let subject_column = state.analysis_subject_column.trim().to_string();
+            let subject_column = optional_trimmed(&state.analysis_subject_column);
             let covariates = state
                 .analysis_covariates
                 .split(',')
@@ -994,21 +1157,40 @@ impl WebShellApp {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
                 .collect::<Vec<_>>();
+            let excluded_sample_ids = state
+                .reviewed_exclusions
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let run_exploratory_direction_check = state.analysis_run_exploratory;
+            let run_pbmc_diagnostics = state.analysis_run_pbmc_diagnostics;
+            let pbmc_batch_column = optional_trimmed(&state.analysis_batch_column);
+            let pbmc_family_column = optional_trimmed(&state.analysis_family_column);
+            let pbmc_sensitivity_column = optional_trimmed(&state.analysis_sensitivity_column);
+            let pathway_q_threshold = state.analysis_pathway_q_threshold;
+            let pathway_effect_threshold = state.analysis_pathway_effect_threshold;
             state.busy = true;
             state.last_error = None;
             state.status_message =
-                "Freezing the validated project snapshot and submitting a local analysis job…"
+                "Freezing the validated project state and submitting the unified native analysis…"
                     .to_string();
             (
                 project_id,
                 token,
                 mapping_snapshot_sha256,
-                if subject_column.is_empty() {
-                    None
-                } else {
-                    Some(subject_column)
-                },
+                comparison_column,
+                case_values,
+                control_values,
+                subject_column,
                 covariates,
+                excluded_sample_ids,
+                run_exploratory_direction_check,
+                run_pbmc_diagnostics,
+                pbmc_batch_column,
+                pbmc_family_column,
+                pbmc_sensitivity_column,
+                pathway_q_threshold,
+                pathway_effect_threshold,
             )
         };
         wasm_bindgen_futures::spawn_local(async move {
@@ -1021,6 +1203,15 @@ impl WebShellApp {
                 covariates,
                 run_qc: true,
                 run_gene_corrected: true,
+                run_full_unified: true,
+                excluded_sample_ids,
+                run_exploratory_direction_check,
+                run_pbmc_diagnostics,
+                pbmc_batch_column,
+                pbmc_family_column,
+                pbmc_sensitivity_column,
+                pathway_q_threshold,
+                pathway_effect_threshold,
             };
             let result = api::submit_job(&project_id, &token, request).await;
             let mut poll_job_id = None;
@@ -1032,11 +1223,12 @@ impl WebShellApp {
                         poll_job_id = Some(job.summary.job_id.clone());
                         state.active_job = Some(job);
                         state.status_message =
-                            "Phase-3D job submitted; polling local worker status…".to_string();
+                            "Phase-3E unified job submitted; polling the local native worker…"
+                                .to_string();
                         state.last_error = None;
                     }
                     Err(error) => {
-                        state.status_message = "Job submission failed".to_string();
+                        state.status_message = "Unified job submission failed".to_string();
                         state.last_error = Some(error);
                     }
                 }
@@ -1098,7 +1290,14 @@ impl WebShellApp {
                         job.summary.status.as_str(),
                         "complete" | "failed" | "cancelled"
                     );
-                    remote.borrow_mut().active_job = Some(job);
+                    {
+                        let mut state = remote.borrow_mut();
+                        state.status_message = format!(
+                            "Opened persisted job {job_id}; its results are shown in the Frozen unified analysis section."
+                        );
+                        state.active_job = Some(job);
+                        state.last_error = None;
+                    }
                     ctx.request_repaint();
                     if !terminal {
                         poll_remote_job(remote, ctx, project_id, token, job_id).await;
@@ -1143,10 +1342,104 @@ impl WebShellApp {
         });
     }
 
+    fn delete_stored_remote_job(&self, job_id: String, ctx: egui::Context) {
+        let remote = self.remote.clone();
+        let (project_id, token) = {
+            let state = remote.borrow();
+            (
+                state.recovery_project_id.trim().to_string(),
+                state.recovery_token.trim().to_string(),
+            )
+        };
+        if project_id.is_empty() || token.is_empty() {
+            self.remote.borrow_mut().last_error =
+                Some("Project credentials are required to delete a persisted job.".to_string());
+            return;
+        }
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = api::delete_stored_job(&project_id, &token, &job_id).await;
+            let mut state = remote.borrow_mut();
+            match result {
+                Ok(deleted) => {
+                    state.project = remote_project_from_response(&deleted.project);
+                    state.jobs.retain(|job| job.job_id != deleted.job_id);
+                    if state
+                        .active_job
+                        .as_ref()
+                        .is_some_and(|job| job.summary.job_id == deleted.job_id)
+                    {
+                        state.active_job = None;
+                        state.reviewed_exclusions.clear();
+                    }
+                    state.job_delete_armed = None;
+                    state.status_message = if deleted.deleted {
+                        format!(
+                            "Deleted persisted job {} and its frozen inputs/artifacts",
+                            deleted.job_id
+                        )
+                    } else {
+                        format!("Persisted job {} was already absent", deleted.job_id)
+                    };
+                    state.last_error = None;
+                }
+                Err(error) => {
+                    state.job_delete_armed = None;
+                    state.last_error = Some(error);
+                }
+            }
+            drop(state);
+            ctx.request_repaint();
+        });
+    }
+
+    fn download_remote_artifact(
+        &self,
+        job_id: String,
+        artifact_id: String,
+        filename: String,
+        ctx: egui::Context,
+    ) {
+        let remote = self.remote.clone();
+        let (project_id, token) = {
+            let state = remote.borrow();
+            (
+                state.recovery_project_id.trim().to_string(),
+                state.recovery_token.trim().to_string(),
+            )
+        };
+        if project_id.is_empty() || token.is_empty() {
+            self.remote.borrow_mut().last_error =
+                Some("Project credentials are required to download job artifacts.".to_string());
+            return;
+        }
+        {
+            let mut state = remote.borrow_mut();
+            state.status_message = format!("Downloading {filename}…");
+            state.last_error = None;
+        }
+        wasm_bindgen_futures::spawn_local(async move {
+            let result =
+                api::download_job_artifact(&project_id, &token, &job_id, &artifact_id).await;
+            let mut state = remote.borrow_mut();
+            match result {
+                Ok(bytes) => match save_browser_download(&filename, &bytes) {
+                    Ok(()) => {
+                        state.status_message = format!("Downloaded {filename}");
+                        state.last_error = None;
+                    }
+                    Err(error) => state.last_error = Some(error),
+                },
+                Err(error) => state.last_error = Some(error),
+            }
+            drop(state);
+            ctx.request_repaint();
+        });
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.remote.borrow().clone();
         let connected = snapshot.health.is_some();
-        let phase_label = "Web · Phase 3D.2";
+        let phase_label = "Web · Phase 3E.2";
         let server_label = if connected {
             "Local server connected"
         } else {
@@ -1200,7 +1493,7 @@ impl WebShellApp {
     fn overview(&mut self, ui: &mut egui::Ui) {
         ui.heading("Browser client + local Rust server");
         ui.label(
-            "Phase 3D.2 adds native-like high-throughput ingest on top of the same-origin cfs-server: folder scans skip auxiliary files, standard 4C filenames auto-assign roles/sample IDs, and bounded concurrent uploads feed the existing native mapping/QC/job path.",
+            "Phase 3E.2 keeps the validated native-like high-throughput ingest path and extends frozen server jobs to the existing native unified multi-modal cohort analysis, reviewed QC exclusions, technical tables, and simplified/full report artifacts.",
         );
         ui.add_space(10.0);
 
@@ -1259,7 +1552,7 @@ impl WebShellApp {
             .inner_margin(12)
             .corner_radius(8)
             .show(ui, |ui| {
-            ui.label(egui::RichText::new("What works in Phase 3D.2").strong());
+            ui.label(egui::RichText::new("What works in Phase 3E.2").strong());
             for item in [
                 "One Rust cfs-server serves both web/dist and /api from 127.0.0.1:8080 by default.",
                 "A private temporary project can be created with an opaque UUID and independent recovery token.",
@@ -1270,7 +1563,9 @@ impl WebShellApp {
                 "Every uploaded object can be assigned an explicit 4C input role; sample-level modalities also require an explicit sample ID.",
                 "Primary metadata is parsed server-side with the existing native loader and the existing native sample mapping audit can be run from the browser.",
                 "A current validated mapping fingerprint can be frozen into a persistent asynchronous job; later upload/assignment changes cannot silently alter that job snapshot.",
-                "Phase 3D jobs reuse the native cross-modal QC engine and can run one representative corrected gene-expression lane from an explicitly assigned merged gene-expression TSV.",
+                "Frozen Phase 3E jobs reuse the native cross-modal QC engine, preserve reviewed exclusions, and execute every available corrected native modality through the existing unified cohort-analysis function.",
+                "The same completed unified result renders authenticated simplified and full self-contained HTML reports plus the native technical table set.",
+                "Persisted terminal jobs can be deleted independently to remove their frozen inputs and private artifacts without deleting the whole project.",
                 "XLSX role assignment performs defensive ZIP/container checks before scientific parsing, including entry-count and expanded-size limits.",
                 "Persisted jobs survive browser reload/recovery; interrupted in-progress jobs are marked failed after a server restart rather than silently resumed.",
                 "Expired project directories are cleaned on startup and by an hourly cleanup task.",
@@ -1290,9 +1585,9 @@ impl WebShellApp {
             .show(ui, |ui| {
             ui.label(egui::RichText::new("Still intentionally disabled").strong());
             for item in [
-                "Running the full unified corrected transcript/BCR/TCR/isotype/immune/pathway stack through remote jobs; Phase 3D exposes only QC plus the representative corrected gene lane.",
-                "Full unified HTML report generation and polished browser artifact download controls (the authenticated artifact endpoint itself is available).",
+                "A public/LAN production deployment; localhost remains the safe development default until HTTPS/reverse-proxy hardening exists.",
                 "S3/MinIO storage or any user/account system.",
+                "Automatic promotion of arbitrary metadata/GMT files; cohort-defining metadata and pathway gene sets remain deliberate assignments.",
             ] {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("•");
@@ -1306,7 +1601,7 @@ impl WebShellApp {
         ui.heading(title);
         ui.add_space(6.0);
         ui.label(
-            "The browser now supports private objects, native mapping, and a narrow frozen-job scientific lane. Merge/export remains disabled until the full unified analysis/report contract is connected.",
+            "The browser now supports private objects, native mapping, frozen unified native analysis, and authenticated result/report downloads. This tab remains a lightweight shell until its dedicated native workflow is connected.",
         );
         ui.add_space(10.0);
         egui::Frame::group(ui.style())
@@ -1393,9 +1688,9 @@ impl WebShellApp {
     }
 
     fn cohort_shell(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Cohort Analysis — private remote-project shell");
+        ui.heading("Cohort Analysis — frozen native unified workflow");
         ui.label(
-            "Phase 3D.2 keeps explicit/manual role correction available but automatically recognizes the same standard 4C filenames as the native desktop scanner. Folder upload filters auxiliary files, bounded concurrency speeds large cohorts, and the existing native mapping/QC/frozen-job path remains the scientific validation gate.",
+            "Phase 3E.2 keeps the validated high-throughput ingest/mapping path and now executes the existing native unified multi-modal cohort-analysis workflow from a frozen server snapshot. Reviewed QC exclusions, corrected modalities, diagnostics, candidate prioritization, and both report styles remain tied to the same completed native result.",
         );
         ui.add_space(8.0);
 
@@ -1517,6 +1812,7 @@ impl WebShellApp {
                     state.mapping_audit = None;
                     state.jobs.clear();
                     state.active_job = None;
+                    state.reviewed_exclusions.clear();
                     state.selected_upload_count = 0;
                     state.selected_upload_total_size = 0;
                     state.selected_upload_skipped_count = 0;
@@ -1538,7 +1834,7 @@ impl WebShellApp {
             .show(ui, |ui| {
             ui.label(egui::RichText::new("3. Private uploaded objects").strong());
             ui.label(
-                "Phase 3D.2 stores uploaded bytes under opaque object UUIDs. Standard native 4C filenames can automatically seed role/sample-ID assignments after content validation; custom or ambiguous inputs remain unassigned for review. Filenames remain metadata only and never become storage keys or authorization credentials.",
+                "Uploaded bytes remain stored under opaque object UUIDs. Standard native 4C filenames can seed role/sample-ID assignments after content validation; custom or ambiguous inputs remain unassigned for review. Filenames remain metadata only and never become storage keys or authorization credentials.",
             );
             if let Some(health) = &snapshot.health {
                 ui.horizontal_wrapped(|ui| {
@@ -1683,7 +1979,7 @@ impl WebShellApp {
             );
             ui.label(
                 egui::RichText::new(
-                    "For Phase-3D validation, use harmless synthetic inputs first. Mapping, native QC, and the representative corrected gene-expression job lane are enabled; the rest of the corrected multi-omics stack remains disabled.",
+                    "For local validation, use harmless synthetic inputs first. Mapping, native QC review, the full frozen native unified analysis, report generation, authenticated downloads, and persisted-job cleanup are enabled. Public deployment hardening and S3/MinIO remain disabled.",
                 )
                 .small()
                 .weak(),
@@ -1833,39 +2129,258 @@ impl WebShellApp {
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("4. Server-side mapping audit").strong());
                 ui.label(
-                    "The server materializes the assigned primary metadata in private scratch space, parses it with the existing native metadata loader, constructs the native ProjectScan representation from explicit object roles/sample IDs, and runs the existing build_mapping() audit. A successful current audit becomes the gate for a frozen Phase-3D job.",
+                    "The server materializes the assigned primary metadata in private scratch space, parses it with the existing native metadata loader, constructs the native ProjectScan representation from explicit object roles/sample IDs, and runs the existing build_mapping() audit. A successful current audit becomes the gate for a frozen native unified job.",
                 );
                 ui.add_space(5.0);
-                ui.label(egui::RichText::new("Optional Case/Control count preview").strong());
-                egui::Grid::new("web_phase3c_mapping_comparison").show(ui, |ui| {
-                    ui.label("Metadata field");
-                    ui.text_edit_singleline(&mut self.comparison_field);
-                    ui.end_row();
-                    ui.label("Case value(s)");
-                    ui.text_edit_singleline(&mut self.case_values);
-                    ui.end_row();
-                    ui.label("Control value(s)");
-                    ui.text_edit_singleline(&mut self.control_values);
-                    ui.end_row();
-                });
+                ui.label(egui::RichText::new("Metadata-defined Case/Control comparison").strong());
                 ui.label(
                     egui::RichText::new(
-                        "Separate multiple values with commas. These values only preview cohort counts during mapping; they do not submit an analysis job.",
+                        "The grouping field and its categorical values are read directly from the assigned primary metadata. Select one or more disjoint values for Case and Control. Those exact selections are frozen into the job and define the cohorts used by all downstream corrected modality comparisons, supporting diagnostics, candidate prioritization, and both reports. Metadata rows assigned to neither side remain outside this comparison.",
                     )
-                    .small()
-                    .weak(),
+                    .small(),
                 );
+
+                let metadata_profile_enabled = snapshot
+                    .health
+                    .as_ref()
+                    .map(|health| health.metadata_profile_enabled)
+                    .unwrap_or(false);
+                let has_credentials = !snapshot.recovery_project_id.trim().is_empty()
+                    && !snapshot.recovery_token.trim().is_empty();
+                let has_primary_metadata = snapshot
+                    .objects
+                    .iter()
+                    .any(|object| object.role == "primary_metadata");
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(
+                            !snapshot.busy
+                                && metadata_profile_enabled
+                                && has_credentials
+                                && has_primary_metadata,
+                            egui::Button::new("Reload primary metadata fields"),
+                        )
+                        .clicked()
+                    {
+                        self.refresh_remote_metadata_profile(ui.ctx().clone());
+                    }
+                    if let Some(profile) = snapshot.metadata_profile.as_ref() {
+                        ui.label(format!(
+                            "{} metadata rows · ID column {} · {} columns",
+                            profile.metadata_rows,
+                            profile.metadata_id_column,
+                            profile.columns.len()
+                        ));
+                        ui.monospace(short_hash(&profile.metadata_sha256));
+                    } else if has_primary_metadata {
+                        ui.label(
+                            egui::RichText::new(
+                                "Primary metadata is assigned; load its fields to configure the comparison.",
+                            )
+                            .weak(),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new(
+                                "Assign exactly one uploaded object as Primary metadata first.",
+                            )
+                            .weak(),
+                        );
+                    }
+                });
+
+                if let Some(profile) = snapshot.metadata_profile.as_ref() {
+                    if !profile.validation_errors.is_empty() || !profile.validation_warnings.is_empty() {
+                        egui::CollapsingHeader::new(format!(
+                            "Metadata validation notes ({} error(s), {} warning(s))",
+                            profile.validation_errors.len(),
+                            profile.validation_warnings.len()
+                        ))
+                        .show(ui, |ui| {
+                            for error in &profile.validation_errors {
+                                ui.label(
+                                    egui::RichText::new(format!("Error: {error}"))
+                                        .color(egui::Color32::LIGHT_RED),
+                                );
+                            }
+                            for warning in &profile.validation_warnings {
+                                ui.label(format!("Warning: {warning}"));
+                            }
+                        });
+                    }
+
+                    let candidate_columns = profile
+                        .columns
+                        .iter()
+                        .filter(|column| {
+                            column.name.as_str() != profile.metadata_id_column.as_str()
+                                && column.distinct_nonempty_values >= 2
+                        })
+                        .collect::<Vec<_>>();
+                    let mut selected_column = snapshot.comparison_field.clone();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Grouping field");
+                        egui::ComboBox::from_id_salt("web_metadata_comparison_column")
+                            .selected_text(if selected_column.is_empty() {
+                                "(choose metadata field)".to_string()
+                            } else {
+                                selected_column.clone()
+                            })
+                            .width(300.0)
+                            .show_ui(ui, |ui| {
+                                for column in &candidate_columns {
+                                    let label = if column.comparison_ready {
+                                        format!(
+                                            "{} ({} values)",
+                                            column.name, column.distinct_nonempty_values
+                                        )
+                                    } else {
+                                        format!(
+                                            "{} ({} values; high-cardinality)",
+                                            column.name, column.distinct_nonempty_values
+                                        )
+                                    };
+                                    ui.selectable_value(
+                                        &mut selected_column,
+                                        column.name.clone(),
+                                        label,
+                                    );
+                                }
+                            });
+                        if let Some(suggested) = profile.suggested_comparison_column.as_deref() {
+                            ui.label(
+                                egui::RichText::new(format!("Suggested: {suggested}"))
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    });
+                    if selected_column != snapshot.comparison_field {
+                        let mut state = self.remote.borrow_mut();
+                        set_comparison_column(&mut state, selected_column.clone());
+                    }
+
+                    let (mut case_values, mut control_values) = {
+                        let state = self.remote.borrow();
+                        (state.case_values.clone(), state.control_values.clone())
+                    };
+                    if let Some(column) = profile
+                        .columns
+                        .iter()
+                        .find(|column| column.name == selected_column)
+                    {
+                        if column.values_truncated {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "This field has {} distinct non-empty values; only the first {} are exposed. Prefer a lower-cardinality categorical field for cohort comparison.",
+                                    column.distinct_nonempty_values,
+                                    column.values.len()
+                                ))
+                                .color(egui::Color32::LIGHT_RED),
+                            );
+                        }
+                        let mut selection_changed = false;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Case values");
+                            egui::ComboBox::from_id_salt("web_metadata_case_values")
+                                .selected_text(selection_label(&case_values))
+                                .width(280.0)
+                                .show_ui(ui, |ui| {
+                                    for item in &column.values {
+                                        let mut selected = case_values.contains(&item.value);
+                                        if ui
+                                            .checkbox(
+                                                &mut selected,
+                                                format!("{}  (n={})", item.value, item.count),
+                                            )
+                                            .changed()
+                                        {
+                                            selection_changed = true;
+                                            if selected {
+                                                case_values.insert(item.value.clone());
+                                                control_values.remove(&item.value);
+                                            } else {
+                                                case_values.remove(&item.value);
+                                            }
+                                        }
+                                    }
+                                });
+                            ui.label("Control values");
+                            egui::ComboBox::from_id_salt("web_metadata_control_values")
+                                .selected_text(selection_label(&control_values))
+                                .width(280.0)
+                                .show_ui(ui, |ui| {
+                                    for item in &column.values {
+                                        let mut selected = control_values.contains(&item.value);
+                                        if ui
+                                            .checkbox(
+                                                &mut selected,
+                                                format!("{}  (n={})", item.value, item.count),
+                                            )
+                                            .changed()
+                                        {
+                                            selection_changed = true;
+                                            if selected {
+                                                control_values.insert(item.value.clone());
+                                                case_values.remove(&item.value);
+                                            } else {
+                                                control_values.remove(&item.value);
+                                            }
+                                        }
+                                    }
+                                });
+                            if ui.small_button("Clear groups").clicked() {
+                                case_values.clear();
+                                control_values.clear();
+                                selection_changed = true;
+                            }
+                        });
+                        if selection_changed {
+                            let mut state = self.remote.borrow_mut();
+                            state.case_values = case_values.clone();
+                            state.control_values = control_values.clone();
+                            state.mapping_audit = None;
+                            state.status_message =
+                                "Comparison selection changed; rerun the mapping audit before analysis."
+                                    .to_string();
+                        }
+
+                        let case_rows = selected_metadata_rows(column, &case_values);
+                        let control_rows = selected_metadata_rows(column, &control_values);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Selected metadata rows: {case_rows} Case / {control_rows} Control · {} value(s) / {} value(s)",
+                                case_values.len(),
+                                control_values.len()
+                            ))
+                            .small(),
+                        );
+                        if case_values.is_empty() || control_values.is_empty() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Select at least one value for each group before validating the mapping.",
+                                )
+                                .color(egui::Color32::LIGHT_RED),
+                            );
+                        }
+                    }
+                }
+
                 let mapping_enabled = snapshot
                     .health
                     .as_ref()
                     .map(|health| health.mapping_enabled)
                     .unwrap_or(false);
-                let has_credentials = !snapshot.recovery_project_id.trim().is_empty()
-                    && !snapshot.recovery_token.trim().is_empty();
+                let comparison_ready = !snapshot.comparison_field.trim().is_empty()
+                    && !snapshot.case_values.is_empty()
+                    && !snapshot.control_values.is_empty();
                 if ui
                     .add_enabled(
-                        !snapshot.busy && mapping_enabled && has_credentials,
-                        egui::Button::new("Validate inputs & run mapping audit"),
+                        !snapshot.busy
+                            && mapping_enabled
+                            && has_credentials
+                            && comparison_ready,
+                        egui::Button::new("Validate comparison & run mapping audit"),
                     )
                     .clicked()
                 {
@@ -1977,14 +2492,14 @@ impl WebShellApp {
             .inner_margin(12)
             .corner_radius(8)
             .show(ui, |ui| {
-                ui.label(egui::RichText::new("5. Frozen Phase-3D analysis job").strong());
+                ui.label(egui::RichText::new("5. Frozen unified analysis job").strong());
                 ui.label(
-                    "A job freezes the currently validated object-role/sample-ID manifest before scientific execution. Later uploads, assignment changes, or object deletion do not silently change that frozen job snapshot. Phase 3D runs the native mapping/QC path and one representative corrected gene-expression lane only.",
+                    "Phase 3E freezes the validated opaque-object manifest and analysis configuration, reruns native cross-modal QC, applies only reviewed sample exclusions, and executes the existing native unified cohort-analysis workflow. Simplified and full HTML reports are rendered from that exact completed native result; the browser does not implement a second statistical engine.",
                 );
                 ui.add_space(5.0);
                 {
                     let mut state = self.remote.borrow_mut();
-                    egui::Grid::new("web_phase3d_job_settings").show(ui, |ui| {
+                    egui::Grid::new("web_phase3e_job_settings").show(ui, |ui| {
                         ui.label("Subject column (optional)");
                         ui.add_sized(
                             [260.0, 22.0],
@@ -1999,28 +2514,163 @@ impl WebShellApp {
                                 .hint_text("age, sex, batch"),
                         );
                         ui.end_row();
+                        ui.label("PBMC batch column (optional)");
+                        ui.add_sized(
+                            [260.0, 22.0],
+                            egui::TextEdit::singleline(&mut state.analysis_batch_column)
+                                .hint_text("batch"),
+                        );
+                        ui.end_row();
+                        ui.label("PBMC family column (optional)");
+                        ui.add_sized(
+                            [260.0, 22.0],
+                            egui::TextEdit::singleline(&mut state.analysis_family_column)
+                                .hint_text("family_id"),
+                        );
+                        ui.end_row();
+                        ui.label("PBMC sensitivity column (optional)");
+                        ui.add_sized(
+                            [260.0, 22.0],
+                            egui::TextEdit::singleline(&mut state.analysis_sensitivity_column)
+                                .hint_text("sensitivity_group"),
+                        );
+                        ui.end_row();
+                        ui.label("Pathway foreground");
+                        ui.horizontal(|ui| {
+                            ui.label("BH q ≤");
+                            ui.add(
+                                egui::DragValue::new(&mut state.analysis_pathway_q_threshold)
+                                    .range(0.001..=0.25)
+                                    .speed(0.005),
+                            );
+                            ui.label("|adjusted log2FC| ≥");
+                            ui.add(
+                                egui::DragValue::new(&mut state.analysis_pathway_effect_threshold)
+                                    .range(0.0..=5.0)
+                                    .speed(0.1),
+                            );
+                        });
+                        ui.end_row();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(
+                            &mut state.analysis_run_exploratory,
+                            "Supporting expression direction-concordance checks",
+                        );
+                        ui.checkbox(
+                            &mut state.analysis_run_pbmc_diagnostics,
+                            "PBMC / confounding diagnostics",
+                        );
                     });
                 }
                 ui.label(
                     egui::RichText::new(
-                        "QC uses every frozen assigned modality that can produce an existing native QC representation. The corrected gene lane requires an object assigned as Merged gene-expression TSV; otherwise the job still completes with mapping/QC and records a warning.",
+                        "All frozen corrected modalities that are actually available are selected automatically. Pathway ORA is enabled only when both a merged gene-expression table and a deliberately assigned Pathway GMT object are present. Standard folder ingest still skips GMT files; add one with Choose files… and assign its role explicitly.",
                     )
                     .small()
                     .weak(),
                 );
+
+                if let Some(qc) = snapshot
+                    .active_job
+                    .as_ref()
+                    .and_then(|job| job.result.as_ref())
+                    .and_then(|result| result.qc.as_ref())
+                {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("Reviewed QC exclusions for the next run").strong());
+                    ui.label(
+                        egui::RichText::new(
+                            "QC flags are review prompts, not automatic deletions. Check only samples you want excluded from the next frozen unified run. The server reruns QC on the new frozen snapshot and preserves the audit plus these manual overrides in the completed result/report.",
+                        )
+                        .small(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Use consensus flags as reviewed exclusions").clicked() {
+                            self.remote.borrow_mut().reviewed_exclusions =
+                                qc.consensus_ids.iter().cloned().collect();
+                        }
+                        if ui.button("Clear reviewed exclusions").clicked() {
+                            self.remote.borrow_mut().reviewed_exclusions.clear();
+                        }
+                        ui.label(format!(
+                            "{} reviewed exclusion(s)",
+                            snapshot.reviewed_exclusions.len()
+                        ));
+                    });
+                    if !qc.flagged_samples.is_empty() {
+                        egui::CollapsingHeader::new(format!(
+                            "Review flagged samples ({})",
+                            qc.flagged_samples.len()
+                        ))
+                        .show(ui, |ui| {
+                            egui::Grid::new("web_phase3e_qc_review")
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for heading in [
+                                        "Exclude",
+                                        "Sample",
+                                        "Group",
+                                        "Flagged modalities",
+                                        "Consensus",
+                                    ] {
+                                        ui.label(egui::RichText::new(heading).strong());
+                                    }
+                                    ui.end_row();
+                                    for sample in &qc.flagged_samples {
+                                        let mut excluded = snapshot
+                                            .reviewed_exclusions
+                                            .contains(&sample.sample_id);
+                                        if ui.checkbox(&mut excluded, "").changed() {
+                                            let mut state = self.remote.borrow_mut();
+                                            if excluded {
+                                                state
+                                                    .reviewed_exclusions
+                                                    .insert(sample.sample_id.clone());
+                                            } else {
+                                                state.reviewed_exclusions.remove(&sample.sample_id);
+                                            }
+                                        }
+                                        ui.monospace(&sample.sample_id);
+                                        ui.label(&sample.group);
+                                        ui.label(if sample.flagged_names.is_empty() {
+                                            sample.flagged_modalities.to_string()
+                                        } else {
+                                            sample.flagged_names.join(", ")
+                                        });
+                                        ui.label(if sample.consensus_flag { "yes" } else { "no" });
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    }
+                } else if !snapshot.reviewed_exclusions.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Reviewed exclusions are currently populated but no active QC result is visible. Open the QC job they came from and verify them before submitting another unified run.",
+                        )
+                        .color(egui::Color32::LIGHT_RED),
+                    );
+                }
+
                 let job_enabled = snapshot
                     .health
                     .as_ref()
-                    .map(|health| health.analysis_enabled && health.persistent_jobs)
+                    .map(|health| {
+                        health.analysis_enabled
+                            && health.persistent_jobs
+                            && health.unified_analysis_enabled
+                    })
                     .unwrap_or(false);
                 let has_credentials = !snapshot.recovery_project_id.trim().is_empty()
                     && !snapshot.recovery_token.trim().is_empty();
                 let current_mapping = snapshot.mapping_audit.is_some();
+                ui.add_space(5.0);
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(
                             !snapshot.busy && job_enabled && has_credentials && current_mapping,
-                            egui::Button::new("Freeze snapshot & submit QC/gene job"),
+                            egui::Button::new("Freeze snapshot & run unified analysis"),
                         )
                         .clicked()
                     {
@@ -2032,10 +2682,12 @@ impl WebShellApp {
                     {
                         self.refresh_remote_jobs(ui.ctx().clone());
                     }
-                    let can_cancel = snapshot
-                        .active_job
-                        .as_ref()
-                        .is_some_and(|job| !matches!(job.summary.status.as_str(), "complete" | "failed" | "cancelled"));
+                    let can_cancel = snapshot.active_job.as_ref().is_some_and(|job| {
+                        !matches!(
+                            job.summary.status.as_str(),
+                            "complete" | "failed" | "cancelled"
+                        )
+                    });
                     if ui
                         .add_enabled(can_cancel, egui::Button::new("Request cancellation"))
                         .clicked()
@@ -2044,30 +2696,93 @@ impl WebShellApp {
                     }
                 });
 
-                if let Some(job) = snapshot.active_job.as_ref() {
+                if !snapshot.jobs.is_empty() {
                     ui.add_space(8.0);
-                    egui::Grid::new("web_phase3d_active_job").striped(true).show(ui, |ui| {
-                        for (label, value) in [
-                            ("Job ID", job.summary.job_id.clone()),
-                            ("Status", job.summary.status.clone()),
-                            ("Progress", job.summary.progress_message.clone()),
-                            ("Snapshot SHA-256", job.summary.snapshot_sha256.clone()),
-                        ] {
-                            ui.label(label);
-                            if label.contains("ID") || label.contains("SHA") {
-                                ui.monospace(value);
-                            } else {
-                                ui.label(value);
-                            }
-                            ui.end_row();
-                        }
+                    egui::CollapsingHeader::new(format!(
+                        "Recent persisted jobs ({})",
+                        snapshot.jobs.len()
+                    ))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        egui::Grid::new("web_phase3e_job_history")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("Job ID").strong());
+                                ui.label(egui::RichText::new("Status").strong());
+                                ui.label(egui::RichText::new("Progress").strong());
+                                ui.label(egui::RichText::new("Actions").strong());
+                                ui.end_row();
+                                for job in &snapshot.jobs {
+                                    ui.monospace(&job.job_id);
+                                    ui.label(&job.status);
+                                    ui.label(&job.progress_message);
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Open results").clicked() {
+                                            self.open_remote_job(
+                                                job.job_id.clone(),
+                                                ui.ctx().clone(),
+                                            );
+                                        }
+                                        let terminal = matches!(
+                                            job.status.as_str(),
+                                            "complete" | "failed" | "cancelled"
+                                        );
+                                        if terminal {
+                                            let armed = snapshot
+                                                .job_delete_armed
+                                                .as_deref()
+                                                == Some(job.job_id.as_str());
+                                            let label = if armed {
+                                                "Confirm delete"
+                                            } else {
+                                                "Delete stored job"
+                                            };
+                                            if ui.small_button(label).clicked() {
+                                                if armed {
+                                                    self.delete_stored_remote_job(
+                                                        job.job_id.clone(),
+                                                        ui.ctx().clone(),
+                                                    );
+                                                } else {
+                                                    self.remote.borrow_mut().job_delete_armed =
+                                                        Some(job.job_id.clone());
+                                                }
+                                            }
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+                            });
                     });
+                }
+
+                if let Some(job) = snapshot.active_job.as_ref() {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.label(egui::RichText::new("Opened job results").heading());
+                    egui::Grid::new("web_phase3e_active_job")
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (label, value) in [
+                                ("Job ID", job.summary.job_id.clone()),
+                                ("Status", job.summary.status.clone()),
+                                ("Progress", job.summary.progress_message.clone()),
+                                ("Snapshot SHA-256", job.summary.snapshot_sha256.clone()),
+                            ] {
+                                ui.label(label);
+                                if label.contains("ID") || label.contains("SHA") {
+                                    ui.monospace(value);
+                                } else {
+                                    ui.label(value);
+                                }
+                                ui.end_row();
+                            }
+                        });
                     if let Some(error) = job.summary.error.as_ref() {
                         ui.label(egui::RichText::new(error).color(egui::Color32::LIGHT_RED));
                     }
                     if let Some(result) = job.result.as_ref() {
                         ui.add_space(6.0);
-                        ui.label(egui::RichText::new("Frozen-job results").strong());
                         ui.label(format!(
                             "Mapping: {} matched · {} unmatched · {} ambiguous · {} metadata-only",
                             result.mapping.matched_files,
@@ -2082,120 +2797,147 @@ impl WebShellApp {
                                 qc.modalities.len(),
                                 qc.consensus_ids.len()
                             ));
-                            if !qc.consensus_ids.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "Consensus flagged sample IDs: {}",
-                                        qc.consensus_ids.join(", ")
-                                    ))
-                                    .small(),
-                                );
-                            }
-                        } else {
-                            ui.label(egui::RichText::new("QC result not available for this snapshot").weak());
                         }
-                        if let Some(gene) = result.gene.as_ref() {
+
+                        if let Some(unified) = result.unified.as_ref() {
+                            ui.add_space(5.0);
+                            ui.label(egui::RichText::new("Unified native result").strong());
                             ui.label(format!(
-                                "Corrected gene lane: {} tested features · {} filtered · {} modeled samples · {} subjects",
+                                "{} · {} case / {} control · {} reviewed QC exclusion(s)",
+                                unified.comparison_name,
+                                unified.case_samples,
+                                unified.control_samples,
+                                unified.excluded_sample_ids.len()
+                            ));
+                            egui::Grid::new("web_phase3e_modality_summary")
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for heading in ["Modality", "Status", "Result rows/items"] {
+                                        ui.label(egui::RichText::new(heading).strong());
+                                    }
+                                    ui.end_row();
+                                    for modality in &unified.modalities {
+                                        ui.label(&modality.modality);
+                                        ui.label(&modality.status);
+                                        ui.label(modality.result_items.to_string());
+                                        ui.end_row();
+                                    }
+                                });
+                            ui.label(format!(
+                                "Supporting direction checks: gene {} · transcript {} · PBMC/confounding diagnostics {}",
+                                yes_no(unified.exploratory_gene_available),
+                                yes_no(unified.exploratory_transcript_available),
+                                yes_no(unified.pbmc_diagnostics_available),
+                            ));
+                            if !unified.candidates.is_empty() {
+                                egui::CollapsingHeader::new(format!(
+                                    "Prioritized signals ({})",
+                                    unified.candidates.len()
+                                ))
+                                .show(ui, |ui| {
+                                    egui::Grid::new("web_phase3e_candidate_summary")
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            for heading in [
+                                                "Modality",
+                                                "Feature",
+                                                "Effect",
+                                                "BH q",
+                                                "Evidence",
+                                                "Robustness",
+                                            ] {
+                                                ui.label(egui::RichText::new(heading).strong());
+                                            }
+                                            ui.end_row();
+                                            for candidate in &unified.candidates {
+                                                ui.label(&candidate.modality);
+                                                ui.label(&candidate.feature);
+                                                ui.label(format!("{:.4}", candidate.effect));
+                                                ui.label(format!("{:.3e}", candidate.q_value));
+                                                ui.label(&candidate.evidence);
+                                                ui.label(
+                                                    candidate
+                                                        .robustness
+                                                        .as_deref()
+                                                        .unwrap_or("—"),
+                                                );
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                            }
+                        } else if let Some(gene) = result.gene.as_ref() {
+                            ui.label(format!(
+                                "Legacy representative corrected gene lane: {} tested features · {} filtered · {} modeled samples · {} subjects",
                                 gene.tested_features,
                                 gene.filtered_features,
                                 gene.n_model_samples,
                                 gene.n_subjects
                             ));
+                        }
+
+                        if !result.warnings.is_empty() {
                             egui::CollapsingHeader::new(format!(
-                                "Top corrected gene results (showing {})",
-                                gene.top_features.len()
+                                "Job warnings ({})",
+                                result.warnings.len()
                             ))
                             .show(ui, |ui| {
-                                egui::Grid::new("web_phase3d_gene_top").striped(true).show(ui, |ui| {
-                                    for heading in ["Feature", "Adjusted log2FC", "SE", "p", "q"] {
-                                        ui.label(egui::RichText::new(heading).strong());
-                                    }
-                                    ui.end_row();
-                                    for feature in &gene.top_features {
-                                        ui.label(&feature.feature);
-                                        ui.label(format!("{:.4}", feature.beta_group));
-                                        ui.label(format!("{:.4}", feature.robust_se));
-                                        ui.label(format!("{:.3e}", feature.p_value));
-                                        ui.label(format!("{:.3e}", feature.q_value));
-                                        ui.end_row();
-                                    }
-                                });
+                                for warning in &result.warnings {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label("•");
+                                        ui.label(warning);
+                                    });
+                                }
                             });
-                        } else {
-                            ui.label(
-                                egui::RichText::new(
-                                    "Representative corrected gene result not available; assign a valid Merged gene-expression TSV to exercise that parity lane.",
-                                )
-                                .weak(),
-                            );
-                        }
-                        if !result.warnings.is_empty() {
-                            ui.label(egui::RichText::new("Job warnings").strong());
-                            for warning in &result.warnings {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label("•");
-                                    ui.label(warning);
-                                });
-                            }
                         }
                         if !result.artifacts.is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(egui::RichText::new("Private result artifacts").strong());
-                            for artifact in &result.artifacts {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(&artifact.name);
-                                    ui.label(format_bytes(artifact.byte_size));
-                                    ui.monospace(format!("sha256 {}", artifact.sha256));
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "artifact UUID {}",
-                                            artifact.artifact_id
-                                        ))
-                                        .small()
-                                        .weak(),
-                                    );
-                                });
-                            }
-                            ui.label(
-                                egui::RichText::new(
-                                    "Artifacts are authorization-protected. Phase 3D exposes the authenticated download endpoint on the server; a polished browser download control can be added with the full results/export phase.",
-                                )
-                                .small()
-                                .weak(),
-                            );
+                            ui.add_space(5.0);
+                            egui::CollapsingHeader::new(format!(
+                                "Authenticated result & report downloads ({})",
+                                result.artifacts.len()
+                            ))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                egui::Grid::new("web_phase3e_artifacts")
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        for heading in ["Artifact", "Size", "SHA-256", ""] {
+                                            ui.label(egui::RichText::new(heading).strong());
+                                        }
+                                        ui.end_row();
+                                        for artifact in &result.artifacts {
+                                            ui.label(&artifact.name);
+                                            ui.label(format_bytes(artifact.byte_size));
+                                            ui.monospace(short_hash(&artifact.sha256));
+                                            if ui.small_button("Download").clicked() {
+                                                self.download_remote_artifact(
+                                                    job.summary.job_id.clone(),
+                                                    artifact.artifact_id.clone(),
+                                                    artifact.name.clone(),
+                                                    ui.ctx().clone(),
+                                                );
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
                         }
+                    } else if matches!(job.summary.status.as_str(), "complete") {
+                        ui.label(
+                            egui::RichText::new(
+                                "This completed persisted job has no readable result payload.",
+                            )
+                            .weak(),
+                        );
                     }
                 } else {
                     ui.label(
                         egui::RichText::new(
-                            "No active job in this browser view. A current mapping audit is required before submission.",
+                            "No persisted job is open. Submit a new unified job or use Open results in the job history above.",
                         )
                         .small()
                         .weak(),
                     );
-                }
-                if !snapshot.jobs.is_empty() {
-                    ui.add_space(6.0);
-                    egui::CollapsingHeader::new(format!("Recent persisted jobs ({})", snapshot.jobs.len()))
-                        .show(ui, |ui| {
-                            egui::Grid::new("web_phase3d_job_history").striped(true).show(ui, |ui| {
-                                ui.label(egui::RichText::new("Job ID").strong());
-                                ui.label(egui::RichText::new("Status").strong());
-                                ui.label(egui::RichText::new("Progress").strong());
-                                ui.label(egui::RichText::new("Open").strong());
-                                ui.end_row();
-                                for job in &snapshot.jobs {
-                                    ui.monospace(&job.job_id);
-                                    ui.label(&job.status);
-                                    ui.label(&job.progress_message);
-                                    if ui.small_button("Open").clicked() {
-                                        self.open_remote_job(job.job_id.clone(), ui.ctx().clone());
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                        });
                 }
             });
 
@@ -2291,7 +3033,7 @@ impl WebShellApp {
 
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Phase-3D capabilities:").strong());
+            ui.label(egui::RichText::new("Phase-3E capabilities:").strong());
             ui.label(format!(
                 "project_lifecycle={} · upload={} · mapping={} · analysis={} · persistent_jobs={}",
                 self.capabilities.project_lifecycle,
@@ -2548,6 +3290,7 @@ const INPUT_ROLE_OPTIONS: &[(&str, &str)] = &[
         "merged_transcript_expression",
         "Merged transcript-expression TSV",
     ),
+    ("pathway_gmt", "Pathway gene-set GMT"),
 ];
 
 fn input_role_label(value: &str) -> &'static str {
@@ -2594,13 +3337,171 @@ fn sync_assignment_drafts(state: &mut RemoteApiState) {
     }
 }
 
-fn split_comparison_values(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect()
+fn optional_trimmed(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn save_browser_download(filename: &str, bytes: &[u8]) -> Result<(), String> {
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(array.as_ref());
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
+        .map_err(|_| "browser could not construct the download blob".to_string())?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob)
+        .map_err(|_| "browser could not create a private download URL".to_string())?;
+    let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_string())?;
+    let document = window
+        .document()
+        .ok_or_else(|| "browser document is unavailable".to_string())?;
+    let body = document
+        .body()
+        .ok_or_else(|| "browser document body is unavailable".to_string())?;
+    let anchor = document
+        .create_element("a")
+        .map_err(|_| "browser could not create the download element".to_string())?;
+    anchor
+        .set_attribute("href", &url)
+        .map_err(|_| "browser could not attach the download URL".to_string())?;
+    anchor
+        .set_attribute("download", filename)
+        .map_err(|_| "browser could not set the download filename".to_string())?;
+    anchor
+        .set_attribute("style", "display:none")
+        .map_err(|_| "browser could not hide the temporary download element".to_string())?;
+    body.append_child(&anchor)
+        .map_err(|_| "browser could not attach the download element".to_string())?;
+    let html = anchor
+        .clone()
+        .dyn_into::<web_sys::HtmlElement>()
+        .map_err(|_| "browser download element is not clickable".to_string())?;
+    html.click();
+    let _ = body.remove_child(&anchor);
+    let _ = web_sys::Url::revoke_object_url(&url);
+    Ok(())
+}
+
+fn clear_metadata_profile_state(state: &mut RemoteApiState) {
+    state.metadata_profile = None;
+    state.comparison_field.clear();
+    state.case_values.clear();
+    state.control_values.clear();
+}
+
+fn apply_metadata_profile(state: &mut RemoteApiState, profile: MetadataProfileResponse) {
+    let same_source = state.metadata_profile.as_ref().is_some_and(|current| {
+        current.metadata_object_id == profile.metadata_object_id
+            && current.metadata_sha256 == profile.metadata_sha256
+    });
+    let current_column_valid = profile.columns.iter().any(|column| {
+        column.name == state.comparison_field && column.distinct_nonempty_values >= 2
+    });
+    let selected_column = if same_source && current_column_valid {
+        state.comparison_field.clone()
+    } else {
+        profile
+            .suggested_comparison_column
+            .clone()
+            .unwrap_or_default()
+    };
+
+    state.metadata_profile = Some(profile);
+    if !same_source || selected_column != state.comparison_field {
+        state.comparison_field = selected_column;
+        state.case_values.clear();
+        state.control_values.clear();
+    }
+    reconcile_comparison_values(state);
+}
+
+fn set_comparison_column(state: &mut RemoteApiState, column: String) {
+    if state.comparison_field == column {
+        return;
+    }
+    state.comparison_field = column;
+    state.case_values.clear();
+    state.control_values.clear();
+    reconcile_comparison_values(state);
+    state.mapping_audit = None;
+    state.status_message =
+        "Comparison field changed; select groups and rerun the mapping audit before analysis."
+            .to_string();
+}
+
+fn reconcile_comparison_values(state: &mut RemoteApiState) {
+    let Some(profile) = state.metadata_profile.as_ref() else {
+        state.case_values.clear();
+        state.control_values.clear();
+        return;
+    };
+    let Some(column) = profile
+        .columns
+        .iter()
+        .find(|column| column.name == state.comparison_field)
+    else {
+        state.case_values.clear();
+        state.control_values.clear();
+        return;
+    };
+    let available = column
+        .values
+        .iter()
+        .map(|item| item.value.clone())
+        .collect::<BTreeSet<_>>();
+    state.case_values.retain(|value| available.contains(value));
+    state
+        .control_values
+        .retain(|value| available.contains(value));
+    for value in state.case_values.clone() {
+        state.control_values.remove(&value);
+    }
+
+    if state.case_values.is_empty() && state.control_values.is_empty() {
+        let case = column
+            .values
+            .iter()
+            .find(|item| item.value.eq_ignore_ascii_case("case"))
+            .map(|item| item.value.clone());
+        let control = column
+            .values
+            .iter()
+            .find(|item| item.value.eq_ignore_ascii_case("control"))
+            .map(|item| item.value.clone());
+        if let (Some(case), Some(control)) = (case, control) {
+            if !case.eq_ignore_ascii_case(&control) {
+                state.case_values.insert(case);
+                state.control_values.insert(control);
+            }
+        }
+    }
+}
+
+fn selection_label(values: &BTreeSet<String>) -> String {
+    match values.len() {
+        0 => "(select one or more)".to_string(),
+        1 => values.iter().next().cloned().unwrap_or_default(),
+        n => format!("{n} values selected"),
+    }
+}
+
+fn selected_metadata_rows(
+    column: &api::MetadataColumnProfile,
+    selected: &BTreeSet<String>,
+) -> usize {
+    column
+        .values
+        .iter()
+        .filter(|item| selected.contains(&item.value))
+        .map(|item| item.count)
+        .sum()
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -2661,10 +3562,18 @@ async fn poll_remote_job(
             break;
         }
     }
-    if let Ok(jobs) = api::list_jobs(&project_id, &token).await {
-        remote.borrow_mut().jobs = jobs;
-        ctx.request_repaint();
+    let jobs = api::list_jobs(&project_id, &token).await;
+    let project = api::get_project(&project_id, &token).await;
+    {
+        let mut state = remote.borrow_mut();
+        if let Ok(jobs) = jobs {
+            state.jobs = jobs;
+        }
+        if let Ok(project) = project {
+            state.project = remote_project_from_response(&project);
+        }
     }
+    ctx.request_repaint();
 }
 
 fn remote_project_from_response(value: &ProjectSummaryResponse) -> RemoteProjectSummary {
@@ -2694,12 +3603,12 @@ impl eframe::App for WebShellApp {
                     WebTab::Merge => self.placeholder(
                         ui,
                         "Merge & Export",
-                        "Phase 3D exposes private uploaded-object handles, validated role assignments, mapping summaries, and persisted frozen job/result summaries. Merge/export remains disabled until the full report/export lane is connected.",
+                        "Phase 3E exposes private uploaded-object handles, validated assignments, frozen unified results, technical tables, and authenticated report downloads. A dedicated browser-side merge/export workflow remains separate from the unified analysis job.",
                     ),
                     WebTab::Explore => self.placeholder(
                         ui,
                         "Explore & QC",
-                        "Phase 3D now exposes uploaded-object summaries, mapping audit results, native QC, and a representative corrected gene result through persisted server jobs. Later phases will expand the same job contract to the complete scientific stack and reports without moving the scientific engine into WASM.",
+                        "Phase 3E runs cross-modal QC inside the same frozen native job and preserves the reviewed exclusions used downstream. A dedicated interactive Explore & QC workspace is still separate UI work; the scientific QC engine remains native Rust.",
                     ),
                     WebTab::Metadata => self.metadata_builder(ui),
                     WebTab::Cohort => self.cohort_shell(ui),

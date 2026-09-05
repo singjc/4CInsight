@@ -2,7 +2,28 @@
 
 A Rust application for memory-bounded RNA expression merging plus metadata-driven multi-modal cohort exploration across gene/transcript expression, BCR, BCR isotypes, TCR alpha/beta, and immune-infiltrate data.
 
-The project contains a command-line interface, an `egui` desktop interface, and a browser/WASM client served by a local Rust `cfs-server`. The desktop application remains the production-capable local analysis environment; the browser path is being brought online incrementally. Private projects, authenticated opaque-object storage, native-like folder scanning and automatic role/sample-ID assignment, bounded concurrent uploads, native mapping, persistent frozen jobs, native QC, and one representative corrected gene-expression server lane are now implemented. The complete unified multi-omics/report stack remains desktop-only while web parity is validated incrementally.
+The project contains a command-line interface, an `egui` desktop interface, and a browser/WASM client served by a local Rust `cfs-server`. The native Rust application remains the scientific reference implementation. The browser path is a thin same-origin client over authenticated opaque projects/objects/jobs and now drives the existing native frozen unified cohort-analysis workflow rather than maintaining a separate web statistics engine.
+
+## What v0.16.10 adds
+
+- Adds **Phase 3E.2: metadata-driven comparison configuration parity**. Once exactly one uploaded object is assigned as primary metadata, the authenticated server parses that private file with the existing native metadata loader and exposes only a typed metadata profile to the WASM client.
+- Replaces free-text Case/Control entry with a metadata field dropdown plus **multi-select Case and Control value dropdowns** showing per-value row counts. Selecting a value for one side removes it from the other, preserving disjoint cohorts.
+- Mirrors the native comparison-builder defaults: prefer `analysis_group` when it is usable, otherwise suggest the first low-cardinality categorical field; exact `Case` / `Control` values are preselected only when those labels actually exist in the chosen metadata column. No disease/control orientation is guessed from arbitrary labels.
+- Makes the comparison semantics explicit: the selected metadata column and selected Case/Control value sets are included in the mapping fingerprint and then frozen into every submitted unified job. They therefore define the cohorts for corrected gene/transcript, repertoire, immune, pathway/diagnostic, robustness, candidate-prioritization, and report layers. Metadata rows selected for neither side remain outside that comparison.
+- Automatically reloads metadata comparison choices when a project containing primary metadata is recovered or when an object is newly assigned as primary metadata. Changing the grouping field/value sets invalidates the prior mapping snapshot, so a job cannot silently run with stale cohort definitions.
+- Adds authenticated `GET /api/projects/{project_id}/metadata-profile` and advances `/api/health` to API v8 with `metadata_profile_enabled=true`. The endpoint keeps filesystem paths private, validates/materializes the primary metadata in server scratch space, limits exposed distinct values per field, and does not change the native scientific engine.
+
+## What v0.16.9 adds
+
+- Starts **Phase 3E.1: full frozen unified native analysis jobs**. New browser job submissions reconstruct the frozen native metadata, mapping, comparison, modality selection, corrected model, reviewed QC exclusions, and optional diagnostic settings on `cfs-server`, then call the existing `run_unified_cohort_analysis()` implementation.
+- Reuses the native corrected gene/transcript, BCR/TCR, BCR-isotype, immune, pathway, exploratory direction-check, PBMC/confounding, robustness, and candidate-prioritization layers. Modality failures remain fault-tolerant through the existing unified native run instead of becoming a second browser-specific implementation.
+- Preserves QC as a **review workflow**: automatic cross-modal flags are shown to the user but are not silently excluded. Explicit reviewed sample exclusions are frozen into the job and preserved in the native `OutlierFilterSnapshot` provenance.
+- Generates both `simplified_report.html` and `full_report.html` from the **same completed `UnifiedCohortAnalysisRun`**, and persists the native technical table export alongside the unified summary under authorization-protected opaque artifact UUIDs.
+- Adds browser **authenticated artifact/report downloads**. The recovery token remains in the bearer header used by `fetch`; the browser converts the authorized response into a temporary Blob URL, so capability tokens are never put into report URLs.
+- Adds terminal persisted-job deletion through a dedicated authenticated endpoint. Deleting one completed/failed/cancelled job removes its frozen snapshot, artifacts, and scratch data without deleting the project or uploaded source objects, then reconciles retained-storage accounting.
+- Adds an explicit singleton `pathway_gmt` role. Folder ingest still skips GMT files by default so auxiliary gene-set libraries are never silently promoted; users deliberately add/assign the GMT used by a frozen pathway run.
+- Improves persisted-job UX: **Open results** now displays the selected job directly below the job history, and terminal polling refreshes project job/snapshot/artifact accounting as well as the job list.
+- Advances `/api/health` to API v7 with explicit unified-analysis, report-download, and stored-job-deletion capabilities. Existing v0.16.8/Phase-3D job records remain readable; only newly submitted browser jobs request the full unified lane.
 
 ## What v0.16.8 adds
 
