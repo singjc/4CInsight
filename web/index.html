@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#16181d" />
+  <title>4C Cohort Explorer — Web</title>
+  <link data-trunk rel="rust" />
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #111317;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #cfs_canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      outline: none;
+    }
+    #loading {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: #aeb6bf;
+      font-size: 14px;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">Loading 4C Cohort Explorer…</div>
+  <canvas id="cfs_canvas" tabindex="0"></canvas>
+</body>
+</html>
