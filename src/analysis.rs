@@ -659,7 +659,11 @@ where
             )?;
         }
     }
-    progress(3, STAGES, "Technical tables: corrected transcript expression and DTU");
+    progress(
+        3,
+        STAGES,
+        "Technical tables: corrected transcript expression and DTU",
+    );
 
     for (stage, prefix, label, result) in [
         (4, "bcr", "BCR repertoire", run.primary.bcr.as_ref()),
@@ -799,7 +803,11 @@ where
         write_outlier_filter_modalities_tsv(&outdir.join("sample_outlier_qc_modalities.tsv"), qc)?;
         write_outlier_filter_summary(&outdir.join("sample_outlier_qc_summary.txt"), qc)?;
     }
-    progress(9, STAGES, "Technical tables: supporting expression and QC provenance");
+    progress(
+        9,
+        STAGES,
+        "Technical tables: supporting expression and QC provenance",
+    );
 
     let candidate_dir = outdir.join("key_findings");
     write_key_findings_tables(&candidate_dir, &run.candidates)?;
