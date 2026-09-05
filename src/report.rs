@@ -26,6 +26,9 @@ use report_builder::{Report, ReportSection};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
+
+const REPORT_MAX_SCATTER_POINTS: usize = 4_000;
 
 pub struct CohortReportInputs<'a> {
     pub comparison: &'a CohortComparison,
@@ -355,29 +358,43 @@ fn outlier_modality_plot(
     )
 }
 
+fn embedded_plotly_script() -> Result<&'static str> {
+    static EMBEDDED_PLOTLY: OnceLock<Result<String, String>> = OnceLock::new();
+    let cached = EMBEDDED_PLOTLY.get_or_init(|| {
+        let plot_shell = plotly::Plot::new().to_html();
+        let script_start = plot_shell
+            .find("<script")
+            .ok_or_else(|| "Could not locate embedded Plotly JavaScript".to_string())?;
+        let plot_div = plot_shell
+            .find(r#"<div id="plotly-html-element""#)
+            .ok_or_else(|| "Could not locate Plotly placeholder in standalone HTML".to_string())?;
+        if script_start >= plot_div {
+            return Err("Unexpected Plotly standalone HTML layout".to_string());
+        }
+        Ok(plot_shell[script_start..plot_div].to_string())
+    });
+    match cached {
+        Ok(script) => Ok(script.as_str()),
+        Err(error) => anyhow::bail!("{error}"),
+    }
+}
+
 fn make_report_self_contained(path: &Path) -> Result<()> {
     let mut rendered = fs::read_to_string(path)
         .with_context(|| format!("Could not reopen generated HTML report {}", path.display()))?;
 
     // report-builder 0.1.1 embeds Plotly figures as inline fragments but currently
-    // references Plotly and table-helper libraries from public CDNs. Plotly 0.12.1
-    // can bundle its JavaScript when compiled with `plotly_embed_js`; obtain that
-    // bundle from a tiny standalone Plot and inject it once into the report.
-    let plot_shell = plotly::Plot::new().to_html();
-    let script_start = plot_shell
-        .find("<script")
-        .context("Could not locate embedded Plotly JavaScript")?;
-    let plot_div = plot_shell
-        .find(r#"<div id="plotly-html-element""#)
-        .context("Could not locate Plotly placeholder in standalone HTML")?;
-    if script_start >= plot_div {
-        anyhow::bail!("Unexpected Plotly standalone HTML layout");
-    }
-    let embedded_plotly = &plot_shell[script_start..plot_div];
+    // references Plotly and table-helper libraries from public CDNs. Cache Plotly's
+    // bundled JavaScript once per process rather than rebuilding the multi-megabyte
+    // bundle for both simplified and detailed reports.
+    let embedded_plotly = embedded_plotly_script()?;
     const REPORT_BUILDER_PLOTLY_CDN: &str =
         r#"<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>"#;
-    if rendered.contains(REPORT_BUILDER_PLOTLY_CDN) {
-        rendered = rendered.replace(REPORT_BUILDER_PLOTLY_CDN, embedded_plotly);
+    if let Some(marker_pos) = rendered.find(REPORT_BUILDER_PLOTLY_CDN) {
+        rendered.replace_range(
+            marker_pos..marker_pos + REPORT_BUILDER_PLOTLY_CDN.len(),
+            embedded_plotly,
+        );
     } else {
         anyhow::bail!(
             "report-builder Plotly CDN marker was not found; its template may have changed"
@@ -993,6 +1010,106 @@ fn feature_hover(r: &FeatureTestResult, feature_label: &str) -> String {
     )
 }
 
+fn sampled_feature_tests_for_report<'a>(
+    tests: &'a [FeatureTestResult],
+) -> Vec<&'a FeatureTestResult> {
+    let valid = tests
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row.effect.is_finite()
+                && row.p_value.is_finite()
+                && row.q_value.is_finite()
+                && row.q_value > 0.0
+        })
+        .collect::<Vec<_>>();
+    if valid.len() <= REPORT_MAX_SCATTER_POINTS {
+        return valid.into_iter().map(|(_, row)| row).collect();
+    }
+
+    let mut ranked = valid.clone();
+    ranked.sort_by(|(_, a), (_, b)| {
+        a.q_value
+            .total_cmp(&b.q_value)
+            .then_with(|| a.p_value.total_cmp(&b.p_value))
+            .then_with(|| b.effect.abs().total_cmp(&a.effect.abs()))
+    });
+
+    let signal_budget = REPORT_MAX_SCATTER_POINTS / 2;
+    let mut selected = BTreeSet::new();
+    for (idx, _) in ranked.iter().take(signal_budget) {
+        selected.insert(*idx);
+    }
+    let remaining = REPORT_MAX_SCATTER_POINTS.saturating_sub(selected.len());
+    if remaining > 0 {
+        let background = valid
+            .iter()
+            .map(|(idx, _)| *idx)
+            .filter(|idx| !selected.contains(idx))
+            .collect::<Vec<_>>();
+        let take = remaining.min(background.len());
+        for sample_idx in 0..take {
+            let position = sample_idx * background.len() / take;
+            selected.insert(background[position]);
+        }
+    }
+
+    selected
+        .into_iter()
+        .filter_map(|idx| tests.get(idx))
+        .collect()
+}
+
+fn sampled_adjusted_tests_for_report<'a>(
+    tests: &'a [AdjustedFeatureResult],
+) -> Vec<&'a AdjustedFeatureResult> {
+    let valid = tests
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row.beta_group.is_finite()
+                && row.p_value.is_finite()
+                && row.q_value.is_finite()
+                && row.q_value > 0.0
+        })
+        .collect::<Vec<_>>();
+    if valid.len() <= REPORT_MAX_SCATTER_POINTS {
+        return valid.into_iter().map(|(_, row)| row).collect();
+    }
+
+    let mut ranked = valid.clone();
+    ranked.sort_by(|(_, a), (_, b)| {
+        a.q_value
+            .total_cmp(&b.q_value)
+            .then_with(|| a.p_value.total_cmp(&b.p_value))
+            .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
+    });
+
+    let signal_budget = REPORT_MAX_SCATTER_POINTS / 2;
+    let mut selected = BTreeSet::new();
+    for (idx, _) in ranked.iter().take(signal_budget) {
+        selected.insert(*idx);
+    }
+    let remaining = REPORT_MAX_SCATTER_POINTS.saturating_sub(selected.len());
+    if remaining > 0 {
+        let background = valid
+            .iter()
+            .map(|(idx, _)| *idx)
+            .filter(|idx| !selected.contains(idx))
+            .collect::<Vec<_>>();
+        let take = remaining.min(background.len());
+        for sample_idx in 0..take {
+            let position = sample_idx * background.len() / take;
+            selected.insert(background[position]);
+        }
+    }
+
+    selected
+        .into_iter()
+        .filter_map(|idx| tests.get(idx))
+        .collect()
+}
+
 fn expression_volcano_plot(
     result: &GeneComparisonResult,
     title: &str,
@@ -1004,10 +1121,7 @@ fn expression_volcano_plot(
     let mut x_sig = Vec::new();
     let mut y_sig = Vec::new();
     let mut h_sig = Vec::new();
-    for r in &result.tests {
-        if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 {
-            continue;
-        }
+    for r in sampled_feature_tests_for_report(&result.tests) {
         let y = -r.q_value.max(1e-300).log10();
         let hover = feature_hover(r, feature_label);
         if r.q_value <= 0.05 {
@@ -1051,7 +1165,7 @@ fn expression_detection_plot(
     let mut x = Vec::new();
     let mut y = Vec::new();
     let mut hover = Vec::new();
-    for r in &result.tests {
+    for r in sampled_feature_tests_for_report(&result.tests) {
         let (Some(case), Some(ctrl)) = (r.detection_case, r.detection_control) else {
             continue;
         };
@@ -1103,10 +1217,7 @@ fn feature_effect_significance_plot(
     let mut x_sig = Vec::new();
     let mut y_sig = Vec::new();
     let mut h_sig = Vec::new();
-    for r in tests {
-        if !r.effect.is_finite() || !r.q_value.is_finite() || r.q_value <= 0.0 {
-            continue;
-        }
+    for r in sampled_feature_tests_for_report(tests) {
         let y = -r.q_value.max(1e-300).log10();
         let hover = feature_hover(r, feature_label);
         if r.q_value <= 0.05 {
@@ -1337,6 +1448,31 @@ mod tests {
     }
 
     #[test]
+    fn report_scatter_sampling_is_bounded_and_retains_top_signal() {
+        let tests = (0..5_500)
+            .map(|i| FeatureTestResult {
+                feature: format!("F{i}"),
+                secondary_id: i.to_string(),
+                n_case: 4,
+                n_control: 4,
+                mean_case: 2.0,
+                mean_control: 1.0,
+                median_case: 2.0,
+                median_control: 1.0,
+                effect: i as f64 / 1000.0,
+                cliffs_delta: 0.25,
+                p_value: if i == 5_499 { 1e-12 } else { 0.5 },
+                q_value: if i == 5_499 { 1e-10 } else { 0.8 },
+                detection_case: Some(1.0),
+                detection_control: Some(0.75),
+            })
+            .collect::<Vec<_>>();
+        let sampled = sampled_feature_tests_for_report(&tests);
+        assert_eq!(sampled.len(), REPORT_MAX_SCATTER_POINTS);
+        assert!(sampled.iter().any(|row| row.feature == "F5499"));
+    }
+
+    #[test]
     fn analysis_doc_toy_example_renders_inline_svg() {
         let example = &analysis_doc_sections()[0].examples[0];
         let rendered = build_analysis_doc_toy_example_markup(example).into_string();
@@ -1472,6 +1608,9 @@ fn build_corrected_expression_section(title: &str, r: &CorrectedExpressionResult
         p { (r.normalization) }
         p { (r.model_description) }
         p { "Model samples: " (r.n_model_samples) ", subjects: " (r.n_subjects) ", tested features: " (r.tested_features) ", low-count filtered: " (r.filtered_features) "." }
+        @if r.tests.len() > REPORT_MAX_SCATTER_POINTS {
+            p { small { "Interactive feature plots show up to " (REPORT_MAX_SCATTER_POINTS) " points, prioritizing the strongest corrected signals plus a deterministic background sample. Complete feature-level results remain in the exported technical tables." } }
+        }
         h3 { "How to read this analysis" }
         p { "The adjusted case/control coefficient tests whether each feature differs after the selected covariates are included. Positive coefficients indicate higher modeled abundance in cases; negative coefficients indicate lower modeled abundance. BH q-values control the false-discovery rate across this feature family." }
         p { "PCA and hierarchical clustering are unsupervised sample-level views. Separation by case/control can support a broad phenotype signal, while other clustering may reflect subject, batch, timepoint, or other metadata. These plots are descriptive and should be read alongside the feature-level tests." }
@@ -1656,10 +1795,7 @@ fn adjusted_hover(r: &AdjustedFeatureResult) -> String {
 }
 
 fn adjusted_volcano_plot(tests: &[AdjustedFeatureResult], title: &str) -> Option<Plot> {
-    let rows = tests
-        .iter()
-        .filter(|r| r.beta_group.is_finite() && r.q_value.is_finite() && r.q_value > 0.0)
-        .collect::<Vec<_>>();
+    let rows = sampled_adjusted_tests_for_report(tests);
     if rows.is_empty() {
         return None;
     }
