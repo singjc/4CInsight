@@ -20,7 +20,7 @@ use api::{
 };
 use contract::{RemoteBackendCapabilities, RemoteProjectSummary};
 use eframe::egui;
-use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points};
+use egui_plot::{Bar, BarChart, HoverPosition, Legend, Line, Plot, Points};
 use futures_util::{StreamExt, stream};
 use std::{
     cell::RefCell,
@@ -1436,10 +1436,542 @@ impl WebShellApp {
         });
     }
 
+    fn download_all_remote_artifacts(&self, job_id: String, ctx: egui::Context) {
+        let remote = self.remote.clone();
+        let (project_id, token) = {
+            let state = remote.borrow();
+            (
+                state.recovery_project_id.trim().to_string(),
+                state.recovery_token.trim().to_string(),
+            )
+        };
+        if project_id.is_empty() || token.is_empty() {
+            self.remote.borrow_mut().last_error =
+                Some("Project credentials are required to download job artifacts.".to_string());
+            return;
+        }
+        let filename = format!("4c_job_{job_id}_artifacts.zip");
+        {
+            let mut state = remote.borrow_mut();
+            state.status_message = format!("Preparing authenticated ZIP bundle for job {job_id}…");
+            state.last_error = None;
+        }
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = api::download_all_job_artifacts(&project_id, &token, &job_id).await;
+            let mut state = remote.borrow_mut();
+            match result {
+                Ok(bytes) => match save_browser_download(&filename, &bytes) {
+                    Ok(()) => {
+                        state.status_message = format!(
+                            "Downloaded all retained artifacts for job {job_id} as one ZIP"
+                        );
+                        state.last_error = None;
+                    }
+                    Err(error) => state.last_error = Some(error),
+                },
+                Err(error) => state.last_error = Some(error),
+            }
+            drop(state);
+            ctx.request_repaint();
+        });
+    }
+
+    fn render_unified_visualizations(
+        &self,
+        ui: &mut egui::Ui,
+        unified: &api::UnifiedAnalysisSummary,
+    ) {
+        let visualizations = &unified.visualizations;
+        let available = !visualizations.expression_panels.is_empty()
+            || !visualizations.effect_panels.is_empty()
+            || !visualizations.ordinations.is_empty()
+            || !visualizations.dendrograms.is_empty()
+            || !visualizations.pathway_points.is_empty();
+        egui::CollapsingHeader::new("Interactive native-result visualizations")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "These plots are presentation views of the completed native result; no statistics are recomputed in WASM. Expression volcano payloads are deliberately bounded for browser responsiveness, while complete rows remain in the authenticated tables and reports.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                if !available {
+                    ui.label(
+                        egui::RichText::new(
+                            "This persisted job predates browser visualization payloads. Download its reports/tables or submit a new unified job to populate the interactive plots.",
+                        )
+                        .weak(),
+                    );
+                    return;
+                }
+
+                if !unified.modalities.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Result coverage by modality").strong());
+                    let bars = unified
+                        .modalities
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, modality)| {
+                            Bar::new(idx as f64, modality.result_items as f64).width(0.72)
+                        })
+                        .collect::<Vec<_>>();
+                    Plot::new("web_phase3e_modality_result_counts")
+                        .height(250.0)
+                        .x_axis_label("Modality index (see summary table above)")
+                        .y_axis_label("Result rows / items")
+                        .show(ui, |plot_ui| {
+                            plot_ui.bar_chart(BarChart::new("Completed native result items", bars));
+                        });
+                }
+
+                for panel in &visualizations.expression_panels {
+                    egui::CollapsingHeader::new(format!(
+                        "{} volcano plot · {} tested · {} q≤0.05",
+                        panel.modality, panel.tested_features, panel.significant_q05
+                    ))
+                    .default_open(panel.modality == "Gene expression")
+                    .show(ui, |ui| self.render_expression_volcano(ui, panel));
+                }
+
+                for panel in &visualizations.effect_panels {
+                    egui::CollapsingHeader::new(format!(
+                        "{} · {}",
+                        panel.modality, panel.family
+                    ))
+                    .default_open(false)
+                    .show(ui, |ui| self.render_effect_panel(ui, panel));
+                }
+
+                for ordination in &visualizations.ordinations {
+                    egui::CollapsingHeader::new(format!(
+                        "{} · {}",
+                        ordination.modality, ordination.title
+                    ))
+                    .default_open(ordination.modality == "Gene expression")
+                    .show(ui, |ui| self.render_ordination_panel(ui, ordination));
+                }
+
+                for tree in &visualizations.dendrograms {
+                    egui::CollapsingHeader::new(format!(
+                        "{} · {}",
+                        tree.modality, tree.title
+                    ))
+                    .default_open(false)
+                    .show(ui, |ui| self.render_dendrogram_panel(ui, tree));
+                }
+
+                if !visualizations.pathway_points.is_empty() {
+                    egui::CollapsingHeader::new(format!(
+                        "Pathway enrichment plot ({})",
+                        visualizations.pathway_points.len()
+                    ))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        self.render_pathway_panel(ui, &visualizations.pathway_points)
+                    });
+                }
+            });
+    }
+
+    fn render_expression_volcano(
+        &self,
+        ui: &mut egui::Ui,
+        panel: &api::ExpressionVisualizationSummary,
+    ) {
+        if panel.points.is_empty() {
+            ui.label("No finite corrected expression rows are available for this volcano preview.");
+            return;
+        }
+        let mut significant = Vec::new();
+        let mut other = Vec::new();
+        let mut hover_points = Vec::new();
+        for point in &panel.points {
+            let y = -point.q_value.max(1e-300).log10();
+            let xy = [point.effect, y];
+            if point.q_value <= 0.05 {
+                significant.push(xy);
+            } else {
+                other.push(xy);
+            }
+            hover_points.push((
+                point.effect,
+                y,
+                format!(
+                    "{}{}\nβ: {:.4}\np: {:.3e}\nBH q: {:.3e}\nCase mean: {:.4}\nControl mean: {:.4}",
+                    point.feature,
+                    if point.secondary_id.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", point.secondary_id)
+                    },
+                    point.effect,
+                    point.p_value,
+                    point.q_value,
+                    point.mean_case,
+                    point.mean_control
+                ),
+            ));
+        }
+        let formatter_points = hover_points.clone();
+        let threshold = -(0.05f64).log10();
+        let x_min = hover_points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::INFINITY, f64::min);
+        let x_max = hover_points
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let y_max = hover_points
+            .iter()
+            .map(|point| point.1)
+            .fold(threshold, f64::max);
+        let x_pad = ((x_max - x_min).abs() * 0.04).max(0.1);
+        let accent = ui.visuals().selection.bg_fill;
+        Plot::new(format!("web_volcano_{}", safe_plot_id(&panel.modality)))
+            .height(390.0)
+            .x_axis_label("Adjusted case-vs-control coefficient β")
+            .y_axis_label("-log10(BH q)")
+            .legend(Legend::default())
+            .label_formatter(move |hover| match hover {
+                HoverPosition::NearDataPoint { position, .. } => {
+                    nearest_plot_label(position.x, position.y, &formatter_points)
+                }
+                _ => None,
+            })
+            .show(ui, |plot_ui| {
+                plot_ui.line(
+                    Line::new(
+                        "BH q = 0.05",
+                        vec![[x_min - x_pad, threshold], [x_max + x_pad, threshold]],
+                    )
+                    .allow_hover(false),
+                );
+                plot_ui.line(
+                    Line::new("β = 0", vec![[0.0, 0.0], [0.0, y_max * 1.04]]).allow_hover(false),
+                );
+                if !other.is_empty() {
+                    plot_ui.points(Points::new("Other plotted features", other).radius(2.4));
+                }
+                if !significant.is_empty() {
+                    plot_ui.points(
+                        Points::new("BH q ≤ 0.05", significant)
+                            .color(accent)
+                            .radius(4.0),
+                    );
+                }
+            });
+        ui.label(
+            egui::RichText::new(format!(
+                "Showing {} bounded browser points from {} tested features; {} low-count features were filtered before testing.",
+                panel.plotted_features, panel.tested_features, panel.filtered_features
+            ))
+            .small()
+            .weak(),
+        );
+    }
+
+    fn render_effect_panel(&self, ui: &mut egui::Ui, panel: &api::EffectVisualizationSummary) {
+        if panel.points.is_empty() {
+            ui.label("No finite corrected effect rows are available for this panel.");
+            return;
+        }
+        let mut coords = Vec::new();
+        let mut hover_points = Vec::new();
+        for (idx, point) in panel.points.iter().enumerate() {
+            let y = (panel.points.len() - idx) as f64;
+            coords.push([point.effect, y]);
+            hover_points.push((
+                point.effect,
+                y,
+                format!(
+                    "{}{}\nβ: {:.4}\np: {:.3e}\nBH q: {:.3e}\nCase mean: {:.4}\nControl mean: {:.4}",
+                    point.feature,
+                    if point.secondary_id.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", point.secondary_id)
+                    },
+                    point.effect,
+                    point.p_value,
+                    point.q_value,
+                    point.mean_case,
+                    point.mean_control
+                ),
+            ));
+        }
+        let formatter_points = hover_points.clone();
+        let accent = ui.visuals().selection.bg_fill;
+        Plot::new(format!(
+            "web_effect_{}_{}",
+            safe_plot_id(&panel.modality),
+            safe_plot_id(&panel.family)
+        ))
+        .height(330.0)
+        .x_axis_label("Adjusted case-vs-control coefficient β")
+        .y_axis_label("Top tests ranked by BH q")
+        .label_formatter(move |hover| match hover {
+            HoverPosition::NearDataPoint { position, .. } => {
+                nearest_plot_label(position.x, position.y, &formatter_points)
+            }
+            _ => None,
+        })
+        .show(ui, |plot_ui| {
+            plot_ui.line(
+                Line::new(
+                    "β = 0",
+                    vec![[0.0, 0.0], [0.0, panel.points.len() as f64 + 1.0]],
+                )
+                .allow_hover(false),
+            );
+            plot_ui.points(
+                Points::new("Corrected effects", coords)
+                    .color(accent)
+                    .radius(4.0),
+            );
+        });
+        ui.label(
+            egui::RichText::new(format!(
+                "Top {} of {} corrected tests are plotted; hover points for feature-level statistics.",
+                panel.points.len(), panel.total_tests
+            ))
+            .small()
+            .weak(),
+        );
+        egui::Grid::new(format!(
+            "web_effect_table_{}_{}",
+            safe_plot_id(&panel.modality),
+            safe_plot_id(&panel.family)
+        ))
+        .striped(true)
+        .show(ui, |ui| {
+            for heading in ["Feature", "β", "BH q", "Case mean", "Control mean"] {
+                ui.label(egui::RichText::new(heading).strong());
+            }
+            ui.end_row();
+            for point in panel.points.iter().take(15) {
+                ui.monospace(&point.feature);
+                ui.label(format!("{:.4}", point.effect));
+                ui.label(format!("{:.3e}", point.q_value));
+                ui.label(format!("{:.4}", point.mean_case));
+                ui.label(format!("{:.4}", point.mean_control));
+                ui.end_row();
+            }
+        });
+    }
+
+    fn render_ordination_panel(
+        &self,
+        ui: &mut egui::Ui,
+        ordination: &api::OrdinationVisualizationSummary,
+    ) {
+        if ordination.permanova_p.is_finite() {
+            ui.label(format!(
+                "PERMANOVA: pseudo-F {:.3}, p {:.3e}, {} permutations",
+                ordination.permanova_f, ordination.permanova_p, ordination.permutations
+            ));
+        }
+        let mut grouped = BTreeMap::<String, Vec<[f64; 2]>>::new();
+        let mut hover_points = Vec::new();
+        for point in &ordination.points {
+            grouped
+                .entry(point.group.clone())
+                .or_default()
+                .push([point.x, point.y]);
+            hover_points.push((
+                point.x,
+                point.y,
+                format!(
+                    "{}\nGroup: {}\nSubject: {}\n{}: {:.4}\n{}: {:.4}",
+                    point.sample_id,
+                    point.group,
+                    point.subject,
+                    ordination.x_label,
+                    point.x,
+                    ordination.y_label,
+                    point.y
+                ),
+            ));
+        }
+        let formatter_points = hover_points.clone();
+        let mut plot = Plot::new(format!(
+            "web_ordination_{}_{}",
+            safe_plot_id(&ordination.modality),
+            safe_plot_id(&ordination.title)
+        ))
+        .height(400.0)
+        .x_axis_label(&ordination.x_label)
+        .y_axis_label(&ordination.y_label)
+        .label_formatter(move |hover| match hover {
+            HoverPosition::NearDataPoint { position, .. } => {
+                nearest_plot_label(position.x, position.y, &formatter_points)
+            }
+            _ => None,
+        });
+        if grouped.len() <= 12 {
+            plot = plot.legend(Legend::default());
+        }
+        let accent = ui.visuals().selection.bg_fill;
+        plot.show(ui, |plot_ui| {
+            for (idx, (group, points)) in grouped.into_iter().enumerate() {
+                plot_ui.points(
+                    Points::new(group, points)
+                        .color(web_series_color(idx, accent))
+                        .radius(4.2),
+                );
+            }
+        });
+    }
+
+    fn render_dendrogram_panel(
+        &self,
+        ui: &mut egui::Ui,
+        tree: &api::DendrogramVisualizationSummary,
+    ) {
+        if tree.leaves.is_empty() || tree.segments.is_empty() {
+            ui.label("No native dendrogram coordinates are available for this result.");
+            return;
+        }
+        ui.label(
+            egui::RichText::new(
+                "This is the native average-linkage hierarchy already stored in the completed result; the browser only draws its leaf and segment coordinates.",
+            )
+            .small()
+            .weak(),
+        );
+        let mut grouped = BTreeMap::<String, Vec<[f64; 2]>>::new();
+        let mut hover_points = Vec::new();
+        for leaf in &tree.leaves {
+            grouped
+                .entry(leaf.group.clone())
+                .or_default()
+                .push([0.0, leaf.position]);
+            hover_points.push((
+                0.0,
+                leaf.position,
+                format!(
+                    "{}\nGroup: {}\nSubject: {}\nCluster order: {}",
+                    leaf.sample_id,
+                    leaf.group,
+                    leaf.subject,
+                    leaf.position as usize + 1
+                ),
+            ));
+        }
+        let formatter_points = hover_points.clone();
+        let accent = ui.visuals().selection.bg_fill;
+        let branch_color = ui.visuals().weak_text_color();
+        let mut plot = Plot::new(format!(
+            "web_dendrogram_{}_{}",
+            safe_plot_id(&tree.modality),
+            safe_plot_id(&tree.title)
+        ))
+        .height(430.0)
+        .x_axis_label(&tree.distance_label)
+        .y_axis_label("Cluster leaf order")
+        .label_formatter(move |hover| match hover {
+            HoverPosition::NearDataPoint { position, .. } => {
+                nearest_plot_label(position.x, position.y, &formatter_points)
+            }
+            _ => None,
+        });
+        if grouped.len() <= 12 {
+            plot = plot.legend(Legend::default());
+        }
+        plot.show(ui, |plot_ui| {
+            for segment in &tree.segments {
+                plot_ui.line(
+                    Line::new("", vec![[segment.x1, segment.y1], [segment.x2, segment.y2]])
+                        .color(branch_color)
+                        .allow_hover(false),
+                );
+            }
+            for (idx, (group, points)) in grouped.into_iter().enumerate() {
+                plot_ui.points(
+                    Points::new(group, points)
+                        .color(web_series_color(idx, accent))
+                        .radius(4.0),
+                );
+            }
+        });
+    }
+
+    fn render_pathway_panel(&self, ui: &mut egui::Ui, points: &[api::PathwayVisualizationPoint]) {
+        let mut significant = Vec::new();
+        let mut other = Vec::new();
+        let mut hover_points = Vec::new();
+        for point in points {
+            let x = point.odds_ratio.max(1e-300).ln();
+            let y = -point.q_value.max(1e-300).log10();
+            if point.q_value <= 0.05 {
+                significant.push([x, y]);
+            } else {
+                other.push([x, y]);
+            }
+            hover_points.push((
+                x,
+                y,
+                format!(
+                    "{}\n{}\nOverlap: {}/{}\nOdds ratio: {:.3}\np: {:.3e}\nBH q: {:.3e}",
+                    point.pathway,
+                    point.description,
+                    point.overlap,
+                    point.measured_set_size,
+                    point.odds_ratio,
+                    point.p_value,
+                    point.q_value
+                ),
+            ));
+        }
+        let formatter_points = hover_points.clone();
+        let accent = ui.visuals().selection.bg_fill;
+        Plot::new("web_pathway_enrichment")
+            .height(390.0)
+            .x_axis_label("ln odds ratio")
+            .y_axis_label("-log10(BH q)")
+            .legend(Legend::default())
+            .label_formatter(move |hover| match hover {
+                HoverPosition::NearDataPoint { position, .. } => {
+                    nearest_plot_label(position.x, position.y, &formatter_points)
+                }
+                _ => None,
+            })
+            .show(ui, |plot_ui| {
+                if !other.is_empty() {
+                    plot_ui.points(Points::new("Other pathways", other).radius(3.0));
+                }
+                if !significant.is_empty() {
+                    plot_ui.points(
+                        Points::new("BH q ≤ 0.05", significant)
+                            .color(accent)
+                            .radius(4.2),
+                    );
+                }
+            });
+        egui::Grid::new("web_pathway_top_table")
+            .striped(true)
+            .show(ui, |ui| {
+                for heading in ["Pathway", "Overlap", "Odds ratio", "BH q"] {
+                    ui.label(egui::RichText::new(heading).strong());
+                }
+                ui.end_row();
+                for point in points.iter().take(15) {
+                    ui.monospace(&point.pathway);
+                    ui.label(format!("{}/{}", point.overlap, point.measured_set_size));
+                    ui.label(format!("{:.3}", point.odds_ratio));
+                    ui.label(format!("{:.3e}", point.q_value));
+                    ui.end_row();
+                }
+            });
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.remote.borrow().clone();
         let connected = snapshot.health.is_some();
-        let phase_label = "Web · Phase 3E.2";
+        let phase_label = "Web · Phase 3E.3";
         let server_label = if connected {
             "Local server connected"
         } else {
@@ -1493,7 +2025,7 @@ impl WebShellApp {
     fn overview(&mut self, ui: &mut egui::Ui) {
         ui.heading("Browser client + local Rust server");
         ui.label(
-            "Phase 3E.2 keeps the validated native-like high-throughput ingest path and extends frozen server jobs to the existing native unified multi-modal cohort analysis, reviewed QC exclusions, technical tables, and simplified/full report artifacts.",
+            "Phase 3E.3 keeps the validated native-like ingest and frozen unified native analysis, then adds interactive browser presentation of those completed native results plus one-click authenticated bulk artifact export.",
         );
         ui.add_space(10.0);
 
@@ -1552,7 +2084,7 @@ impl WebShellApp {
             .inner_margin(12)
             .corner_radius(8)
             .show(ui, |ui| {
-            ui.label(egui::RichText::new("What works in Phase 3E.2").strong());
+            ui.label(egui::RichText::new("What works in Phase 3E.3").strong());
             for item in [
                 "One Rust cfs-server serves both web/dist and /api from 127.0.0.1:8080 by default.",
                 "A private temporary project can be created with an opaque UUID and independent recovery token.",
@@ -1564,7 +2096,8 @@ impl WebShellApp {
                 "Primary metadata is parsed server-side with the existing native loader and the existing native sample mapping audit can be run from the browser.",
                 "A current validated mapping fingerprint can be frozen into a persistent asynchronous job; later upload/assignment changes cannot silently alter that job snapshot.",
                 "Frozen Phase 3E jobs reuse the native cross-modal QC engine, preserve reviewed exclusions, and execute every available corrected native modality through the existing unified cohort-analysis function.",
-                "The same completed unified result renders authenticated simplified and full self-contained HTML reports plus the native technical table set.",
+                "The same completed unified result now renders interactive browser plots, authenticated simplified/full self-contained HTML reports, and the native technical table set without recomputing statistics in WASM.",
+                "All retained artifacts from one job can be downloaded as a single authenticated ZIP assembled on demand; individual downloads remain available.",
                 "Persisted terminal jobs can be deleted independently to remove their frozen inputs and private artifacts without deleting the whole project.",
                 "XLSX role assignment performs defensive ZIP/container checks before scientific parsing, including entry-count and expanded-size limits.",
                 "Persisted jobs survive browser reload/recovery; interrupted in-progress jobs are marked failed after a server restart rather than silently resumed.",
@@ -1690,7 +2223,7 @@ impl WebShellApp {
     fn cohort_shell(&mut self, ui: &mut egui::Ui) {
         ui.heading("Cohort Analysis — frozen native unified workflow");
         ui.label(
-            "Phase 3E.2 keeps the validated high-throughput ingest/mapping path and now executes the existing native unified multi-modal cohort-analysis workflow from a frozen server snapshot. Reviewed QC exclusions, corrected modalities, diagnostics, candidate prioritization, and both report styles remain tied to the same completed native result.",
+            "Phase 3E.3 keeps the validated high-throughput ingest/mapping and frozen unified native analysis, and now renders browser plots from the persisted native result. Reviewed QC exclusions, corrected modalities, diagnostics, candidate prioritization, interactive views, technical tables, and both report styles remain tied to that same completed run.",
         );
         ui.add_space(8.0);
 
@@ -2829,6 +3362,7 @@ impl WebShellApp {
                                 yes_no(unified.exploratory_transcript_available),
                                 yes_no(unified.pbmc_diagnostics_available),
                             ));
+                            self.render_unified_visualizations(ui, unified);
                             if !unified.candidates.is_empty() {
                                 egui::CollapsingHeader::new(format!(
                                     "Prioritized signals ({})",
@@ -2898,6 +3432,35 @@ impl WebShellApp {
                             ))
                             .default_open(true)
                             .show(ui, |ui| {
+                                let total_bytes = result
+                                    .artifacts
+                                    .iter()
+                                    .map(|artifact| artifact.byte_size)
+                                    .sum::<u64>();
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui
+                                        .button(format!(
+                                            "Download all as ZIP · {} files · {}",
+                                            result.artifacts.len(),
+                                            format_bytes(total_bytes)
+                                        ))
+                                        .on_hover_text("Build one authenticated ZIP on demand from every retained artifact for this job. The archive is not persisted as a second copy on the server and includes artifact_manifest.json with names, sizes, SHA-256 values, and media types.")
+                                        .clicked()
+                                    {
+                                        self.download_all_remote_artifacts(
+                                            job.summary.job_id.clone(),
+                                            ui.ctx().clone(),
+                                        );
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "The recovery token stays in the Authorization header; it is not placed in the download URL.",
+                                        )
+                                        .small()
+                                        .weak(),
+                                    );
+                                });
+                                ui.add_space(4.0);
                                 egui::Grid::new("web_phase3e_artifacts")
                                     .striped(true)
                                     .show(ui, |ui| {
@@ -3587,6 +4150,43 @@ fn remote_project_from_response(value: &ProjectSummaryResponse) -> RemoteProject
         job_artifact_bytes: value.job_artifact_bytes,
         created_unix_seconds: Some(value.created_unix_seconds),
         expires_unix_seconds: Some(value.expires_unix_seconds),
+    }
+}
+
+fn safe_plot_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn nearest_plot_label(x: f64, y: f64, points: &[(f64, f64, String)]) -> Option<String> {
+    points
+        .iter()
+        .min_by(|a, b| {
+            let da = (a.0 - x).powi(2) + (a.1 - y).powi(2);
+            let db = (b.0 - x).powi(2) + (b.1 - y).powi(2);
+            da.total_cmp(&db)
+        })
+        .map(|(_, _, label)| label.clone())
+}
+
+fn web_series_color(index: usize, accent: egui::Color32) -> egui::Color32 {
+    match index % 8 {
+        0 => accent,
+        1 => egui::Color32::from_rgb(98, 170, 230),
+        2 => egui::Color32::from_rgb(230, 155, 82),
+        3 => egui::Color32::from_rgb(130, 200, 145),
+        4 => egui::Color32::from_rgb(205, 125, 190),
+        5 => egui::Color32::from_rgb(220, 205, 95),
+        6 => egui::Color32::from_rgb(125, 205, 205),
+        _ => egui::Color32::from_rgb(190, 150, 225),
     }
 }
 

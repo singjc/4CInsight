@@ -1,9 +1,9 @@
 //! Local web server for the 4C Cohort Explorer browser client.
 //!
-//! Phase 3E.2 extends frozen unified native jobs with authenticated metadata
-//! profiling for native-parity comparison configuration. The server reconstructs
-//! metadata and scientific state from opaque private objects; the browser only
-//! selects metadata-backed grouping values and submits the frozen definition.
+//! Phase 3E.3 keeps authenticated metadata-backed comparison configuration and
+//! adds presentation payloads plus on-demand bulk export for completed frozen
+//! unified native jobs. The server reconstructs metadata/scientific state and
+//! derives plot coordinates from native results; WASM does not recompute science.
 //! Existing native multi-omics statistics and report generation remain the
 //! scientific implementation, and authorization/storage semantics stay opaque.
 
@@ -17,7 +17,10 @@ use crate::{
         MappingStatus, MetadataComparisonSpec, MetadataTable, ProjectScan, build_custom_comparison,
         build_mapping, load_metadata,
     },
-    corrected::{CorrectedExpressionResult, CorrectedModelSpec, run_corrected_expression},
+    corrected::{
+        AdjustedFeatureResult, CorrectedExpressionResult, CorrectedModelSpec,
+        CorrectedRepertoireResult, DendrogramResult, OrdinationResult, run_corrected_expression,
+    },
     diagnostics::PbmcDiagnosticsConfig,
     input_conventions::{FilenameInputKind, classify_input_filename},
     metadata::{
@@ -49,6 +52,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     env,
+    io::{Cursor, Write},
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::Arc,
@@ -62,7 +66,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 use uuid::Uuid;
-use zip::ZipArchive;
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -88,6 +92,10 @@ const MAX_XLSX_ENTRIES: usize = 4_096;
 const MAX_XLSX_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_XLSX_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_METADATA_PROFILE_VALUES: usize = 100;
+const MAX_BULK_DOWNLOAD_UNCOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_VIS_EXPRESSION_POINTS: usize = 4_000;
+const MAX_VIS_EFFECT_POINTS: usize = 30;
+const MAX_VIS_PATHWAY_POINTS: usize = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaProfile {
@@ -444,6 +452,8 @@ pub struct HealthResponse {
     pub unified_analysis_enabled: bool,
     pub metadata_profile_enabled: bool,
     pub report_download_enabled: bool,
+    pub bulk_artifact_download_enabled: bool,
+    pub result_visualizations_enabled: bool,
     pub job_deletion_enabled: bool,
     pub batch_upload_enabled: bool,
     pub storage_backend: &'static str,
@@ -712,6 +722,108 @@ pub struct UnifiedAnalysisSummary {
     pub exploratory_transcript_available: bool,
     pub pbmc_diagnostics_available: bool,
     pub candidates: Vec<UnifiedCandidateSummary>,
+    #[serde(default)]
+    pub visualizations: UnifiedVisualizationSummary,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UnifiedVisualizationSummary {
+    #[serde(default)]
+    pub expression_panels: Vec<ExpressionVisualizationSummary>,
+    #[serde(default)]
+    pub effect_panels: Vec<EffectVisualizationSummary>,
+    #[serde(default)]
+    pub ordinations: Vec<OrdinationVisualizationSummary>,
+    #[serde(default)]
+    pub dendrograms: Vec<DendrogramVisualizationSummary>,
+    #[serde(default)]
+    pub pathway_points: Vec<PathwayVisualizationPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpressionVisualizationSummary {
+    pub modality: String,
+    pub tested_features: usize,
+    pub filtered_features: usize,
+    pub significant_q05: usize,
+    pub plotted_features: usize,
+    pub points: Vec<FeatureVisualizationPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectVisualizationSummary {
+    pub modality: String,
+    pub family: String,
+    pub total_tests: usize,
+    pub points: Vec<FeatureVisualizationPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureVisualizationPoint {
+    pub feature: String,
+    pub secondary_id: String,
+    pub effect: f64,
+    pub p_value: f64,
+    pub q_value: f64,
+    pub mean_case: f64,
+    pub mean_control: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrdinationVisualizationSummary {
+    pub modality: String,
+    pub title: String,
+    pub x_label: String,
+    pub y_label: String,
+    pub permanova_f: f64,
+    pub permanova_p: f64,
+    pub permutations: usize,
+    pub points: Vec<OrdinationVisualizationPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrdinationVisualizationPoint {
+    pub sample_id: String,
+    pub group: String,
+    pub subject: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DendrogramVisualizationSummary {
+    pub modality: String,
+    pub title: String,
+    pub distance_label: String,
+    pub leaves: Vec<DendrogramVisualizationLeaf>,
+    pub segments: Vec<DendrogramVisualizationSegment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DendrogramVisualizationLeaf {
+    pub sample_id: String,
+    pub group: String,
+    pub subject: String,
+    pub position: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DendrogramVisualizationSegment {
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathwayVisualizationPoint {
+    pub pathway: String,
+    pub description: String,
+    pub measured_set_size: usize,
+    pub overlap: usize,
+    pub odds_ratio: f64,
+    pub p_value: f64,
+    pub q_value: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2082,6 +2194,39 @@ impl LocalProjectStore {
         Ok((record, data))
     }
 
+    async fn list_job_artifact_records_authorized(
+        &self,
+        project_id: Uuid,
+        token: &str,
+        job_id: Uuid,
+    ) -> Result<Vec<StoredJobArtifactRecord>> {
+        let _guard = self.mutation_lock.lock().await;
+        let _ = self.authorize_record(project_id, token).await?;
+        let _ = self.read_job_record(project_id, job_id).await?;
+        let dir = self.job_artifacts_dir(project_id, job_id);
+        if !fs::try_exists(&dir).await? {
+            return Ok(Vec::new());
+        }
+        let mut records = Vec::new();
+        let mut entries = fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = fs::read(&path).await?;
+            if let Ok(record) = serde_json::from_slice::<StoredJobArtifactRecord>(&bytes) {
+                records.push(record);
+            }
+        }
+        records.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.artifact_id.cmp(&b.artifact_id))
+        });
+        Ok(records)
+    }
+
     pub async fn recover_interrupted_jobs(&self) -> Result<usize> {
         let _guard = self.mutation_lock.lock().await;
         let projects_root = self.projects_root();
@@ -3362,6 +3507,305 @@ fn summarize_unified_run(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSumma
         exploratory_transcript_available: run.exploratory_support.transcript.is_some(),
         pbmc_diagnostics_available: run.diagnostics.is_some(),
         candidates,
+        visualizations: build_unified_visualizations(run),
+    }
+}
+
+fn build_unified_visualizations(run: &UnifiedCohortAnalysisRun) -> UnifiedVisualizationSummary {
+    let mut out = UnifiedVisualizationSummary::default();
+
+    if let Some(result) = run.primary.gene.as_ref() {
+        out.expression_panels
+            .push(expression_visualization("Gene expression", result));
+        if let Some(ord) = result.pca.as_ref() {
+            out.ordinations
+                .push(ordination_visualization("Gene expression", ord));
+        }
+        if let Some(tree) = result.dendrogram.as_ref() {
+            out.dendrograms
+                .push(dendrogram_visualization("Gene expression", tree));
+        }
+    }
+    if let Some(result) = run.primary.transcript.as_ref() {
+        out.expression_panels
+            .push(expression_visualization("Transcript expression", result));
+        if let Some(ord) = result.pca.as_ref() {
+            out.ordinations
+                .push(ordination_visualization("Transcript expression", ord));
+        }
+        if let Some(tree) = result.dendrogram.as_ref() {
+            out.dendrograms
+                .push(dendrogram_visualization("Transcript expression", tree));
+        }
+    }
+    if let Some(result) = run.primary.bcr.as_ref() {
+        push_repertoire_visualizations(&mut out, "BCR", result);
+    }
+    if let Some(result) = run.primary.bcr_isotype.as_ref() {
+        out.effect_panels.push(effect_visualization(
+            "BCR isotype",
+            "CLR isotype effects",
+            &result.tests,
+        ));
+        if let Some(ord) = result.ordination.as_ref() {
+            out.ordinations
+                .push(ordination_visualization("BCR isotype", ord));
+        }
+        if let Some(tree) = result.dendrogram.as_ref() {
+            out.dendrograms
+                .push(dendrogram_visualization("BCR isotype", tree));
+        }
+    }
+    if let Some(result) = run.primary.tcr_alpha.as_ref() {
+        push_repertoire_visualizations(&mut out, "TCR alpha", result);
+    }
+    if let Some(result) = run.primary.tcr_beta.as_ref() {
+        push_repertoire_visualizations(&mut out, "TCR beta", result);
+    }
+    if let Some(result) = run.primary.immune.as_ref() {
+        out.effect_panels.push(effect_visualization(
+            "Immune infiltrate",
+            "Adjusted immune-cell effects",
+            &result.tests,
+        ));
+        if let Some(ord) = result.pca.as_ref() {
+            out.ordinations
+                .push(ordination_visualization("Immune infiltrate", ord));
+        }
+        if let Some(tree) = result.dendrogram.as_ref() {
+            out.dendrograms
+                .push(dendrogram_visualization("Immune infiltrate", tree));
+        }
+    }
+    if let Some(result) = run.primary.pathway.as_ref() {
+        let mut rows = result
+            .tests
+            .iter()
+            .filter(|row| {
+                row.q_value.is_finite()
+                    && row.q_value >= 0.0
+                    && row.p_value.is_finite()
+                    && row.odds_ratio.is_finite()
+                    && row.odds_ratio > 0.0
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| {
+            a.q_value
+                .total_cmp(&b.q_value)
+                .then_with(|| a.p_value.total_cmp(&b.p_value))
+                .then_with(|| b.odds_ratio.total_cmp(&a.odds_ratio))
+        });
+        out.pathway_points = rows
+            .into_iter()
+            .take(MAX_VIS_PATHWAY_POINTS)
+            .map(|row| PathwayVisualizationPoint {
+                pathway: row.pathway.clone(),
+                description: row.description.clone(),
+                measured_set_size: row.measured_set_size,
+                overlap: row.overlap,
+                odds_ratio: row.odds_ratio,
+                p_value: row.p_value,
+                q_value: row.q_value,
+            })
+            .collect();
+    }
+
+    out
+}
+
+fn expression_visualization(
+    modality: &str,
+    result: &CorrectedExpressionResult,
+) -> ExpressionVisualizationSummary {
+    let valid = result
+        .tests
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row.beta_group.is_finite()
+                && row.p_value.is_finite()
+                && row.q_value.is_finite()
+                && row.q_value >= 0.0
+        })
+        .collect::<Vec<_>>();
+    let significant_q05 = valid.iter().filter(|(_, row)| row.q_value <= 0.05).count();
+
+    let mut ranked = valid.clone();
+    ranked.sort_by(|(_, a), (_, b)| {
+        a.q_value
+            .total_cmp(&b.q_value)
+            .then_with(|| a.p_value.total_cmp(&b.p_value))
+            .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
+    });
+
+    let signal_budget = MAX_VIS_EXPRESSION_POINTS / 2;
+    let mut selected = BTreeSet::new();
+    for (idx, _) in ranked.iter().take(signal_budget) {
+        selected.insert(*idx);
+    }
+    let remaining = MAX_VIS_EXPRESSION_POINTS.saturating_sub(selected.len());
+    if remaining > 0 && !valid.is_empty() {
+        let stride = (valid.len() as f64 / remaining as f64).max(1.0);
+        let mut cursor = 0.0f64;
+        while selected.len() < MAX_VIS_EXPRESSION_POINTS && (cursor as usize) < valid.len() {
+            selected.insert(valid[cursor as usize].0);
+            cursor += stride;
+        }
+    }
+
+    let points = selected
+        .into_iter()
+        .filter_map(|idx| result.tests.get(idx))
+        .map(feature_visualization_point)
+        .collect::<Vec<_>>();
+
+    ExpressionVisualizationSummary {
+        modality: modality.to_string(),
+        tested_features: result.tested_features,
+        filtered_features: result.filtered_features,
+        significant_q05,
+        plotted_features: points.len(),
+        points,
+    }
+}
+
+fn effect_visualization(
+    modality: &str,
+    family: &str,
+    tests: &[AdjustedFeatureResult],
+) -> EffectVisualizationSummary {
+    let mut rows = tests
+        .iter()
+        .filter(|row| {
+            row.beta_group.is_finite()
+                && row.p_value.is_finite()
+                && row.q_value.is_finite()
+                && row.q_value >= 0.0
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        a.q_value
+            .total_cmp(&b.q_value)
+            .then_with(|| a.p_value.total_cmp(&b.p_value))
+            .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
+    });
+    EffectVisualizationSummary {
+        modality: modality.to_string(),
+        family: family.to_string(),
+        total_tests: tests.len(),
+        points: rows
+            .into_iter()
+            .take(MAX_VIS_EFFECT_POINTS)
+            .map(feature_visualization_point)
+            .collect(),
+    }
+}
+
+fn feature_visualization_point(row: &AdjustedFeatureResult) -> FeatureVisualizationPoint {
+    FeatureVisualizationPoint {
+        feature: row.feature.clone(),
+        secondary_id: row.secondary_id.clone(),
+        effect: row.beta_group,
+        p_value: row.p_value,
+        q_value: row.q_value,
+        mean_case: row.mean_case,
+        mean_control: row.mean_control,
+    }
+}
+
+fn ordination_visualization(
+    modality: &str,
+    ord: &OrdinationResult,
+) -> OrdinationVisualizationSummary {
+    OrdinationVisualizationSummary {
+        modality: modality.to_string(),
+        title: ord.name.clone(),
+        x_label: ord.x_label.clone(),
+        y_label: ord.y_label.clone(),
+        permanova_f: ord.permanova_f,
+        permanova_p: ord.permanova_p,
+        permutations: ord.permutations,
+        points: ord
+            .points
+            .iter()
+            .map(|point| OrdinationVisualizationPoint {
+                sample_id: point.sample_id.clone(),
+                group: point.group.clone(),
+                subject: point.subject.clone(),
+                x: point.x,
+                y: point.y,
+            })
+            .collect(),
+    }
+}
+
+fn dendrogram_visualization(
+    modality: &str,
+    tree: &DendrogramResult,
+) -> DendrogramVisualizationSummary {
+    DendrogramVisualizationSummary {
+        modality: modality.to_string(),
+        title: tree.name.clone(),
+        distance_label: tree.distance_label.clone(),
+        leaves: tree
+            .leaves
+            .iter()
+            .map(|leaf| DendrogramVisualizationLeaf {
+                sample_id: leaf.sample_id.clone(),
+                group: leaf.group.clone(),
+                subject: leaf.subject.clone(),
+                position: leaf.position,
+            })
+            .collect(),
+        segments: tree
+            .segments
+            .iter()
+            .map(|segment| DendrogramVisualizationSegment {
+                x1: segment.x1,
+                y1: segment.y1,
+                x2: segment.x2,
+                y2: segment.y2,
+            })
+            .collect(),
+    }
+}
+
+fn push_repertoire_visualizations(
+    out: &mut UnifiedVisualizationSummary,
+    modality: &str,
+    result: &CorrectedRepertoireResult,
+) {
+    out.effect_panels.push(effect_visualization(
+        modality,
+        "Adjusted repertoire metrics",
+        &result.metric_tests,
+    ));
+    if let Some(ord) = result.morisita_horn.as_ref() {
+        out.ordinations
+            .push(ordination_visualization(modality, ord));
+    }
+    if let Some(ord) = result.jaccard.as_ref() {
+        out.ordinations
+            .push(ordination_visualization(modality, ord));
+    }
+    if let Some(tree) = result.dendrogram.as_ref() {
+        out.dendrograms
+            .push(dendrogram_visualization(modality, tree));
+    }
+    for composition in &result.compositions {
+        out.effect_panels.push(effect_visualization(
+            modality,
+            &format!("{} CLR effects", composition.family),
+            &composition.tests,
+        ));
+        if let Some(ord) = composition.ordination.as_ref() {
+            out.ordinations
+                .push(ordination_visualization(modality, ord));
+        }
+        if let Some(tree) = composition.dendrogram.as_ref() {
+            out.dendrograms
+                .push(dendrogram_visualization(modality, tree));
+        }
     }
 }
 
@@ -3730,6 +4174,10 @@ pub async fn run_local_web_server(config: WebServerConfig) -> Result<()> {
             axum::routing::delete(delete_stored_job),
         )
         .route(
+            "/api/projects/{project_id}/jobs/{job_id}/artifacts.zip",
+            get(download_all_job_artifacts),
+        )
+        .route(
             "/api/projects/{project_id}/jobs/{job_id}/artifacts/{artifact_id}",
             get(download_job_artifact),
         )
@@ -3815,7 +4263,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         app_version: env!("CARGO_PKG_VERSION"),
-        api_version: 8,
+        api_version: 9,
         default_ttl_hours: state.default_ttl_hours,
         max_ttl_hours: MAX_TTL_HOURS,
         upload_enabled: true,
@@ -3826,6 +4274,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         unified_analysis_enabled: true,
         metadata_profile_enabled: true,
         report_download_enabled: true,
+        bulk_artifact_download_enabled: true,
+        result_visualizations_enabled: true,
         job_deletion_enabled: true,
         batch_upload_enabled: true,
         storage_backend: "local-filesystem",
@@ -4162,6 +4612,71 @@ async fn delete_stored_job(
     }
 }
 
+async fn download_all_job_artifacts(
+    State(state): State<AppState>,
+    Path((project_id, job_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let project_id = parse_project_id(&project_id)?;
+    let job_id = Uuid::parse_str(&job_id)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid job UUID"))?;
+    let token = bearer_token(&headers)?;
+    let records = state
+        .store
+        .list_job_artifact_records_authorized(project_id, token, job_id)
+        .await
+        .map_err(map_authorization_or_not_found)?;
+    if records.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "this job has no retained artifacts to download",
+        ));
+    }
+    let uncompressed_bytes = records
+        .iter()
+        .try_fold(0u64, |total, record| total.checked_add(record.byte_size))
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "artifact byte count overflow",
+            )
+        })?;
+    if uncompressed_bytes > MAX_BULK_DOWNLOAD_UNCOMPRESSED_BYTES {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "bulk artifact download is limited to {} uncompressed bytes per request; this job has {} bytes. Download the largest artifacts individually.",
+                MAX_BULK_DOWNLOAD_UNCOMPRESSED_BYTES, uncompressed_bytes
+            ),
+        ));
+    }
+
+    let entries = records
+        .into_iter()
+        .map(|record| {
+            let path = state
+                .store
+                .job_artifact_data_path(project_id, job_id, record.artifact_id);
+            (record, path)
+        })
+        .collect::<Vec<_>>();
+    let archive = tokio::task::spawn_blocking(move || build_job_artifact_zip(entries))
+        .await
+        .map_err(|error| ApiError::internal(format!("bulk-download worker failed: {error}")))?
+        .map_err(ApiError::internal)?;
+
+    let filename = format!("4c_job_{job_id}_artifacts.zip");
+    let mut response = Response::new(Body::from(archive));
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    if let Ok(value) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
+        response.headers_mut().insert(CONTENT_DISPOSITION, value);
+    }
+    Ok(response)
+}
+
 async fn download_job_artifact(
     State(state): State<AppState>,
     Path((project_id, job_id, artifact_id)): Path<(String, String, String)>,
@@ -4194,6 +4709,54 @@ async fn download_job_artifact(
         }
         Err(error) => Err(map_authorization_or_not_found(error)),
     }
+}
+
+fn build_job_artifact_zip(entries: Vec<(StoredJobArtifactRecord, PathBuf)>) -> Result<Vec<u8>> {
+    let manifest = entries
+        .iter()
+        .map(|(record, _)| record.clone())
+        .collect::<Vec<_>>();
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut cursor);
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .unix_permissions(0o600);
+        zip.start_file("artifact_manifest.json", options)?;
+        zip.write_all(&manifest_bytes)?;
+
+        let mut used_names = HashSet::new();
+        used_names.insert("artifact_manifest.json".to_string());
+        for (record, path) in entries {
+            let data = std::fs::read(&path).with_context(|| {
+                format!(
+                    "failed to read retained artifact '{}' ({})",
+                    record.name, record.artifact_id
+                )
+            })?;
+            if data.len() as u64 != record.byte_size {
+                bail!(
+                    "artifact '{}' size changed while preparing the download archive",
+                    record.name
+                );
+            }
+            let mut name = sanitize_download_name(&record.name);
+            if name.is_empty() {
+                name = format!("artifact_{}", record.artifact_id);
+            }
+            if !used_names.insert(name.clone()) {
+                let suffix = record.artifact_id.to_string();
+                name = format!("{}__{}", name, &suffix[..8]);
+                used_names.insert(name.clone());
+            }
+            let file_options = options.large_file(record.byte_size > u32::MAX as u64);
+            zip.start_file(name, file_options)?;
+            zip.write_all(&data)?;
+        }
+        zip.finish()?;
+    }
+    Ok(cursor.into_inner())
 }
 
 fn sanitize_download_name(value: &str) -> String {
@@ -4749,6 +5312,68 @@ mod tests {
         assert_eq!(project_after_delete.job_snapshot_bytes, 0);
         assert_eq!(project_after_delete.job_artifact_bytes, 0);
         assert!(!store.job_dir(project_id, job_id).exists());
+    }
+
+    #[test]
+    fn bulk_artifact_zip_contains_manifest_and_all_files() {
+        use std::io::Read;
+
+        let temp = TempDir::new().unwrap();
+        let first_path = temp.path().join("first.bin");
+        let second_path = temp.path().join("second.bin");
+        std::fs::write(&first_path, b"alpha").unwrap();
+        std::fs::write(&second_path, b"beta").unwrap();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let bytes = build_job_artifact_zip(vec![
+            (
+                StoredJobArtifactRecord {
+                    schema_version: 1,
+                    artifact_id: first_id,
+                    name: "report.html".to_string(),
+                    media_type: "text/html".to_string(),
+                    byte_size: 5,
+                    sha256: "a".repeat(64),
+                },
+                first_path,
+            ),
+            (
+                StoredJobArtifactRecord {
+                    schema_version: 1,
+                    artifact_id: second_id,
+                    name: "table.tsv".to_string(),
+                    media_type: "text/tab-separated-values".to_string(),
+                    byte_size: 4,
+                    sha256: "b".repeat(64),
+                },
+                second_path,
+            ),
+        ])
+        .unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(archive.len(), 3);
+        let mut report = String::new();
+        archive
+            .by_name("report.html")
+            .unwrap()
+            .read_to_string(&mut report)
+            .unwrap();
+        assert_eq!(report, "alpha");
+        let mut table = String::new();
+        archive
+            .by_name("table.tsv")
+            .unwrap()
+            .read_to_string(&mut table)
+            .unwrap();
+        assert_eq!(table, "beta");
+        let mut manifest = String::new();
+        archive
+            .by_name("artifact_manifest.json")
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        assert!(manifest.contains("report.html"));
+        assert!(manifest.contains("table.tsv"));
     }
 
     #[tokio::test]

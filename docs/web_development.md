@@ -1,8 +1,8 @@
 # 4C Cohort Explorer web development
 
-## Current status: Phase 3E.2 metadata-driven comparison configuration (v0.16.10)
+## Current status: Phase 3E.3 browser result visualizations + bulk export (v0.16.11)
 
-Phase 3D.2 has been exercised on a realistic private project with 2,140 uploaded objects / 4.21 GiB, and Phase 3E.1 has produced full unified report/table artifacts. Phase 3E.2 keeps that validated scientific job architecture and removes free-text cohort grouping from the browser: comparison columns and value counts are now loaded directly from the assigned primary metadata and selected with native-like controls.
+Phase 3D.2 has been exercised on a realistic private project with 2,140 uploaded objects / 4.21 GiB, Phase 3E.1 has produced full unified report/table artifacts, and Phase 3E.2 validated metadata-backed Case/Control configuration. Phase 3E.3 now presents the same completed native unified result interactively in the browser and adds a one-click authenticated ZIP of all retained job artifacts.
 
 ```text
 Desktop
@@ -12,7 +12,7 @@ Desktop
         ↓
     existing Rust unified scientific analysis
 
-Browser (Phase 3E.2)
+Browser (Phase 3E.3)
     egui / eframe WebRunner (WASM)
         ↓ same-origin HTTP + bearer capability
     cfs-server (Axum, native Rust)
@@ -26,7 +26,8 @@ Browser (Phase 3E.2)
               ├── immutable persisted job snapshots
               ├── existing run_unified_cohort_analysis()
               ├── simplified + full reports from one result
-              ├── authenticated artifact downloads
+              ├── interactive native-result visualization payloads
+              ├── authenticated individual + bulk ZIP downloads
               └── terminal per-job deletion
                         ↓
                private local filesystem storage
@@ -522,7 +523,7 @@ Expected capabilities include:
 ```json
 {
   "status": "ok",
-  "api_version": 8,
+  "api_version": 9,
   "upload_enabled": true,
   "mapping_enabled": true,
   "analysis_enabled": true,
@@ -531,6 +532,8 @@ Expected capabilities include:
   "unified_analysis_enabled": true,
   "metadata_profile_enabled": true,
   "report_download_enabled": true,
+  "bulk_artifact_download_enabled": true,
+  "result_visualizations_enabled": true,
   "job_deletion_enabled": true,
   "batch_upload_enabled": true,
   "storage_backend": "local-filesystem",
@@ -539,11 +542,11 @@ Expected capabilities include:
 }
 ```
 
-`analysis_enabled=true` plus `unified_analysis_enabled=true` means the frozen unified native lane is available. `metadata_profile_enabled=true` means the browser can populate comparison controls directly from authenticated primary metadata. It does not imply production public-host hardening or S3/MinIO deployment.
+`analysis_enabled=true` plus `unified_analysis_enabled=true` means the frozen unified native lane is available. `metadata_profile_enabled=true` means the browser can populate comparison controls directly from authenticated primary metadata. `result_visualizations_enabled=true` exposes bounded browser presentation payloads derived from completed native results, while `bulk_artifact_download_enabled=true` exposes the authenticated on-demand ZIP route. None of these imply production public-host hardening or S3/MinIO deployment.
 
 ---
 
-## Recommended Phase-3E.2 validation sequence
+## Recommended Phase-3E.3 validation sequence
 
 Use harmless synthetic/non-patient data first.
 
@@ -604,11 +607,27 @@ With a harmless valid merged gene-expression TSV assigned:
 
 The core effect estimates/p/q values should match because the same native function and defaults are used.
 
-### 5. Snapshot immutability
+### 5. Interactive result visualization + bulk download
+
+Submit a new v0.16.11 unified job and open it after completion. Verify:
+
+- gene/transcript volcano panels appear when those modalities completed;
+- PCA/PCoA panels use the native ordination coordinates and show the native PERMANOVA summary;
+- BCR/TCR/isotype/immune corrected-effect panels appear when available;
+- pathway enrichment appears when a deliberate GMT was assigned and pathway ORA completed;
+- browser plots are described as bounded presentation views and the full native rows remain in the technical tables/reports;
+- **Download all as ZIP** produces one archive containing every retained artifact plus `artifact_manifest.json`;
+- the ZIP manifest records artifact UUID, name, media type, byte size, and SHA-256;
+- individual **Download** controls still work;
+- the ZIP itself is not added to project retained-storage accounting as a second persisted copy.
+
+Jobs completed before v0.16.11 remain readable but do not contain the new persisted visualization payload. Rerun a unified job if interactive browser plots are needed for an older project.
+
+### 6. Snapshot immutability
 
 After submitting a job, alter/delete an original uploaded object. The frozen job already created should remain based on the submitted snapshot; a **new** job must require a freshly validated mapping if project inputs changed.
 
-### 6. Persistence/recovery
+### 7. Persistence/recovery
 
 After a completed job:
 
@@ -617,11 +636,11 @@ After a completed job:
 3. open the old job;
 4. confirm its mapping/QC/gene summaries and artifact metadata are still available.
 
-### 7. Restart behavior
+### 8. Restart behavior
 
 If practical with synthetic data, stop `cfs-server` during a running job and restart it. The interrupted job should be marked failed rather than remaining indefinitely `running`.
 
-### 8. Project deletion
+### 9. Project deletion
 
 Delete the project and confirm:
 
@@ -650,7 +669,7 @@ CFS_MAX_JOBS              default 16
 CFS_MAX_CONCURRENT_JOBS   default 1
 ```
 
-The current job-artifact safety cap is compiled as 128 MiB per artifact.
+The current job-artifact safety cap is compiled as 128 MiB per artifact. On-demand bulk ZIP assembly is additionally limited to 1 GiB of uncompressed retained artifact bytes per request so a single browser download cannot accidentally consume unbounded server memory.
 
 ---
 
@@ -672,4 +691,4 @@ For private patient data, a self-hosted server using a secure local/NAS path rem
 
 ## Next web milestone
 
-After Phase 3E.2 is locally validated for metadata-selection parity in addition to scientific/report parity, the next infrastructure phase is an operator-managed S3/MinIO storage implementation behind the existing opaque storage contract plus HTTPS/reverse-proxy/deployment hardening. Do not introduce a login/account system merely for localhost development.
+After Phase 3E.3 is locally validated for browser visualization parity and bulk export, the next infrastructure phase can move to an operator-managed S3/MinIO storage implementation behind the existing opaque storage contract plus HTTPS/reverse-proxy/deployment hardening. Do not introduce a login/account system merely for localhost development.

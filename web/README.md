@@ -2,7 +2,9 @@
 
 This directory contains the WASM/`eframe` browser client for 4C Cohort Explorer.
 
-## Current status: Phase 3E.2 metadata-driven comparison configuration (v0.16.10)
+## Current status: Phase 3E.3 browser result visualizations + bulk export (v0.16.11)
+
+The browser now renders bounded interactive presentation views directly from the completed native unified result and can download every retained job artifact as one authenticated ZIP. No statistical calculation is duplicated in WASM; full-resolution tables and both HTML reports remain the authoritative persisted outputs.
 
 The browser is served by the native Rust `cfs-server` and now supports:
 
@@ -26,7 +28,9 @@ The browser is served by the native Rust `cfs-server` and now supports:
 - reviewed QC exclusions with frozen provenance (automatic flags are never silently removed);
 - native pathway/PBMC/confounding/robustness/candidate-prioritization layers where their inputs are available;
 - simplified and full HTML reports generated from the same completed native unified result;
-- authenticated browser artifact/report downloads and terminal persisted-job deletion;
+- interactive browser result plots derived from the completed native unified result;
+- authenticated individual artifact/report downloads plus one-click bulk ZIP export;
+- terminal persisted-job deletion;
 - shared 4C visual theme and canonical Docs/search/toy plots.
 
 The browser now executes that unified scientific stack on the native Rust server. S3/MinIO and production public-host deployment hardening remain later phases; local filesystem + localhost stay the development defaults.
@@ -114,7 +118,7 @@ Before submission, an opened QC result can be reviewed sample-by-sample. Automat
 
 Every corrected modality actually present in the frozen project is enabled automatically. Pathway ORA additionally requires a deliberately assigned `pathway_gmt` object. Optional subject/covariate and PBMC diagnostic columns are frozen in the request. Fault-tolerant modality errors are reported in the unified result rather than replacing the native behavior.
 
-On completion, the job persists a unified summary, native technical tables, and both simplified and detailed HTML reports generated from the same `UnifiedCohortAnalysisRun`. **Open results** loads a persisted result below the history table. **Download** performs an authenticated fetch and saves through a temporary browser Blob URL; the recovery token is never embedded in the download URL. Terminal jobs can be deleted independently of their project/source uploads.
+On completion, the job persists a unified summary, bounded browser-visualization payloads, native technical tables, and both simplified and detailed HTML reports generated from the same `UnifiedCohortAnalysisRun`. **Open results** loads a persisted result below the history table and renders volcano/effect/ordination/pathway views without rerunning statistics. **Download** performs an authenticated fetch and saves through a temporary browser Blob URL; **Download all as ZIP** assembles every retained artifact plus a manifest on demand. The recovery token is never embedded in either download URL. Terminal jobs can be deleted independently of their project/source uploads.
 
 Older Phase-3D job records are still readable and display their representative gene result when no unified payload exists.
 

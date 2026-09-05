@@ -1,4 +1,4 @@
-//! Same-origin Phase-3E.2 client for the local `cfs-server` API.
+//! Same-origin Phase-3E.3 client for the local `cfs-server` API.
 
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -23,6 +23,10 @@ pub struct HealthResponse {
     pub metadata_profile_enabled: bool,
     #[serde(default)]
     pub report_download_enabled: bool,
+    #[serde(default)]
+    pub bulk_artifact_download_enabled: bool,
+    #[serde(default)]
+    pub result_visualizations_enabled: bool,
     #[serde(default)]
     pub job_deletion_enabled: bool,
     pub batch_upload_enabled: bool,
@@ -237,6 +241,108 @@ pub struct UnifiedAnalysisSummary {
     pub exploratory_transcript_available: bool,
     pub pbmc_diagnostics_available: bool,
     pub candidates: Vec<UnifiedCandidateSummary>,
+    #[serde(default)]
+    pub visualizations: UnifiedVisualizationSummary,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UnifiedVisualizationSummary {
+    #[serde(default)]
+    pub expression_panels: Vec<ExpressionVisualizationSummary>,
+    #[serde(default)]
+    pub effect_panels: Vec<EffectVisualizationSummary>,
+    #[serde(default)]
+    pub ordinations: Vec<OrdinationVisualizationSummary>,
+    #[serde(default)]
+    pub dendrograms: Vec<DendrogramVisualizationSummary>,
+    #[serde(default)]
+    pub pathway_points: Vec<PathwayVisualizationPoint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExpressionVisualizationSummary {
+    pub modality: String,
+    pub tested_features: usize,
+    pub filtered_features: usize,
+    pub significant_q05: usize,
+    pub plotted_features: usize,
+    pub points: Vec<FeatureVisualizationPoint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EffectVisualizationSummary {
+    pub modality: String,
+    pub family: String,
+    pub total_tests: usize,
+    pub points: Vec<FeatureVisualizationPoint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeatureVisualizationPoint {
+    pub feature: String,
+    pub secondary_id: String,
+    pub effect: f64,
+    pub p_value: f64,
+    pub q_value: f64,
+    pub mean_case: f64,
+    pub mean_control: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrdinationVisualizationSummary {
+    pub modality: String,
+    pub title: String,
+    pub x_label: String,
+    pub y_label: String,
+    pub permanova_f: f64,
+    pub permanova_p: f64,
+    pub permutations: usize,
+    pub points: Vec<OrdinationVisualizationPoint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrdinationVisualizationPoint {
+    pub sample_id: String,
+    pub group: String,
+    pub subject: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DendrogramVisualizationSummary {
+    pub modality: String,
+    pub title: String,
+    pub distance_label: String,
+    pub leaves: Vec<DendrogramVisualizationLeaf>,
+    pub segments: Vec<DendrogramVisualizationSegment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DendrogramVisualizationLeaf {
+    pub sample_id: String,
+    pub group: String,
+    pub subject: String,
+    pub position: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DendrogramVisualizationSegment {
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PathwayVisualizationPoint {
+    pub pathway: String,
+    pub description: String,
+    pub measured_set_size: usize,
+    pub overlap: usize,
+    pub odds_ratio: f64,
+    pub p_value: f64,
+    pub q_value: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -572,6 +678,32 @@ pub async fn delete_stored_job(
     .await
     .map_err(|error| format!("stored job deletion request failed: {error}"))?;
     decode(response).await
+}
+
+pub async fn download_all_job_artifacts(
+    project_id: &str,
+    recovery_token: &str,
+    job_id: &str,
+) -> Result<Vec<u8>, String> {
+    let response = Request::get(&format!(
+        "{API_ROOT}/projects/{project_id}/jobs/{job_id}/artifacts.zip"
+    ))
+    .header("Authorization", &format!("Bearer {recovery_token}"))
+    .send()
+    .await
+    .map_err(|error| format!("bulk artifact download request failed: {error}"))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "server returned no readable error body".to_string());
+        return Err(format!("server returned HTTP {status}: {body}"));
+    }
+    response
+        .binary()
+        .await
+        .map_err(|error| format!("failed to read ZIP bundle bytes: {error}"))
 }
 
 pub async fn download_job_artifact(
