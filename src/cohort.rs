@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use calamine::{Data, Reader, Xlsx, open_workbook};
-use csv::ReaderBuilder;
+use csv::{ReaderBuilder, StringRecord};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -849,57 +849,68 @@ where
         );
     }
 
-    let total_rows = count_delimited_rows(merged_tsv, b'\t')?.saturating_sub(1);
-    let mut tests = Vec::with_capacity(total_rows.min(30_000));
-    for (row_idx, record) in reader.records().enumerate() {
-        let record = record?;
-        let feature = record.get(0).unwrap_or_default().to_string();
-        let secondary_id = record.get(1).unwrap_or_default().to_string();
+    // Older exploratory TPM support first parsed the complete merged matrix
+    // solely to count rows, then parsed the same (potentially multi-GiB)
+    // matrix again to perform the tests.  Use the CSV reader byte position as
+    // progress instead so every direction-concordance run is a single input
+    // pass.  This matters most for transcript matrices with hundreds of sample
+    // columns.
+    let total_bytes = fs::metadata(merged_tsv)
+        .with_context(|| format!("Could not stat {}", merged_tsv.display()))?
+        .len()
+        .max(1);
+    let progress_total = usize::try_from(total_bytes).unwrap_or(usize::MAX).max(1);
+    const DIRECTION_BATCH_ROWS: usize = 4096;
+    let mut tests = Vec::new();
+    let mut work_batch = Vec::with_capacity(DIRECTION_BATCH_ROWS);
+    let mut rows_seen = 0usize;
+    let mut record = StringRecord::new();
+
+    while reader.read_record(&mut record)? {
+        rows_seen += 1;
         let case_raw = values_at(&record, &case_cols);
         let ctrl_raw = values_at(&record, &ctrl_cols);
-        if case_raw.len() < 2 || ctrl_raw.len() < 2 {
-            continue;
+        if case_raw.len() >= 2 && ctrl_raw.len() >= 2 {
+            work_batch.push(DirectionComparisonWorkRow {
+                feature: record.get(0).unwrap_or_default().to_string(),
+                secondary_id: record.get(1).unwrap_or_default().to_string(),
+                case_raw,
+                control_raw: ctrl_raw,
+            });
         }
-        let case_log: Vec<f64> = case_raw.iter().map(|x| (x.max(0.0) + 1.0).log2()).collect();
-        let ctrl_log: Vec<f64> = ctrl_raw.iter().map(|x| (x.max(0.0) + 1.0).log2()).collect();
-        let p_value = mann_whitney_p(&case_log, &ctrl_log);
-        let mean_case = mean(&case_raw);
-        let mean_control = mean(&ctrl_raw);
-        let effect = ((mean_case + 0.5) / (mean_control + 0.5)).log2();
-        tests.push(FeatureTestResult {
-            feature,
-            secondary_id,
-            n_case: case_raw.len(),
-            n_control: ctrl_raw.len(),
-            mean_case,
-            mean_control,
-            median_case: median(&case_raw),
-            median_control: median(&ctrl_raw),
-            effect,
-            cliffs_delta: cliffs_delta(&case_log, &ctrl_log),
-            p_value,
-            q_value: f64::NAN,
-            detection_case: Some(
-                case_raw.iter().filter(|x| **x > 0.0).count() as f64 / case_raw.len() as f64,
-            ),
-            detection_control: Some(
-                ctrl_raw.iter().filter(|x| **x > 0.0).count() as f64 / ctrl_raw.len() as f64,
-            ),
-        });
-        if row_idx % 250 == 0 {
+        if work_batch.len() >= DIRECTION_BATCH_ROWS {
+            tests.extend(model_direction_batch_parallel(&work_batch));
+            work_batch.clear();
+            let done = usize::try_from(reader.position().byte())
+                .unwrap_or(usize::MAX)
+                .min(progress_total);
             progress(
-                row_idx + 1,
-                total_rows.max(1),
-                &format!("Testing {metric} expression"),
+                done,
+                progress_total,
+                &format!(
+                    "Testing {metric} expression ({rows_seen} rows; {} worker(s))",
+                    direction_worker_count(DIRECTION_BATCH_ROWS)
+                ),
             );
         }
     }
+    if !work_batch.is_empty() {
+        let workers = direction_worker_count(work_batch.len());
+        tests.extend(model_direction_batch_parallel(&work_batch));
+        work_batch.clear();
+        progress(
+            progress_total.saturating_sub(1),
+            progress_total,
+            &format!("Testing {metric} expression ({rows_seen} rows; {workers} worker(s))"),
+        );
+    }
+
     apply_bh(&mut tests);
     tests.sort_by(feature_result_order);
     progress(
-        total_rows.max(1),
-        total_rows.max(1),
-        "Gene comparison complete",
+        progress_total,
+        progress_total,
+        &format!("{metric} direction-concordance comparison complete ({rows_seen} rows)"),
     );
     Ok(GeneComparisonResult {
         input: merged_tsv.to_path_buf(),
@@ -909,6 +920,149 @@ where
         unmatched_columns,
         tests,
     })
+}
+
+#[derive(Debug)]
+struct DirectionComparisonWorkRow {
+    feature: String,
+    secondary_id: String,
+    case_raw: Vec<f64>,
+    control_raw: Vec<f64>,
+}
+
+fn model_direction_row(row: &DirectionComparisonWorkRow) -> Option<FeatureTestResult> {
+    if row.case_raw.len() < 2 || row.control_raw.len() < 2 {
+        return None;
+    }
+    let mean_case = mean(&row.case_raw);
+    let mean_control = mean(&row.control_raw);
+    let (p_value, cliffs_delta) = mann_whitney_and_cliffs_log1p(&row.case_raw, &row.control_raw);
+    Some(FeatureTestResult {
+        feature: row.feature.clone(),
+        secondary_id: row.secondary_id.clone(),
+        n_case: row.case_raw.len(),
+        n_control: row.control_raw.len(),
+        mean_case,
+        mean_control,
+        median_case: median(&row.case_raw),
+        median_control: median(&row.control_raw),
+        effect: ((mean_case + 0.5) / (mean_control + 0.5)).log2(),
+        cliffs_delta,
+        p_value,
+        q_value: f64::NAN,
+        detection_case: Some(
+            row.case_raw.iter().filter(|x| **x > 0.0).count() as f64 / row.case_raw.len() as f64,
+        ),
+        detection_control: Some(
+            row.control_raw.iter().filter(|x| **x > 0.0).count() as f64
+                / row.control_raw.len() as f64,
+        ),
+    })
+}
+
+fn direction_worker_count(row_count: usize) -> usize {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = row_count;
+        1
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let available = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1);
+        available.min(8).min(row_count.div_ceil(256).max(1))
+    }
+}
+
+fn model_direction_batch_parallel(rows: &[DirectionComparisonWorkRow]) -> Vec<FeatureTestResult> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let workers = direction_worker_count(rows.len());
+        if workers > 1 && rows.len() >= 512 {
+            let chunk_size = rows.len().div_ceil(workers);
+            return std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for chunk in rows.chunks(chunk_size) {
+                    handles.push(scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .filter_map(model_direction_row)
+                            .collect::<Vec<_>>()
+                    }));
+                }
+                let mut out = Vec::with_capacity(rows.len());
+                for handle in handles {
+                    // A scoped worker only performs pure per-row statistics;
+                    // panic here is a programming error and should fail the
+                    // analysis rather than silently drop scientific rows.
+                    out.extend(handle.join().expect("direction-comparison worker panicked"));
+                }
+                out
+            });
+        }
+    }
+    rows.iter().filter_map(model_direction_row).collect()
+}
+
+/// Compute the Mann-Whitney normal-approximation p-value and Cliff's delta
+/// from one shared ranking pass. The previous exploratory direction check
+/// sorted the combined groups for Mann-Whitney and then independently sorted
+/// the control group again for Cliff's delta. Because log2(max(x,0)+1) is
+/// monotonic, the same U statistic gives Cliff's delta exactly, including the
+/// existing half-tie convention: delta = 2U/(n1*n2) - 1.
+fn mann_whitney_and_cliffs_log1p(case_raw: &[f64], control_raw: &[f64]) -> (f64, f64) {
+    if case_raw.len() < 2 || control_raw.len() < 2 {
+        return (f64::NAN, f64::NAN);
+    }
+    let mut combined = Vec::with_capacity(case_raw.len() + control_raw.len());
+    combined.extend(
+        case_raw
+            .iter()
+            .map(|value| ((value.max(0.0) + 1.0).log2(), true)),
+    );
+    combined.extend(
+        control_raw
+            .iter()
+            .map(|value| ((value.max(0.0) + 1.0).log2(), false)),
+    );
+    combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+
+    let mut rank_sum_case = 0.0;
+    let mut tie_sum = 0.0;
+    let mut i = 0usize;
+    while i < combined.len() {
+        let mut j = i + 1;
+        while j < combined.len() && combined[j].0 == combined[i].0 {
+            j += 1;
+        }
+        let avg_rank = ((i + 1 + j) as f64) / 2.0;
+        for item in &combined[i..j] {
+            if item.1 {
+                rank_sum_case += avg_rank;
+            }
+        }
+        let t = (j - i) as f64;
+        if t > 1.0 {
+            tie_sum += t * t * t - t;
+        }
+        i = j;
+    }
+
+    let n1 = case_raw.len() as f64;
+    let n2 = control_raw.len() as f64;
+    let n = n1 + n2;
+    let u1 = rank_sum_case - n1 * (n1 + 1.0) / 2.0;
+    let cliffs_delta = (2.0 * u1 / (n1 * n2) - 1.0).clamp(-1.0, 1.0);
+    let mean_u = n1 * n2 / 2.0;
+    let variance = n1 * n2 / 12.0 * ((n + 1.0) - tie_sum / (n * (n - 1.0)));
+    let p_value = if variance <= 0.0 || !variance.is_finite() {
+        1.0
+    } else {
+        let z = (u1 - mean_u).abs() / variance.sqrt();
+        (2.0 * (1.0 - normal_cdf(z))).clamp(0.0, 1.0)
+    };
+    (p_value, cliffs_delta)
 }
 
 pub fn run_transcript_comparison<F>(
@@ -1818,16 +1972,6 @@ fn values_at(record: &csv::StringRecord, cols: &[usize]) -> Vec<f64> {
         .collect()
 }
 
-fn count_delimited_rows(path: &Path, delimiter: u8) -> Result<usize> {
-    let mut reader = ReaderBuilder::new().delimiter(delimiter).from_path(path)?;
-    let mut n = 1usize;
-    for row in reader.records() {
-        row?;
-        n += 1;
-    }
-    Ok(n)
-}
-
 pub fn normalize_sample_id(value: &str) -> String {
     value
         .trim()
@@ -2412,5 +2556,52 @@ mod tests {
         apply_bh(&mut rows);
         assert!(rows.iter().all(|r| r.q_value.is_finite()));
         assert!(rows.iter().all(|r| r.q_value >= r.p_value - 1e-12));
+    }
+
+    #[test]
+    fn combined_rank_test_matches_existing_mann_whitney_and_cliffs_delta() {
+        let cases: [f64; 7] = [0.0, 0.0, 1.0, 2.0, 8.0, 8.0, 13.0];
+        let controls: [f64; 6] = [0.0, 1.0, 1.0, 3.0, 5.0, 21.0];
+        let case_log = cases
+            .iter()
+            .map(|value| ((*value).max(0.0_f64) + 1.0_f64).log2())
+            .collect::<Vec<_>>();
+        let control_log = controls
+            .iter()
+            .map(|value| ((*value).max(0.0_f64) + 1.0_f64).log2())
+            .collect::<Vec<_>>();
+        let expected_p = mann_whitney_p(&case_log, &control_log);
+        let expected_delta = cliffs_delta(&case_log, &control_log);
+        let (p_value, delta) = mann_whitney_and_cliffs_log1p(&cases, &controls);
+        assert!((p_value - expected_p).abs() < 1e-12);
+        assert!((delta - expected_delta).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parallel_direction_batch_matches_scalar_rows() {
+        let rows = (0..2048)
+            .map(|idx| DirectionComparisonWorkRow {
+                feature: format!("TX{idx}"),
+                secondary_id: format!("GENE{}", idx % 100),
+                case_raw: (0..12)
+                    .map(|j| ((idx * 3 + j * 7) % 29) as f64 / 3.0)
+                    .collect(),
+                control_raw: (0..11)
+                    .map(|j| ((idx * 5 + j * 11 + 2) % 31) as f64 / 4.0)
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let expected = rows
+            .iter()
+            .filter_map(model_direction_row)
+            .collect::<Vec<_>>();
+        let actual = model_direction_batch_parallel(&rows);
+        assert_eq!(actual.len(), expected.len());
+        for (left, right) in actual.iter().zip(expected.iter()) {
+            assert_eq!(left.feature, right.feature);
+            assert!((left.effect - right.effect).abs() < 1e-12);
+            assert!((left.p_value - right.p_value).abs() < 1e-12);
+            assert!((left.cliffs_delta - right.cliffs_delta).abs() < 1e-12);
+        }
     }
 }

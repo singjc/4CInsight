@@ -26,6 +26,7 @@ use calamine::{Data, Reader, Xlsx, open_workbook};
 use csv::ReaderBuilder;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1207,7 +1208,25 @@ where
         bail!("Could not align adjusted metadata design with expression columns");
     }
 
-    let total_rows = count_delimited_rows(merged_tsv, b'\t')?.saturating_sub(1);
+    // Use byte-position progress instead of pre-parsing the complete merged
+    // matrix solely to count rows. The old row-count pass was an extra full
+    // CSV/TSV parse before normalization/modeling and was particularly costly
+    // for transcript-scale matrices with hundreds of sample columns.
+    let file_bytes = fs::metadata(merged_tsv)
+        .with_context(|| format!("Could not stat {}", merged_tsv.display()))?
+        .len()
+        .max(1);
+    let file_units = usize::try_from(file_bytes).unwrap_or(usize::MAX / 4).max(1);
+    let is_transcript = feature_label.eq_ignore_ascii_case("Transcript");
+    // Gene: normalization + feature models. Transcript: those two passes plus
+    // the two DTU matrix passes. Saturating arithmetic keeps progress robust
+    // even for unusually large files on narrower usize targets.
+    let total_work = if is_transcript {
+        file_units.saturating_mul(4)
+    } else {
+        file_units.saturating_mul(2)
+    }
+    .max(1);
     let reusable_normalization = normalization_reference.filter(|reference| {
         reference.source_metric == source_metric
             && reference.model_sample_ids.as_slice() == design.sample_ids.as_slice()
@@ -1219,8 +1238,8 @@ where
     });
     let size_factors = if let Some(reference) = reusable_normalization {
         progress(
-            total_rows,
-            (total_rows * 2).max(1),
+            file_units.min(total_work),
+            total_work,
             &format!("{feature_label}: reusing precomputed count size factors"),
         );
         reference.size_factors.clone()
@@ -1232,8 +1251,9 @@ where
             .delimiter(b'\t')
             .flexible(true)
             .from_path(merged_tsv)?;
-        for (row_idx, record) in pass1.records().enumerate() {
-            let record = record?;
+        let mut record = csv::StringRecord::new();
+        let mut row_idx = 0usize;
+        while pass1.read_record(&mut record)? {
             let counts = values_at_columns_with_zero(&record, &design_cols);
             let mut positive_count = 0usize;
             let mut positive_log_sum = 0.0_f64;
@@ -1253,14 +1273,23 @@ where
                     }
                 }
             }
+            row_idx += 1;
             if row_idx % 1000 == 0 {
+                let done = usize::try_from(pass1.position().byte())
+                    .unwrap_or(file_units)
+                    .min(file_units);
                 progress(
-                    row_idx + 1,
-                    (total_rows * 2).max(1),
+                    done,
+                    total_work,
                     &format!("{feature_label}: estimating count size factors"),
                 );
             }
         }
+        progress(
+            file_units.min(total_work),
+            total_work,
+            &format!("{feature_label}: count size factors complete ({row_idx} rows)"),
+        );
         let mut factors = medians
             .iter()
             .map(|m| {
@@ -1290,48 +1319,55 @@ where
     let mut work_batch = Vec::with_capacity(MODEL_BATCH_ROWS);
     let mut modeled_rows = 0usize;
 
-    let mut finish_batch = |batch: &mut Vec<ExpressionModelWorkRow>| -> Result<()> {
-        if batch.is_empty() {
-            return Ok(());
-        }
-        let batch_rows = batch.len();
-        let (mut batch_tests, batch_filtered, mut batch_variable) =
-            model_expression_batch_parallel(
-                batch,
-                &size_factors,
-                &design,
-                spec.min_count,
-                min_present,
-            )?;
-        tests.append(&mut batch_tests);
-        filtered += batch_filtered;
-        top_variable.append(&mut batch_variable);
-        trim_variable_rows(&mut top_variable, 350);
-        modeled_rows += batch_rows;
-        progress(
-            total_rows + modeled_rows.min(total_rows),
-            (total_rows * 2).max(1),
-            &format!(
-                "{feature_label}: adjusted feature models ({} worker(s))",
-                expression_model_worker_count(batch_rows)
-            ),
-        );
-        batch.clear();
-        Ok(())
-    };
+    let mut finish_batch =
+        |batch: &mut Vec<ExpressionModelWorkRow>, pass2_done: usize| -> Result<()> {
+            if batch.is_empty() {
+                return Ok(());
+            }
+            let batch_rows = batch.len();
+            let (mut batch_tests, batch_filtered, mut batch_variable) =
+                model_expression_batch_parallel(
+                    batch,
+                    &size_factors,
+                    &design,
+                    spec.min_count,
+                    min_present,
+                )?;
+            tests.append(&mut batch_tests);
+            filtered += batch_filtered;
+            top_variable.append(&mut batch_variable);
+            trim_variable_rows(&mut top_variable, 350);
+            modeled_rows += batch_rows;
+            progress(
+                file_units.saturating_add(pass2_done.min(file_units)),
+                total_work,
+                &format!(
+                    "{feature_label}: adjusted feature models ({} worker(s); {modeled_rows} rows)",
+                    expression_model_worker_count(batch_rows)
+                ),
+            );
+            batch.clear();
+            Ok(())
+        };
 
-    for record in pass2.records() {
-        let record = record?;
+    let mut record = csv::StringRecord::new();
+    while pass2.read_record(&mut record)? {
         work_batch.push(ExpressionModelWorkRow {
             feature: record.get(0).unwrap_or_default().to_string(),
             secondary: record.get(1).unwrap_or_default().to_string(),
             counts: values_at_columns_with_zero(&record, &design_cols),
         });
         if work_batch.len() >= MODEL_BATCH_ROWS {
-            finish_batch(&mut work_batch)?;
+            let done = usize::try_from(pass2.position().byte())
+                .unwrap_or(file_units)
+                .min(file_units);
+            finish_batch(&mut work_batch, done)?;
         }
     }
-    finish_batch(&mut work_batch)?;
+    let pass2_done = usize::try_from(pass2.position().byte())
+        .unwrap_or(file_units)
+        .min(file_units);
+    finish_batch(&mut work_batch, pass2_done)?;
     apply_bh_adjusted(&mut tests);
     top_variable.sort_by(|a, b| b.variance.total_cmp(&a.variance));
     top_variable.truncate(300);
@@ -1356,16 +1392,34 @@ where
             "Euclidean distance",
         )
     };
-    let dtu = if feature_label.eq_ignore_ascii_case("Transcript") {
-        // DTU performs additional full transcript-matrix passes. Make that
-        // work visible as its own timed substage instead of leaving the last
-        // feature-model progress message on screen for the whole DTU runtime.
+    let dtu = if is_transcript {
+        // DTU is two more full transcript-matrix passes. Give those passes
+        // their own byte-position progress so a long DTU screen cannot look
+        // like the previous feature-model stage has stalled.
         progress(
-            (total_rows * 2).saturating_sub(1),
-            (total_rows * 2).max(1),
-            "Transcript: differential transcript-usage screen",
+            file_units.saturating_mul(2).min(total_work),
+            total_work,
+            "Transcript: DTU gene-total pass",
         );
-        match run_dtu_screen(merged_tsv, &design_cols, &design, spec) {
+        match run_dtu_screen(
+            merged_tsv,
+            &design_cols,
+            &design,
+            spec,
+            |done, total, msg| {
+                let denom = total.max(1);
+                let dtu_span = file_units.saturating_mul(2);
+                let scaled = done.saturating_mul(dtu_span) / denom;
+                progress(
+                    file_units
+                        .saturating_mul(2)
+                        .saturating_add(scaled)
+                        .min(total_work),
+                    total_work,
+                    msg,
+                );
+            },
+        ) {
             Ok(result) => Some(result),
             Err(_) => None,
         }
@@ -1386,8 +1440,8 @@ where
         warnings.push("No subject/repeated-measure column was selected; count models use ordinary NB Wald SEs and the subject-collapsed sensitivity result is equivalent to one observation per sample.".to_string());
     }
     progress(
-        total_rows * 2,
-        total_rows * 2,
+        total_work,
+        total_work,
         &format!("{feature_label}: corrected analysis complete"),
     );
     Ok(CorrectedExpressionResult {
@@ -1415,15 +1469,25 @@ where
     })
 }
 
-fn run_dtu_screen(
+fn run_dtu_screen<F>(
     merged_tsv: &Path,
     design_cols: &[usize],
     design: &DesignMatrix,
     spec: &CorrectedModelSpec,
-) -> Result<CorrectedDtuResult> {
+    mut progress: F,
+) -> Result<CorrectedDtuResult>
+where
+    F: FnMut(usize, usize, &str),
+{
     let n = design_cols.len();
     let pseudo = 0.5_f64;
     let min_present = ((n as f64 * spec.min_fraction_samples).ceil() as usize).max(3);
+    let file_bytes = fs::metadata(merged_tsv)
+        .with_context(|| format!("Could not stat {}", merged_tsv.display()))?
+        .len()
+        .max(1);
+    let file_units = usize::try_from(file_bytes).unwrap_or(usize::MAX / 2).max(1);
+    let total_work = file_units.saturating_mul(2).max(1);
     let mut transcript_counts: HashMap<String, usize> = HashMap::new();
     let mut gene_totals: HashMap<String, Vec<f64>> = HashMap::new();
     let mut gene_log_sums: HashMap<String, Vec<f64>> = HashMap::new();
@@ -1432,25 +1496,38 @@ fn run_dtu_screen(
         .delimiter(b'\t')
         .flexible(true)
         .from_path(merged_tsv)?;
-    for record in reader.records() {
-        let record = record?;
+    let mut record = csv::StringRecord::new();
+    let mut rows_seen = 0usize;
+    while reader.read_record(&mut record)? {
+        rows_seen += 1;
         let gene = record.get(1).unwrap_or_default().trim();
-        if gene.is_empty() {
-            continue;
+        if !gene.is_empty() {
+            let counts = values_at_columns_with_zero(&record, design_cols);
+            *transcript_counts.entry(gene.to_string()).or_insert(0) += 1;
+            let totals = gene_totals
+                .entry(gene.to_string())
+                .or_insert_with(|| vec![0.0; n]);
+            let logs = gene_log_sums
+                .entry(gene.to_string())
+                .or_insert_with(|| vec![0.0; n]);
+            for j in 0..n {
+                totals[j] += counts[j];
+                logs[j] += (counts[j] + pseudo).ln();
+            }
         }
-        let counts = values_at_columns_with_zero(&record, design_cols);
-        *transcript_counts.entry(gene.to_string()).or_insert(0) += 1;
-        let totals = gene_totals
-            .entry(gene.to_string())
-            .or_insert_with(|| vec![0.0; n]);
-        let logs = gene_log_sums
-            .entry(gene.to_string())
-            .or_insert_with(|| vec![0.0; n]);
-        for j in 0..n {
-            totals[j] += counts[j];
-            logs[j] += (counts[j] + pseudo).ln();
+        if rows_seen % 1000 == 0 {
+            let done = usize::try_from(reader.position().byte())
+                .unwrap_or(file_units)
+                .min(file_units);
+            progress(done, total_work, "Transcript: DTU gene-total pass");
         }
     }
+    progress(
+        file_units,
+        total_work,
+        &format!("Transcript: DTU gene-total pass complete ({rows_seen} rows)"),
+    );
+
     let eligible = transcript_counts
         .iter()
         .filter_map(|(gene, &n_tx)| {
@@ -1472,51 +1549,65 @@ fn run_dtu_screen(
         .delimiter(b'\t')
         .flexible(true)
         .from_path(merged_tsv)?;
-    for record in reader.records() {
-        let record = record?;
+    let mut record = csv::StringRecord::new();
+    let mut rows_seen_second = 0usize;
+    while reader.read_record(&mut record)? {
+        rows_seen_second += 1;
         let transcript = record.get(0).unwrap_or_default().trim();
         let gene = record.get(1).unwrap_or_default().trim();
-        if transcript.is_empty() || !eligible.contains(gene) {
-            continue;
-        }
-        let n_tx = *transcript_counts.get(gene).unwrap_or(&1) as f64;
-        let counts = values_at_columns_with_zero(&record, design_cols);
-        let Some(log_sums) = gene_log_sums.get(gene) else {
-            continue;
-        };
-        let Some(totals) = gene_totals.get(gene) else {
-            continue;
-        };
-        let clr = (0..n)
-            .map(|j| (counts[j] + pseudo).ln() - log_sums[j] / n_tx)
-            .collect::<Vec<_>>();
-        let usage = (0..n)
-            .map(|j| {
-                if totals[j] > 0.0 {
-                    counts[j] / totals[j]
-                } else {
-                    0.0
+        if !transcript.is_empty() && eligible.contains(gene) {
+            let n_tx = *transcript_counts.get(gene).unwrap_or(&1) as f64;
+            let counts = values_at_columns_with_zero(&record, design_cols);
+            if let (Some(log_sums), Some(totals)) = (gene_log_sums.get(gene), gene_totals.get(gene))
+            {
+                let clr = (0..n)
+                    .map(|j| (counts[j] + pseudo).ln() - log_sums[j] / n_tx)
+                    .collect::<Vec<_>>();
+                let usage = (0..n)
+                    .map(|j| {
+                        if totals[j] > 0.0 {
+                            counts[j] / totals[j]
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                // Suppress essentially absent transcripts before the multiple-testing burden.
+                if !(mean(&usage) < 0.001
+                    && usage.iter().filter(|v| **v > 0.0).count() < min_present)
+                {
+                    if let Some(test) = make_adjusted_test(
+                        transcript.to_string(),
+                        gene.to_string(),
+                        &clr,
+                        &usage,
+                        design,
+                    ) {
+                        by_gene_p
+                            .entry(gene.to_string())
+                            .or_default()
+                            .push((test.p_value, test.beta_group.abs()));
+                        transcript_tests.push(test);
+                    }
                 }
-            })
-            .collect::<Vec<_>>();
-        // Suppress essentially absent transcripts before the multiple-testing burden.
-        if mean(&usage) < 0.001 && usage.iter().filter(|v| **v > 0.0).count() < min_present {
-            continue;
+            }
         }
-        if let Some(test) = make_adjusted_test(
-            transcript.to_string(),
-            gene.to_string(),
-            &clr,
-            &usage,
-            design,
-        ) {
-            by_gene_p
-                .entry(gene.to_string())
-                .or_default()
-                .push((test.p_value, test.beta_group.abs()));
-            transcript_tests.push(test);
+        if rows_seen_second % 500 == 0 {
+            let done = usize::try_from(reader.position().byte())
+                .unwrap_or(file_units)
+                .min(file_units);
+            progress(
+                file_units.saturating_add(done),
+                total_work,
+                "Transcript: DTU transcript-model pass",
+            );
         }
     }
+    progress(
+        total_work,
+        total_work,
+        &format!("Transcript: DTU transcript-model pass complete ({rows_seen_second} rows)"),
+    );
     apply_bh_adjusted(&mut transcript_tests);
 
     let mut gene_tests = by_gene_p
@@ -3670,16 +3761,6 @@ fn values_at_columns_with_zero(record: &csv::StringRecord, cols: &[usize]) -> Ve
         })
         .collect()
 }
-fn count_delimited_rows(path: &Path, delimiter: u8) -> Result<usize> {
-    let mut reader = ReaderBuilder::new().delimiter(delimiter).from_path(path)?;
-    let mut n = 1usize;
-    for row in reader.records() {
-        row?;
-        n += 1;
-    }
-    Ok(n)
-}
-
 fn invert_matrix(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>> {
     let n = a.len();
     if n == 0 || a.iter().any(|r| r.len() != n) {
