@@ -6497,9 +6497,15 @@ mod tests {
         );
         assert_eq!(
             LocalProjectStore::progress_stage_name(
-                "TCR beta corrected — TCR beta: releasing parsed repertoire working set (283 samples; 1234567 clonotypes; 12000 composition entries; 8 worker(s))"
+                "TCR beta corrected — TCR beta: releasing parsed repertoire working set (93 samples; 4293752 clonotypes; 69571 composition entries; bulk arena storage; serial cleanup; memory RSS=2048.0 MiB VmSize=3072.0 MiB VmHWM=2500.0 MiB VmPeak=4096.0 MiB)"
             ),
             "TCR beta corrected / working-set cleanup"
+        );
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
+                "TCR beta corrected — TCR beta: parsing complete (93 usable sample(s); 4293752 clonotypes; memory RSS=2048.0 MiB VmSize=3072.0 MiB VmHWM=2500.0 MiB VmPeak=4096.0 MiB)"
+            ),
+            "TCR beta corrected / parsing"
         );
         assert_eq!(
             LocalProjectStore::progress_stage_name(
