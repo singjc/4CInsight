@@ -144,6 +144,14 @@ struct RemoteApiState {
     analysis_batch_column: String,
     analysis_family_column: String,
     analysis_sensitivity_column: String,
+    analysis_run_gene: bool,
+    analysis_run_transcript: bool,
+    analysis_run_bcr: bool,
+    analysis_run_bcr_isotype: bool,
+    analysis_run_tcr_alpha: bool,
+    analysis_run_tcr_beta: bool,
+    analysis_run_immune: bool,
+    analysis_run_pathway: bool,
     analysis_run_exploratory: bool,
     analysis_run_pbmc_diagnostics: bool,
     analysis_pathway_q_threshold: f64,
@@ -194,6 +202,14 @@ impl Default for RemoteApiState {
             analysis_batch_column: String::new(),
             analysis_family_column: String::new(),
             analysis_sensitivity_column: String::new(),
+            analysis_run_gene: true,
+            analysis_run_transcript: true,
+            analysis_run_bcr: true,
+            analysis_run_bcr_isotype: true,
+            analysis_run_tcr_alpha: true,
+            analysis_run_tcr_beta: true,
+            analysis_run_immune: true,
+            analysis_run_pathway: true,
             analysis_run_exploratory: true,
             analysis_run_pbmc_diagnostics: true,
             analysis_pathway_q_threshold: 0.05,
@@ -1374,6 +1390,14 @@ impl WebShellApp {
             subject_column,
             covariates,
             excluded_sample_ids,
+            run_gene,
+            run_transcript,
+            run_bcr,
+            run_bcr_isotype,
+            run_tcr_alpha,
+            run_tcr_beta,
+            run_immune,
+            run_pathway,
             run_exploratory_direction_check,
             run_pbmc_diagnostics,
             pbmc_batch_column,
@@ -1425,6 +1449,29 @@ impl WebShellApp {
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>();
+            let run_gene = state.analysis_run_gene;
+            let run_transcript = state.analysis_run_transcript;
+            let run_bcr = state.analysis_run_bcr;
+            let run_bcr_isotype = state.analysis_run_bcr_isotype;
+            let run_tcr_alpha = state.analysis_run_tcr_alpha;
+            let run_tcr_beta = state.analysis_run_tcr_beta;
+            let run_immune = state.analysis_run_immune;
+            let run_pathway = state.analysis_run_pathway;
+            if !(run_gene
+                || run_transcript
+                || run_bcr
+                || run_bcr_isotype
+                || run_tcr_alpha
+                || run_tcr_beta
+                || run_immune
+                || run_pathway)
+            {
+                state.last_error = Some(
+                    "Select at least one modality before submitting a unified analysis."
+                        .to_string(),
+                );
+                return;
+            }
             let run_exploratory_direction_check = state.analysis_run_exploratory;
             let run_pbmc_diagnostics = state.analysis_run_pbmc_diagnostics;
             let pbmc_batch_column = optional_trimmed(&state.analysis_batch_column);
@@ -1447,6 +1494,14 @@ impl WebShellApp {
                 subject_column,
                 covariates,
                 excluded_sample_ids,
+                run_gene,
+                run_transcript,
+                run_bcr,
+                run_bcr_isotype,
+                run_tcr_alpha,
+                run_tcr_beta,
+                run_immune,
+                run_pathway,
                 run_exploratory_direction_check,
                 run_pbmc_diagnostics,
                 pbmc_batch_column,
@@ -1468,6 +1523,14 @@ impl WebShellApp {
                 run_gene_corrected: true,
                 run_full_unified: true,
                 excluded_sample_ids,
+                run_gene,
+                run_transcript,
+                run_bcr,
+                run_bcr_isotype,
+                run_tcr_alpha,
+                run_tcr_beta,
+                run_immune,
+                run_pathway,
                 run_exploratory_direction_check,
                 run_pbmc_diagnostics,
                 pbmc_batch_column,
@@ -2234,7 +2297,7 @@ impl WebShellApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.remote.borrow().clone();
         let connected = snapshot.health.is_some();
-        let phase_label = "Web · Phase 3E.8";
+        let phase_label = "Web · Phase 3E.15";
         let server_label = if connected {
             "Local server connected"
         } else {
@@ -2288,7 +2351,7 @@ impl WebShellApp {
     fn overview(&mut self, ui: &mut egui::Ui) {
         ui.heading("Browser client + local Rust server");
         ui.label(
-            "Phase 3E.8 keeps the Phase 3E.7 primary-result/timing/key workflow and fixes the shared native repertoire teardown exposed by real-cohort telemetry: compact clonotype storage, an explicit measured working-set cleanup stage, and completion only after cleanup actually returns.",
+            "Phase 3E.15 keeps the frozen native-analysis/timing/key workflow, adds explicit per-modality execution controls for isolated real-cohort diagnostics, and preserves the ongoing shared repertoire runtime instrumentation.",
         );
         ui.add_space(10.0);
 
@@ -2347,7 +2410,7 @@ impl WebShellApp {
             .inner_margin(12)
             .corner_radius(8)
             .show(ui, |ui| {
-            ui.label(egui::RichText::new("What works in Phase 3E.8").strong());
+            ui.label(egui::RichText::new("What works in Phase 3E.15").strong());
             for item in [
                 "One Rust cfs-server serves both web/dist and /api from 127.0.0.1:8080 by default.",
                 "A private temporary project can be created with an opaque UUID and independent recovery token.",
@@ -2358,7 +2421,7 @@ impl WebShellApp {
                 "Every uploaded object can be assigned an explicit 4C input role; sample-level modalities also require an explicit sample ID.",
                 "Primary metadata is parsed server-side with the existing native loader and the existing native sample mapping audit can be run from the browser.",
                 "A current validated mapping fingerprint can be frozen into a persistent asynchronous job; later upload/assignment changes cannot silently alter that job snapshot.",
-                "Frozen Phase 3E jobs reuse the native cross-modal QC engine, preserve reviewed exclusions, and execute every available corrected native modality through the existing unified cohort-analysis function.",
+                "Frozen Phase 3E jobs reuse the native cross-modal QC engine, preserve reviewed exclusions, and execute only the user-selected available native modalities through the existing unified cohort-analysis function; deselected modalities are also excluded from QC parsing.",
                 "The same completed unified result now renders interactive browser plots, authenticated simplified/full self-contained HTML reports, and the native technical table set without recomputing statistics in WASM.",
                 "All retained artifacts from one job can be downloaded as a single authenticated ZIP assembled on demand; individual downloads remain available.",
                 "Persisted terminal jobs can be deleted independently to remove their frozen inputs and private artifacts without deleting the whole project.",
@@ -2486,7 +2549,7 @@ impl WebShellApp {
     fn cohort_shell(&mut self, ui: &mut egui::Ui) {
         ui.heading("Cohort Analysis — frozen native unified workflow");
         ui.label(
-            "Phase 3E.8 keeps the validated high-throughput ingest/mapping, frozen unified native analysis, timing telemetry, primary-results checkpoint, and encrypted .4ckey workflow while stabilizing the shared BCR/TCR working set so very large TCR-beta payload destruction is measured and allocation-efficient.",
+            "Phase 3E.15 keeps the validated high-throughput ingest/mapping, frozen unified native analysis, timing telemetry, primary-results checkpoint, encrypted .4ckey workflow, and repertoire runtime diagnostics, while allowing each modality to be selected or excluded before a frozen job is submitted.",
         );
         ui.add_space(8.0);
 
@@ -3356,6 +3419,82 @@ impl WebShellApp {
                 ui.add_space(5.0);
                 {
                     let mut state = self.remote.borrow_mut();
+                    ui.label(egui::RichText::new("Modalities to analyze").strong());
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Select all").clicked() {
+                            state.analysis_run_gene = true;
+                            state.analysis_run_transcript = true;
+                            state.analysis_run_bcr = true;
+                            state.analysis_run_bcr_isotype = true;
+                            state.analysis_run_tcr_alpha = true;
+                            state.analysis_run_tcr_beta = true;
+                            state.analysis_run_immune = true;
+                            state.analysis_run_pathway = true;
+                        }
+                        if ui.button("Deselect all").clicked() {
+                            state.analysis_run_gene = false;
+                            state.analysis_run_transcript = false;
+                            state.analysis_run_bcr = false;
+                            state.analysis_run_bcr_isotype = false;
+                            state.analysis_run_tcr_alpha = false;
+                            state.analysis_run_tcr_beta = false;
+                            state.analysis_run_immune = false;
+                            state.analysis_run_pathway = false;
+                        }
+                        if ui.button("All except TCR").clicked() {
+                            state.analysis_run_gene = true;
+                            state.analysis_run_transcript = true;
+                            state.analysis_run_bcr = true;
+                            state.analysis_run_bcr_isotype = true;
+                            state.analysis_run_tcr_alpha = false;
+                            state.analysis_run_tcr_beta = false;
+                            state.analysis_run_immune = true;
+                            state.analysis_run_pathway = true;
+                        }
+                        if ui.button("TCR beta only").clicked() {
+                            state.analysis_run_gene = false;
+                            state.analysis_run_transcript = false;
+                            state.analysis_run_bcr = false;
+                            state.analysis_run_bcr_isotype = false;
+                            state.analysis_run_tcr_alpha = false;
+                            state.analysis_run_tcr_beta = true;
+                            state.analysis_run_immune = false;
+                            state.analysis_run_pathway = false;
+                            state.analysis_run_exploratory = false;
+                            state.analysis_run_pbmc_diagnostics = false;
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut state.analysis_run_gene, "Gene expression");
+                        ui.checkbox(&mut state.analysis_run_transcript, "Transcript expression");
+                        ui.checkbox(&mut state.analysis_run_bcr, "BCR");
+                        ui.checkbox(&mut state.analysis_run_bcr_isotype, "BCR isotype");
+                        ui.checkbox(&mut state.analysis_run_tcr_alpha, "TCR alpha");
+                        ui.checkbox(&mut state.analysis_run_tcr_beta, "TCR beta");
+                        ui.checkbox(&mut state.analysis_run_immune, "Immune infiltrate");
+                        ui.checkbox(&mut state.analysis_run_pathway, "Pathway ORA");
+                    });
+                    let selected_count = [
+                        state.analysis_run_gene,
+                        state.analysis_run_transcript,
+                        state.analysis_run_bcr,
+                        state.analysis_run_bcr_isotype,
+                        state.analysis_run_tcr_alpha,
+                        state.analysis_run_tcr_beta,
+                        state.analysis_run_immune,
+                        state.analysis_run_pathway,
+                    ]
+                    .into_iter()
+                    .filter(|selected| *selected)
+                    .count();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{selected_count} modality analysis selection(s). The selection is frozen into the job. Deselected data modalities are excluded from both cross-modal QC parsing and the corrected unified analysis. Pathway ORA uses corrected gene expression internally."
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                    ui.add_space(5.0);
                     egui::Grid::new("web_phase3e_job_settings").show(ui, |ui| {
                         ui.label("Subject column (optional)");
                         ui.add_sized(
@@ -3422,7 +3561,7 @@ impl WebShellApp {
                 }
                 ui.label(
                     egui::RichText::new(
-                        "All frozen corrected modalities that are actually available are selected automatically. Pathway ORA is enabled only when both a merged gene-expression table and a deliberately assigned Pathway GMT object are present. Standard folder ingest still skips GMT files; add one with Choose files… and assign its role explicitly.",
+                        "Only selected modalities that are actually available in the frozen snapshot are executed. PBMC/confounding diagnostics run only when Gene expression or Pathway ORA is selected. Pathway ORA still requires both a merged gene-expression table and a deliberately assigned Pathway GMT object.",
                     )
                     .small()
                     .weak(),
@@ -3522,11 +3661,31 @@ impl WebShellApp {
                 let has_credentials = !snapshot.recovery_project_id.trim().is_empty()
                     && !snapshot.recovery_token.trim().is_empty();
                 let current_mapping = snapshot.mapping_audit.is_some();
+                let has_selected_analysis = snapshot.analysis_run_gene
+                    || snapshot.analysis_run_transcript
+                    || snapshot.analysis_run_bcr
+                    || snapshot.analysis_run_bcr_isotype
+                    || snapshot.analysis_run_tcr_alpha
+                    || snapshot.analysis_run_tcr_beta
+                    || snapshot.analysis_run_immune
+                    || snapshot.analysis_run_pathway;
+                if !has_selected_analysis {
+                    ui.label(
+                        egui::RichText::new(
+                            "Select at least one modality before freezing a unified analysis job.",
+                        )
+                        .color(egui::Color32::LIGHT_RED),
+                    );
+                }
                 ui.add_space(5.0);
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(
-                            !snapshot.busy && job_enabled && has_credentials && current_mapping,
+                            !snapshot.busy
+                                && job_enabled
+                                && has_credentials
+                                && current_mapping
+                                && has_selected_analysis,
                             egui::Button::new("Freeze snapshot & run unified analysis"),
                         )
                         .clicked()

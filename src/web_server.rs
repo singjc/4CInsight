@@ -1,7 +1,7 @@
 //! Local web server for the 4C Cohort Explorer browser client.
 //!
-//! Phase 3E.11 keeps authenticated metadata-backed comparison configuration and
-//! adds server/native repertoire lifetime diagnostics around frozen unified jobs.
+//! Phase 3E.15 keeps authenticated metadata-backed comparison configuration,
+//! adds frozen per-modality execution controls, and preserves repertoire lifetime diagnostics.
 //! The server reconstructs metadata/scientific state and derives plot coordinates
 //! from native results; WASM does not recompute science.
 //! Existing native multi-omics statistics and report generation remain the
@@ -634,6 +634,22 @@ pub struct SubmitJobRequest {
     pub run_full_unified: bool,
     #[serde(default)]
     pub excluded_sample_ids: Vec<String>,
+    #[serde(default = "default_true")]
+    pub run_gene: bool,
+    #[serde(default = "default_true")]
+    pub run_transcript: bool,
+    #[serde(default = "default_true")]
+    pub run_bcr: bool,
+    #[serde(default = "default_true")]
+    pub run_bcr_isotype: bool,
+    #[serde(default = "default_true")]
+    pub run_tcr_alpha: bool,
+    #[serde(default = "default_true")]
+    pub run_tcr_beta: bool,
+    #[serde(default = "default_true")]
+    pub run_immune: bool,
+    #[serde(default = "default_true")]
+    pub run_pathway: bool,
     #[serde(default = "default_true")]
     pub run_exploratory_direction_check: bool,
     #[serde(default = "default_true")]
@@ -1899,6 +1915,18 @@ impl LocalProjectStore {
             bail!(
                 "job submission requires a metadata comparison column plus Case and Control values"
             );
+        }
+        if request.run_full_unified
+            && !(request.run_gene
+                || request.run_transcript
+                || request.run_bcr
+                || request.run_bcr_isotype
+                || request.run_tcr_alpha
+                || request.run_tcr_beta
+                || request.run_immune
+                || request.run_pathway)
+        {
+            bail!("unified job submission requires at least one selected modality");
         }
         let expected_mapping_hash =
             mapping_snapshot_fingerprint(&current_input_manifest_sha256, &mapping_request)?;
@@ -3360,26 +3388,92 @@ fn build_snapshot_native_context(
     Ok((metadata, scan, comparison))
 }
 
-fn selected_qc_modalities(scan: &ProjectScan) -> Vec<CohortModality> {
+fn selected_qc_modalities(scan: &ProjectScan, request: &SubmitJobRequest) -> Vec<CohortModality> {
     let mut selected = Vec::new();
-    if scan.merged_gene_tsv.is_some() {
+    if (request.run_gene || request.run_pathway) && scan.merged_gene_tsv.is_some() {
         selected.push(CohortModality::GeneExpression);
     }
-    if scan.merged_transcript_tsv.is_some() {
+    if request.run_transcript && scan.merged_transcript_tsv.is_some() {
         selected.push(CohortModality::TranscriptExpression);
     }
-    for modality in [
-        CohortModality::Bcr,
-        CohortModality::BcrIsotype,
-        CohortModality::TcrAlpha,
-        CohortModality::TcrBeta,
-        CohortModality::ImmuneInfiltrate,
+    for (enabled, modality) in [
+        (request.run_bcr, CohortModality::Bcr),
+        (request.run_bcr_isotype, CohortModality::BcrIsotype),
+        (request.run_tcr_alpha, CohortModality::TcrAlpha),
+        (request.run_tcr_beta, CohortModality::TcrBeta),
+        (request.run_immune, CohortModality::ImmuneInfiltrate),
     ] {
-        if scan.files.iter().any(|file| file.modality == modality) {
+        if enabled && scan.files.iter().any(|file| file.modality == modality) {
             selected.push(modality);
         }
     }
     selected
+}
+
+fn selected_available_modalities(
+    scan: &ProjectScan,
+    request: &SubmitJobRequest,
+    pathway_available: bool,
+) -> CohortModalitySelection {
+    CohortModalitySelection {
+        gene: request.run_gene && scan.merged_gene_tsv.is_some(),
+        transcript: request.run_transcript && scan.merged_transcript_tsv.is_some(),
+        bcr: request.run_bcr
+            && scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::Bcr),
+        bcr_isotype: request.run_bcr_isotype
+            && scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::BcrIsotype),
+        tcr_alpha: request.run_tcr_alpha
+            && scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::TcrAlpha),
+        tcr_beta: request.run_tcr_beta
+            && scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::TcrBeta),
+        immune: request.run_immune
+            && scan
+                .files
+                .iter()
+                .any(|file| file.modality == CohortModality::ImmuneInfiltrate),
+        pathway: request.run_pathway && pathway_available,
+    }
+}
+
+fn selected_modality_names(selection: &CohortModalitySelection) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if selection.gene {
+        names.push("Gene expression");
+    }
+    if selection.transcript {
+        names.push("Transcript expression");
+    }
+    if selection.bcr {
+        names.push("BCR");
+    }
+    if selection.bcr_isotype {
+        names.push("BCR isotype");
+    }
+    if selection.tcr_alpha {
+        names.push("TCR alpha");
+    }
+    if selection.tcr_beta {
+        names.push("TCR beta");
+    }
+    if selection.immune {
+        names.push("Immune infiltrate");
+    }
+    if selection.pathway {
+        names.push("Pathway ORA");
+    }
+    names
 }
 
 fn execute_frozen_job<F, R>(
@@ -3427,7 +3521,21 @@ where
     let mut warnings = Vec::new();
     let mut qc_native = None;
     let qc = if snapshot.request.run_qc {
-        let selected = selected_qc_modalities(&scan);
+        let selected = selected_qc_modalities(&scan, &snapshot.request);
+        if !selected.is_empty() {
+            progress(
+                51,
+                1000,
+                &format!(
+                    "Frozen QC modality selection — {}",
+                    selected
+                        .iter()
+                        .map(|modality| modality.display_name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
         if selected.is_empty() {
             warnings.push(
                 "No frozen modality could produce cross-modal/sample QC; QC was skipped"
@@ -3580,34 +3688,22 @@ where
                     .join("inputs")
                     .join(format!("{}.bin", object.object_id))
             });
-        let modalities = CohortModalitySelection {
-            gene: scan.merged_gene_tsv.is_some(),
-            transcript: scan.merged_transcript_tsv.is_some(),
-            bcr: scan
-                .files
-                .iter()
-                .any(|file| file.modality == CohortModality::Bcr),
-            bcr_isotype: scan
-                .files
-                .iter()
-                .any(|file| file.modality == CohortModality::BcrIsotype),
-            tcr_alpha: scan
-                .files
-                .iter()
-                .any(|file| file.modality == CohortModality::TcrAlpha),
-            tcr_beta: scan
-                .files
-                .iter()
-                .any(|file| file.modality == CohortModality::TcrBeta),
-            immune: scan
-                .files
-                .iter()
-                .any(|file| file.modality == CohortModality::ImmuneInfiltrate),
-            pathway: scan.merged_gene_tsv.is_some() && pathway_gmt_path.is_some(),
-        };
+        let modalities = selected_available_modalities(
+            &scan,
+            &snapshot.request,
+            scan.merged_gene_tsv.is_some() && pathway_gmt_path.is_some(),
+        );
         if !modalities.any_primary() {
-            bail!("no frozen modality is available for the unified native analysis");
+            bail!(
+                "none of the user-selected modalities is available in the frozen snapshot; select at least one available modality"
+            );
         }
+        let selected_names = selected_modality_names(&modalities);
+        progress(
+            157,
+            1000,
+            &format!("Frozen modality selection — {}", selected_names.join(", ")),
+        );
 
         let comparison_definition =
             CohortComparisonDefinition::MetadataValues(MetadataComparisonSpec {
@@ -3646,20 +3742,22 @@ where
             mapping: build_mapping(&scan, &metadata),
         };
 
-        let pbmc_diagnostics =
-            if snapshot.request.run_pbmc_diagnostics && scan.merged_gene_tsv.is_some() {
-                let mut config = PbmcDiagnosticsConfig::default();
-                config.subject_column = corrected.subject_column.clone();
-                config.batch_column =
-                    normalized_optional_string(snapshot.request.pbmc_batch_column.as_deref());
-                config.family_column =
-                    normalized_optional_string(snapshot.request.pbmc_family_column.as_deref());
-                config.sensitivity_column =
-                    normalized_optional_string(snapshot.request.pbmc_sensitivity_column.as_deref());
-                Some(config)
-            } else {
-                None
-            };
+        let pbmc_diagnostics = if snapshot.request.run_pbmc_diagnostics
+            && (modalities.gene || modalities.pathway)
+            && scan.merged_gene_tsv.is_some()
+        {
+            let mut config = PbmcDiagnosticsConfig::default();
+            config.subject_column = corrected.subject_column.clone();
+            config.batch_column =
+                normalized_optional_string(snapshot.request.pbmc_batch_column.as_deref());
+            config.family_column =
+                normalized_optional_string(snapshot.request.pbmc_family_column.as_deref());
+            config.sensitivity_column =
+                normalized_optional_string(snapshot.request.pbmc_sensitivity_column.as_deref());
+            Some(config)
+        } else {
+            None
+        };
         let settings = CohortAnalysisSettingsSnapshot {
             modalities,
             corrected,
@@ -6087,6 +6185,106 @@ mod tests {
         );
     }
 
+    fn modality_test_request() -> SubmitJobRequest {
+        SubmitJobRequest {
+            mapping_snapshot_sha256: "snapshot".to_string(),
+            comparison_column: "analysis_group".to_string(),
+            case_values: vec!["Case".to_string()],
+            control_values: vec!["Control".to_string()],
+            subject_column: None,
+            covariates: Vec::new(),
+            run_qc: true,
+            run_gene_corrected: true,
+            run_full_unified: true,
+            excluded_sample_ids: Vec::new(),
+            run_gene: false,
+            run_transcript: false,
+            run_bcr: false,
+            run_bcr_isotype: false,
+            run_tcr_alpha: false,
+            run_tcr_beta: false,
+            run_immune: false,
+            run_pathway: false,
+            run_exploratory_direction_check: false,
+            run_pbmc_diagnostics: false,
+            pbmc_batch_column: None,
+            pbmc_family_column: None,
+            pbmc_sensitivity_column: None,
+            pathway_q_threshold: default_pathway_q_threshold(),
+            pathway_effect_threshold: default_pathway_effect_threshold(),
+        }
+    }
+
+    #[test]
+    fn submit_job_request_defaults_preserve_legacy_all_modality_behavior() {
+        let request: SubmitJobRequest = serde_json::from_value(serde_json::json!({
+            "mapping_snapshot_sha256": "snapshot",
+            "comparison_column": "analysis_group",
+            "case_values": ["Case"],
+            "control_values": ["Control"]
+        }))
+        .unwrap();
+        assert!(request.run_gene);
+        assert!(request.run_transcript);
+        assert!(request.run_bcr);
+        assert!(request.run_bcr_isotype);
+        assert!(request.run_tcr_alpha);
+        assert!(request.run_tcr_beta);
+        assert!(request.run_immune);
+        assert!(request.run_pathway);
+    }
+
+    #[test]
+    fn frozen_modality_selection_filters_qc_and_unified_execution() {
+        let scan = ProjectScan {
+            root: PathBuf::from("/tmp/4c-modality-test"),
+            files: vec![
+                DetectedCohortFile {
+                    path: PathBuf::from("bcr.xlsx"),
+                    modality: CohortModality::Bcr,
+                    sample_id: "S1".to_string(),
+                },
+                DetectedCohortFile {
+                    path: PathBuf::from("tcr_beta.xlsx"),
+                    modality: CohortModality::TcrBeta,
+                    sample_id: "S1".to_string(),
+                },
+                DetectedCohortFile {
+                    path: PathBuf::from("immune.xlsx"),
+                    modality: CohortModality::ImmuneInfiltrate,
+                    sample_id: "S1".to_string(),
+                },
+            ],
+            merged_gene_tsv: Some(PathBuf::from("gene.tsv")),
+            merged_transcript_tsv: Some(PathBuf::from("transcript.tsv")),
+            metadata_candidates: Vec::new(),
+        };
+        let mut request = modality_test_request();
+        request.run_tcr_beta = true;
+
+        assert_eq!(
+            selected_qc_modalities(&scan, &request),
+            vec![CohortModality::TcrBeta]
+        );
+        let selected = selected_available_modalities(&scan, &request, true);
+        assert!(selected.tcr_beta);
+        assert!(!selected.gene);
+        assert!(!selected.transcript);
+        assert!(!selected.bcr);
+        assert!(!selected.immune);
+        assert!(!selected.pathway);
+
+        request.run_tcr_beta = false;
+        request.run_gene = true;
+        assert_eq!(
+            selected_qc_modalities(&scan, &request),
+            vec![CohortModality::GeneExpression]
+        );
+        let selected = selected_available_modalities(&scan, &request, true);
+        assert!(selected.gene);
+        assert!(!selected.tcr_beta);
+    }
+
     #[test]
     fn native_filename_auto_assignment_matches_shared_conventions() {
         let (role, sample_id) =
@@ -6422,6 +6620,14 @@ mod tests {
                     run_gene_corrected: false,
                     run_full_unified: false,
                     excluded_sample_ids: Vec::new(),
+                    run_gene: true,
+                    run_transcript: true,
+                    run_bcr: true,
+                    run_bcr_isotype: true,
+                    run_tcr_alpha: true,
+                    run_tcr_beta: true,
+                    run_immune: true,
+                    run_pathway: true,
                     run_exploratory_direction_check: false,
                     run_pbmc_diagnostics: false,
                     pbmc_batch_column: None,
