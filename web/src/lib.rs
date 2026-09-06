@@ -737,7 +737,7 @@ impl WebShellApp {
             }
             state.mapping_audit = None;
             state.active_job = None;
-            state.reviewed_exclusions.clear();
+                    state.reviewed_exclusions.clear();
             if failed_files.is_empty() {
                 state.selected_upload_count = 0;
                 state.selected_upload_total_size = 0;
@@ -993,7 +993,8 @@ impl WebShellApp {
             let token = state.recovery_token.trim().to_string();
             if project_id.is_empty() || token.is_empty() {
                 state.last_error = Some(
-                    "Project credentials are required to load primary metadata fields.".to_string(),
+                    "Project credentials are required to load primary metadata fields."
+                        .to_string(),
                 );
                 return;
             }
@@ -1157,11 +1158,7 @@ impl WebShellApp {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
                 .collect::<Vec<_>>();
-            let excluded_sample_ids = state
-                .reviewed_exclusions
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>();
+            let excluded_sample_ids = state.reviewed_exclusions.iter().cloned().collect::<Vec<_>>();
             let run_exploratory_direction_check = state.analysis_run_exploratory;
             let run_pbmc_diagnostics = state.analysis_run_pbmc_diagnostics;
             let pbmc_batch_column = optional_trimmed(&state.analysis_batch_column);
@@ -1369,14 +1366,11 @@ impl WebShellApp {
                         .is_some_and(|job| job.summary.job_id == deleted.job_id)
                     {
                         state.active_job = None;
-                        state.reviewed_exclusions.clear();
+                    state.reviewed_exclusions.clear();
                     }
                     state.job_delete_armed = None;
                     state.status_message = if deleted.deleted {
-                        format!(
-                            "Deleted persisted job {} and its frozen inputs/artifacts",
-                            deleted.job_id
-                        )
+                        format!("Deleted persisted job {} and its frozen inputs/artifacts", deleted.job_id)
                     } else {
                         format!("Persisted job {} was already absent", deleted.job_id)
                     };
@@ -1418,8 +1412,7 @@ impl WebShellApp {
             state.last_error = None;
         }
         wasm_bindgen_futures::spawn_local(async move {
-            let result =
-                api::download_job_artifact(&project_id, &token, &job_id, &artifact_id).await;
+            let result = api::download_job_artifact(&project_id, &token, &job_id, &artifact_id).await;
             let mut state = remote.borrow_mut();
             match result {
                 Ok(bytes) => match save_browser_download(&filename, &bytes) {
@@ -1651,7 +1644,8 @@ impl WebShellApp {
                     .allow_hover(false),
                 );
                 plot_ui.line(
-                    Line::new("β = 0", vec![[0.0, 0.0], [0.0, y_max * 1.04]]).allow_hover(false),
+                    Line::new("β = 0", vec![[0.0, 0.0], [0.0, y_max * 1.04]])
+                        .allow_hover(false),
                 );
                 if !other.is_empty() {
                     plot_ui.points(Points::new("Other plotted features", other).radius(2.4));
@@ -1674,7 +1668,11 @@ impl WebShellApp {
         );
     }
 
-    fn render_effect_panel(&self, ui: &mut egui::Ui, panel: &api::EffectVisualizationSummary) {
+    fn render_effect_panel(
+        &self,
+        ui: &mut egui::Ui,
+        panel: &api::EffectVisualizationSummary,
+    ) {
         if panel.points.is_empty() {
             ui.label("No finite corrected effect rows are available for this panel.");
             return;
@@ -1721,11 +1719,8 @@ impl WebShellApp {
         })
         .show(ui, |plot_ui| {
             plot_ui.line(
-                Line::new(
-                    "β = 0",
-                    vec![[0.0, 0.0], [0.0, panel.points.len() as f64 + 1.0]],
-                )
-                .allow_hover(false),
+                Line::new("β = 0", vec![[0.0, 0.0], [0.0, panel.points.len() as f64 + 1.0]])
+                    .allow_hover(false),
             );
             plot_ui.points(
                 Points::new("Corrected effects", coords)
@@ -1884,9 +1879,12 @@ impl WebShellApp {
         plot.show(ui, |plot_ui| {
             for segment in &tree.segments {
                 plot_ui.line(
-                    Line::new("", vec![[segment.x1, segment.y1], [segment.x2, segment.y2]])
-                        .color(branch_color)
-                        .allow_hover(false),
+                    Line::new(
+                        "",
+                        vec![[segment.x1, segment.y1], [segment.x2, segment.y2]],
+                    )
+                    .color(branch_color)
+                    .allow_hover(false),
                 );
             }
             for (idx, (group, points)) in grouped.into_iter().enumerate() {
@@ -1899,7 +1897,11 @@ impl WebShellApp {
         });
     }
 
-    fn render_pathway_panel(&self, ui: &mut egui::Ui, points: &[api::PathwayVisualizationPoint]) {
+    fn render_pathway_panel(
+        &self,
+        ui: &mut egui::Ui,
+        points: &[api::PathwayVisualizationPoint],
+    ) {
         let mut significant = Vec::new();
         let mut other = Vec::new();
         let mut hover_points = Vec::new();
@@ -1971,7 +1973,7 @@ impl WebShellApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.remote.borrow().clone();
         let connected = snapshot.health.is_some();
-        let phase_label = "Web · Phase 3E.3";
+        let phase_label = "Web · Phase 3E.4";
         let server_label = if connected {
             "Local server connected"
         } else {
@@ -2025,7 +2027,7 @@ impl WebShellApp {
     fn overview(&mut self, ui: &mut egui::Ui) {
         ui.heading("Browser client + local Rust server");
         ui.label(
-            "Phase 3E.3 keeps the validated native-like ingest and frozen unified native analysis, then adds interactive browser presentation of those completed native results plus one-click authenticated bulk artifact export.",
+            "Phase 3E.4 makes the frozen native scientific result available as soon as analysis finishes, while interactive plots, HTML reports, and exhaustive technical exports continue as background finalization for the same persisted job.",
         );
         ui.add_space(10.0);
 
@@ -2084,7 +2086,7 @@ impl WebShellApp {
             .inner_margin(12)
             .corner_radius(8)
             .show(ui, |ui| {
-            ui.label(egui::RichText::new("What works in Phase 3E.3").strong());
+            ui.label(egui::RichText::new("What works in Phase 3E.4").strong());
             for item in [
                 "One Rust cfs-server serves both web/dist and /api from 127.0.0.1:8080 by default.",
                 "A private temporary project can be created with an opaque UUID and independent recovery token.",
@@ -2223,7 +2225,7 @@ impl WebShellApp {
     fn cohort_shell(&mut self, ui: &mut egui::Ui) {
         ui.heading("Cohort Analysis — frozen native unified workflow");
         ui.label(
-            "Phase 3E.3 keeps the validated high-throughput ingest/mapping and frozen unified native analysis, and now renders browser plots from the persisted native result. Reviewed QC exclusions, corrected modalities, diagnostics, candidate prioritization, interactive views, technical tables, and both report styles remain tied to that same completed run.",
+            "Phase 3E.4 keeps the validated high-throughput ingest/mapping and frozen unified native analysis, but no longer makes report/table serialization a prerequisite for seeing the scientific result. Reviewed QC exclusions, corrected modalities, diagnostics, candidate prioritization, interactive views, technical tables, and both report styles remain tied to the same frozen run.",
         );
         ui.add_space(8.0);
 
@@ -3216,9 +3218,9 @@ impl WebShellApp {
                         self.refresh_remote_jobs(ui.ctx().clone());
                     }
                     let can_cancel = snapshot.active_job.as_ref().is_some_and(|job| {
-                        !matches!(
+                        matches!(
                             job.summary.status.as_str(),
-                            "complete" | "failed" | "cancelled"
+                            "queued" | "preparing" | "running"
                         )
                     });
                     if ui
@@ -3311,6 +3313,26 @@ impl WebShellApp {
                                 ui.end_row();
                             }
                         });
+                    if job.summary.status == "results_ready" {
+                        ui.add_space(6.0);
+                        egui::Frame::group(ui.style())
+                            .fill(ui.visuals().faint_bg_color)
+                            .inner_margin(10)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Scientific result ready — you can review the cohort result now.",
+                                    )
+                                    .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Interactive visualization enrichment and optional HTML/technical export finalization are still running in the background. They do not change the frozen statistics below.",
+                                    )
+                                    .small(),
+                                );
+                            });
+                    }
                     if let Some(error) = job.summary.error.as_ref() {
                         ui.label(egui::RichText::new(error).color(egui::Color32::LIGHT_RED));
                     }
@@ -3362,7 +3384,22 @@ impl WebShellApp {
                                 yes_no(unified.exploratory_transcript_available),
                                 yes_no(unified.pbmc_diagnostics_available),
                             ));
-                            self.render_unified_visualizations(ui, unified);
+                            let visualizations_ready = !unified.visualizations.expression_panels.is_empty()
+                                || !unified.visualizations.effect_panels.is_empty()
+                                || !unified.visualizations.ordinations.is_empty()
+                                || !unified.visualizations.dendrograms.is_empty()
+                                || !unified.visualizations.pathway_points.is_empty();
+                            if job.summary.status == "results_ready" && !visualizations_ready {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Interactive plots are being prepared in the background; modality summaries and prioritized signals above are already final.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                            } else {
+                                self.render_unified_visualizations(ui, unified);
+                            }
                             if !unified.candidates.is_empty() {
                                 egui::CollapsingHeader::new(format!(
                                     "Prioritized signals ({})",
@@ -4016,9 +4053,7 @@ fn reconcile_comparison_values(state: &mut RemoteApiState) {
         .map(|item| item.value.clone())
         .collect::<BTreeSet<_>>();
     state.case_values.retain(|value| available.contains(value));
-    state
-        .control_values
-        .retain(|value| available.contains(value));
+    state.control_values.retain(|value| available.contains(value));
     for value in state.case_values.clone() {
         state.control_values.remove(&value);
     }
@@ -4051,10 +4086,7 @@ fn selection_label(values: &BTreeSet<String>) -> String {
     }
 }
 
-fn selected_metadata_rows(
-    column: &api::MetadataColumnProfile,
-    selected: &BTreeSet<String>,
-) -> usize {
+fn selected_metadata_rows(column: &api::MetadataColumnProfile, selected: &BTreeSet<String>) -> usize {
     column
         .values
         .iter()
@@ -4098,8 +4130,8 @@ async fn poll_remote_job(
     token: String,
     job_id: String,
 ) {
-    for _ in 0..3600usize {
-        gloo_timers::future::TimeoutFuture::new(1000).await;
+    for _ in 0..14400usize {
+        gloo_timers::future::TimeoutFuture::new(2000).await;
         let result = api::get_job(&project_id, &token, &job_id).await;
         let terminal = {
             let mut state = remote.borrow_mut();

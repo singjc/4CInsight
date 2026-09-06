@@ -2,7 +2,7 @@
 
 This directory contains the WASM/`eframe` browser client for 4C Cohort Explorer.
 
-## Current status: Phase 3E.3 browser result visualizations + bulk export (v0.16.11)
+## Current status: Phase 3E.4 scientific-result readiness + background export finalization (v0.16.12)
 
 The browser now renders bounded interactive presentation views directly from the completed native unified result and can download every retained job artifact as one authenticated ZIP. No statistical calculation is duplicated in WASM; full-resolution tables and both HTML reports remain the authoritative persisted outputs.
 
@@ -133,3 +133,10 @@ cargo build --manifest-path web/Cargo.toml --target wasm32-unknown-unknown --rel
 The web crate has its own `Cargo.lock` once generated locally. Keep/stage the updated lock file after a successful build.
 
 See [`../docs/web_development.md`](../docs/web_development.md) for the complete API, storage, privacy, batch-upload, mapping, job, cancellation, and parity-validation notes.
+
+
+### Phase 3E.4 result-ready behavior
+
+Unified jobs publish a persisted `results_ready` state immediately after the native scientific result and lightweight browser summary are complete. The browser can inspect the final cohort/modality/candidate result while interactive visualization enrichment, self-contained HTML reports, and exhaustive technical artifacts continue finalizing. The job transitions to `complete` when optional exports finish.
+
+The scientific worker semaphore is released when a unified job reaches `results_ready`; subsequent scientific work is no longer blocked solely by report/table finalization.

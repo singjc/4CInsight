@@ -4,14 +4,14 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains a command-line interface, an `egui` desktop interface, and a browser/WASM client served by a local Rust `cfs-server`. The native Rust application remains the scientific reference implementation. The browser path is a thin same-origin client over authenticated opaque projects/objects/jobs and now drives the existing native frozen unified cohort-analysis workflow rather than maintaining a separate web statistics engine.
 
-## What v0.16.11 adds
+## What v0.16.12 adds
 
-- Adds **Phase 3E.3: browser result visualization parity + bulk artifact export** on top of the validated frozen unified native job. The browser still does not recompute statistics: the server derives bounded presentation payloads directly from the completed `UnifiedCohortAnalysisRun`.
+- Adds **Phase 3E.4: scientific-result readiness decoupled from export finalization**. The native unified result is persisted and shown immediately after scientific computation, while browser visualization enrichment, HTML reports, and exhaustive technical artifacts continue finalizing for that same frozen run.
 - Adds interactive browser plots for corrected gene/transcript volcano views, repertoire/isotype/immune corrected-effect panels, native PCA/PCoA ordinations with PERMANOVA context, native hierarchical dendrograms, pathway enrichment, and modality result coverage. Full-resolution rows remain in the authenticated native tables/reports.
 - Keeps large expression plots responsive by persisting a deterministic bounded visualization preview that always prioritizes the strongest corrected signals and samples the remaining tested background. This does not change testing, ranking, q-values, candidate prioritization, or report generation.
 - Adds authenticated **Download all as ZIP** for a persisted job. `GET /api/projects/{project_id}/jobs/{job_id}/artifacts.zip` assembles every retained artifact on demand plus `artifact_manifest.json`; it does not persist a second archive copy or put the recovery token in the URL.
 - Protects the local server from accidental giant in-memory bundles with a 1 GiB uncompressed per-request bulk-download safety ceiling; individual authenticated artifact downloads remain available.
-- Advances `/api/health` to API v9 with `bulk_artifact_download_enabled=true` and `result_visualizations_enabled=true`. Older jobs remain readable, but jobs completed before v0.16.11 have no persisted interactive visualization payload and should be rerun if those plots are wanted in the browser.
+- Advances `/api/health` to API v10. Phase 3E.4 introduces the persisted `results_ready` job state; older jobs remain readable.
 
 ## What v0.16.10 adds
 
@@ -662,3 +662,10 @@ Cross-modal outlier QC and PBMC/confounding diagnostics are now QC/sensitivity e
 Candidate prioritization is likewise derived from the corrected result. A collaborator-filtered metadata table simply defines a narrower cohort, and the same corrected methodology is used. Optional TPM direction concordance and PBMC/confounding robustness classifications annotate the shortlist without becoming independent statistical evidence.
 
 The expression count model does **not** claim to reproduce the full DESeq2, edgeR, or limma-voom empirical-Bayes/dispersion machinery. Final publication-level findings can still be cross-checked with specialized packages; 4C Cohort Explorer is intended for transparent cohort discovery, robustness assessment, and follow-up prioritization.
+
+
+### Phase 3E.4 — scientific result readiness decoupled from export finalization
+
+Frozen unified jobs now publish the native scientific result as soon as the native analysis completes. The browser can inspect cohort/modality summaries and prioritized signals while interactive visualization enrichment, HTML reports, and exhaustive technical-table artifacts continue finalizing for the same immutable job. Export latency therefore no longer hides an already-completed scientific result.
+
+The scientific worker semaphore is released when a unified job reaches `results_ready`; subsequent scientific work is no longer blocked solely by report/table finalization.

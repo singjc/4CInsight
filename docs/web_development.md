@@ -1,6 +1,6 @@
 # 4C Cohort Explorer web development
 
-## Current status: Phase 3E.3 browser result visualizations + bulk export (v0.16.11)
+## Current status: Phase 3E.4 scientific-result readiness + background export finalization (v0.16.12)
 
 Phase 3D.2 has been exercised on a realistic private project with 2,140 uploaded objects / 4.21 GiB, Phase 3E.1 has produced full unified report/table artifacts, and Phase 3E.2 validated metadata-backed Case/Control configuration. Phase 3E.3 now presents the same completed native unified result interactively in the browser and adds a one-click authenticated ZIP of all retained job artifacts.
 
@@ -12,7 +12,7 @@ Desktop
         ↓
     existing Rust unified scientific analysis
 
-Browser (Phase 3E.3)
+Browser (Phase 3E.4)
     egui / eframe WebRunner (WASM)
         ↓ same-origin HTTP + bearer capability
     cfs-server (Axum, native Rust)
@@ -692,3 +692,10 @@ For private patient data, a self-hosted server using a secure local/NAS path rem
 ## Next web milestone
 
 After Phase 3E.3 is locally validated for browser visualization parity and bulk export, the next infrastructure phase can move to an operator-managed S3/MinIO storage implementation behind the existing opaque storage contract plus HTTPS/reverse-proxy/deployment hardening. Do not introduce a login/account system merely for localhost development.
+
+
+## Phase 3E.4 result-ready job state
+
+A unified job transitions from `running` to `results_ready` immediately after the native unified scientific analysis and lightweight result summary are complete. The persisted result is readable while visualization/report/table finalization continues. When optional exports finish the job becomes `complete`. If the local server restarts while a job is `results_ready`, the scientific result is preserved and the job is recovered as complete with a warning that optional export finalization was interrupted.
+
+The scientific worker semaphore is released when a unified job reaches `results_ready`; subsequent scientific work is no longer blocked solely by report/table finalization.

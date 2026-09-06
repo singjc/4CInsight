@@ -1,6 +1,6 @@
 //! Local web server for the 4C Cohort Explorer browser client.
 //!
-//! Phase 3E.3 keeps authenticated metadata-backed comparison configuration and
+//! Phase 3E.4 keeps authenticated metadata-backed comparison configuration and
 //! adds presentation payloads plus on-demand bulk export for completed frozen
 //! unified native jobs. The server reconstructs metadata/scientific state and
 //! derives plot coordinates from native results; WASM does not recompute science.
@@ -601,6 +601,7 @@ pub enum JobStatus {
     Queued,
     Preparing,
     Running,
+    ResultsReady,
     Complete,
     Failed,
     Cancelled,
@@ -1990,7 +1991,9 @@ impl LocalProjectStore {
     ) -> Result<()> {
         let _guard = self.mutation_lock.lock().await;
         let mut record = self.read_job_record(project_id, job_id).await?;
-        if record.status != JobStatus::Running || record.cancel_requested {
+        if !matches!(record.status, JobStatus::Running | JobStatus::ResultsReady)
+            || record.cancel_requested
+        {
             return Ok(());
         }
         let message = if progress.total > 0 {
@@ -2010,6 +2013,30 @@ impl LocalProjectStore {
         Ok(())
     }
 
+    async fn publish_job_result_ready(
+        &self,
+        project_id: Uuid,
+        job_id: Uuid,
+        result: JobResultSummary,
+    ) -> Result<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let mut record = self.read_job_record(project_id, job_id).await?;
+        if record.cancel_requested
+            || matches!(record.status, JobStatus::Cancelled | JobStatus::Failed)
+        {
+            return Ok(());
+        }
+        record.status = JobStatus::ResultsReady;
+        record.progress_message =
+            "Scientific results ready; report and technical exports are continuing in the background"
+                .to_string();
+        record.updated_unix_seconds = unix_seconds()?;
+        record.result = Some(result);
+        record.error = None;
+        write_json_atomic(&self.job_record_path(project_id, job_id), &record).await?;
+        Ok(())
+    }
+
     async fn cancel_job_authorized(
         &self,
         project_id: Uuid,
@@ -2019,7 +2046,11 @@ impl LocalProjectStore {
         let _guard = self.mutation_lock.lock().await;
         let _ = self.authorize_record(project_id, token).await?;
         let mut record = self.read_job_record(project_id, job_id).await?;
-        if !record.status.is_terminal() {
+        if record.status == JobStatus::ResultsReady {
+            record.progress_message = "Scientific results are already ready; export finalization continues in the background".to_string();
+            record.updated_unix_seconds = unix_seconds()?;
+            write_json_atomic(&self.job_record_path(project_id, job_id), &record).await?;
+        } else if !record.status.is_terminal() {
             record.cancel_requested = true;
             if record.status == JobStatus::Queued || record.status == JobStatus::Preparing {
                 record.status = JobStatus::Cancelled;
@@ -2066,6 +2097,43 @@ impl LocalProjectStore {
     }
 
     async fn run_job(self: Arc<Self>, project_id: Uuid, job_id: Uuid) {
+        self.run_job_inner(project_id, job_id, None).await;
+    }
+
+    async fn run_job_with_worker_slot(
+        self: Arc<Self>,
+        project_id: Uuid,
+        job_id: Uuid,
+        worker_slots: Arc<Semaphore>,
+    ) {
+        let permit = match worker_slots.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                let _ = self
+                    .update_job_state(
+                        project_id,
+                        job_id,
+                        JobStatus::Failed,
+                        "Local worker queue stopped",
+                        None,
+                        Some(
+                            "The local worker semaphore closed before this job could start."
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+        self.run_job_inner(project_id, job_id, Some(permit)).await;
+    }
+
+    async fn run_job_inner(
+        self: Arc<Self>,
+        project_id: Uuid,
+        job_id: Uuid,
+        mut scientific_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) {
         let preparation = self
             .update_job_state(
                 project_id,
@@ -2147,20 +2215,34 @@ impl LocalProjectStore {
         let job_dir = self.job_dir(project_id, job_id);
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::unbounded_channel::<JobWorkerProgress>();
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<JobResultSummary>();
         let mut worker = tokio::task::spawn_blocking(move || {
-            execute_frozen_job(&job_dir, &snapshot, |done, total, message| {
-                let _ = progress_tx.send(JobWorkerProgress {
-                    done,
-                    total,
-                    message: message.to_string(),
-                });
-            })
+            execute_frozen_job(
+                &job_dir,
+                &snapshot,
+                |done, total, message| {
+                    let _ = progress_tx.send(JobWorkerProgress {
+                        done,
+                        total,
+                        message: message.to_string(),
+                    });
+                },
+                |result| {
+                    let _ = ready_tx.send(result);
+                },
+            )
         });
         let result = loop {
             tokio::select! {
                 result = &mut worker => break result,
                 Some(progress) = progress_rx.recv() => {
                     let _ = self.update_job_progress(project_id, job_id, progress).await;
+                }
+                Some(ready) = ready_rx.recv() => {
+                    let _ = self.publish_job_result_ready(project_id, job_id, ready).await;
+                    if scientific_permit.is_some() {
+                        scientific_permit.take();
+                    }
                 }
             }
         };
@@ -2299,13 +2381,25 @@ impl LocalProjectStore {
                 continue;
             };
             for mut job in self.list_job_records(project_id).await.unwrap_or_default() {
-                if matches!(
+                if job.status == JobStatus::ResultsReady {
+                    job.status = JobStatus::Complete;
+                    job.progress_message = "Scientific results preserved; background export was interrupted by server restart".to_string();
+                    if let Some(result) = job.result.as_mut() {
+                        result.warnings.push(
+                            "The local server restarted after the scientific result became available but before all optional report/table exports finished. The frozen scientific result is preserved; rerun the job only if you need the missing export artifacts.".to_string(),
+                        );
+                    }
+                    job.error = None;
+                    job.updated_unix_seconds = unix_seconds()?;
+                    write_json_atomic(&self.job_record_path(project_id, job.job_id), &job).await?;
+                    changed += 1;
+                } else if matches!(
                     job.status,
                     JobStatus::Queued | JobStatus::Preparing | JobStatus::Running
                 ) {
                     job.status = JobStatus::Failed;
                     job.progress_message = "Interrupted by server restart".to_string();
-                    job.error = Some("The local server stopped before this job completed; submit a new job from the frozen current project state.".to_string());
+                    job.error = Some("The local server stopped before the scientific result became available; submit a new job from the frozen current project state.".to_string());
                     job.updated_unix_seconds = unix_seconds()?;
                     write_json_atomic(&self.job_record_path(project_id, job.job_id), &job).await?;
                     changed += 1;
@@ -3039,13 +3133,15 @@ fn selected_qc_modalities(scan: &ProjectScan) -> Vec<CohortModality> {
     selected
 }
 
-fn execute_frozen_job<F>(
+fn execute_frozen_job<F, R>(
     job_dir: &FsPath,
     snapshot: &StoredJobSnapshot,
     mut progress: F,
+    mut publish_ready: R,
 ) -> Result<JobResultSummary>
 where
     F: FnMut(usize, usize, &str),
+    R: FnMut(JobResultSummary),
 {
     progress(0, 1000, "Validating frozen mapping and input snapshot");
     let snapshot_root = job_dir.join("snapshot");
@@ -3316,16 +3412,31 @@ where
         progress(
             815,
             1000,
-            "Native unified analysis complete; preparing browser result summary",
+            "Native unified analysis complete; publishing lightweight scientific result",
         );
         warnings.extend(run.warnings.clone());
-        let unified = summarize_unified_run(&run);
+        let mut unified = summarize_unified_run_core(&run);
         let gene = run.primary.gene.as_ref().map(summarize_corrected_gene);
 
+        publish_ready(JobResultSummary {
+            mapping: mapping.clone(),
+            qc: qc.clone(),
+            gene: gene.clone(),
+            unified: Some(unified.clone()),
+            warnings: warnings.clone(),
+            artifacts: artifacts.clone(),
+        });
+        progress(
+            820,
+            1000,
+            "Scientific result ready in browser; preparing interactive visualization payload in background",
+        );
+
+        unified.visualizations = build_unified_visualizations(&run);
         progress(
             835,
             1000,
-            "Browser visualization payload prepared; persisting result summary",
+            "Interactive visualization payload prepared; persisting result summary",
         );
         artifacts.push(persist_job_artifact_budgeted(
             job_dir,
@@ -3334,6 +3445,19 @@ where
             &serde_json::to_vec_pretty(&unified)?,
             &mut artifact_budget,
         )?);
+        publish_ready(JobResultSummary {
+            mapping: mapping.clone(),
+            qc: qc.clone(),
+            gene: gene.clone(),
+            unified: Some(unified.clone()),
+            warnings: warnings.clone(),
+            artifacts: artifacts.clone(),
+        });
+        progress(
+            840,
+            1000,
+            "Scientific result and interactive plots ready; report/table exports continue in background",
+        );
         persist_unified_run_artifacts(
             job_dir,
             &run,
@@ -3470,7 +3594,7 @@ fn summarize_corrected_gene(result: &CorrectedExpressionResult) -> GeneCorrected
     }
 }
 
-fn summarize_unified_run(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSummary {
+fn summarize_unified_run_core(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSummary {
     let mut modalities = Vec::new();
     if run.settings.modalities.gene {
         modalities.push(unified_modality_summary(
@@ -3608,7 +3732,7 @@ fn summarize_unified_run(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSumma
         exploratory_transcript_available: run.exploratory_support.transcript.is_some(),
         pbmc_diagnostics_available: run.diagnostics.is_some(),
         candidates,
-        visualizations: build_unified_visualizations(run),
+        visualizations: UnifiedVisualizationSummary::default(),
     }
 }
 
@@ -3731,26 +3855,52 @@ fn expression_visualization(
         .collect::<Vec<_>>();
     let significant_q05 = valid.iter().filter(|(_, row)| row.q_value <= 0.05).count();
 
+    let signal_budget = (MAX_VIS_EXPRESSION_POINTS / 2).min(valid.len());
     let mut ranked = valid.clone();
-    ranked.sort_by(|(_, a), (_, b)| {
-        a.q_value
-            .total_cmp(&b.q_value)
-            .then_with(|| a.p_value.total_cmp(&b.p_value))
-            .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
-    });
+    if signal_budget > 0 && ranked.len() > signal_budget {
+        ranked.select_nth_unstable_by(signal_budget - 1, |(_, a), (_, b)| {
+            a.q_value
+                .total_cmp(&b.q_value)
+                .then_with(|| a.p_value.total_cmp(&b.p_value))
+                .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
+        });
+        ranked.truncate(signal_budget);
+    } else {
+        ranked.sort_by(|(_, a), (_, b)| {
+            a.q_value
+                .total_cmp(&b.q_value)
+                .then_with(|| a.p_value.total_cmp(&b.p_value))
+                .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
+        });
+    }
 
-    let signal_budget = MAX_VIS_EXPRESSION_POINTS / 2;
     let mut selected = BTreeSet::new();
-    for (idx, _) in ranked.iter().take(signal_budget) {
+    for (idx, _) in &ranked {
         selected.insert(*idx);
     }
     let remaining = MAX_VIS_EXPRESSION_POINTS.saturating_sub(selected.len());
-    if remaining > 0 && !valid.is_empty() {
-        let stride = (valid.len() as f64 / remaining as f64).max(1.0);
-        let mut cursor = 0.0f64;
-        while selected.len() < MAX_VIS_EXPRESSION_POINTS && (cursor as usize) < valid.len() {
-            selected.insert(valid[cursor as usize].0);
-            cursor += stride;
+    if remaining > 0 && valid.len() > selected.len() {
+        let background = valid
+            .iter()
+            .filter(|(idx, _)| !selected.contains(idx))
+            .map(|(idx, _)| *idx)
+            .collect::<Vec<_>>();
+        let target = remaining.min(background.len());
+        if target > 0 {
+            let stride = background.len() as f64 / target as f64;
+            let mut cursor = 0.0f64;
+            while selected.len() < signal_budget + target && (cursor as usize) < background.len() {
+                selected.insert(background[cursor as usize]);
+                cursor += stride;
+            }
+            if selected.len() < signal_budget + target {
+                for idx in background {
+                    selected.insert(idx);
+                    if selected.len() >= signal_budget + target {
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -4814,7 +4964,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         app_version: env!("CARGO_PKG_VERSION"),
-        api_version: 9,
+        api_version: 10,
         default_ttl_hours: state.default_ttl_hours,
         max_ttl_hours: MAX_TTL_HOURS,
         upload_enabled: true,
@@ -5080,21 +5230,9 @@ async fn submit_job(
             let worker = state.store.clone();
             let worker_slots = state.worker_slots.clone();
             tokio::spawn(async move {
-                match worker_slots.acquire_owned().await {
-                    Ok(_permit) => worker.run_job(project_id, job_id).await,
-                    Err(_) => {
-                        let _ = worker
-                            .update_job_state(
-                                project_id,
-                                job_id,
-                                JobStatus::Failed,
-                                "Local worker queue stopped",
-                                None,
-                                Some("The local worker semaphore closed before this job could start.".to_string()),
-                            )
-                            .await;
-                    }
-                }
+                worker
+                    .run_job_with_worker_slot(project_id, job_id, worker_slots)
+                    .await;
             });
             Ok(Json(job))
         }
@@ -5804,6 +5942,14 @@ mod tests {
         assert_eq!(audit.case_samples, Some(1));
         assert_eq!(audit.control_samples, Some(1));
         assert_eq!(audit.metadata_only_samples, 2);
+    }
+
+    #[test]
+    fn results_ready_status_serializes_as_stable_api_value() {
+        assert_eq!(
+            serde_json::to_string(&JobStatus::ResultsReady).unwrap(),
+            "\"results_ready\""
+        );
     }
 
     #[tokio::test]

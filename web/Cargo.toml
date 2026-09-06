@@ -1,6 +1,6 @@
 [package]
 name = "cfs-expression-merger-web"
-version = "0.16.11"
+version = "0.16.12"
 edition = "2024"
 description = "WASM browser shell for 4C Cohort Explorer"
 license = "MIT"
