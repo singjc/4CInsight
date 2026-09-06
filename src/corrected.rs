@@ -1882,22 +1882,43 @@ struct BuildingClonotype {
 }
 
 #[derive(Debug, Default)]
-struct ParsedClonotypeBuilder {
-    key_bytes: Vec<u8>,
+struct ParsedClonotypeScratch {
+    /// Per-sample convergence nucleotide evidence. The allocation is retained
+    /// and reused across every sample in one repertoire modality so parsing a
+    /// few hundred files does not repeatedly allocate/free a large byte arena.
     nt_bytes: Vec<u8>,
-    entries: Vec<BuildingClonotype>,
-    /// Hashing is only an acceleration index. Scientific identity is always
-    /// decided by exact byte equality against the arena-backed composite key.
+    /// Exact-key acceleration index used only while one sample is parsed.
+    /// Entries are primitive `(u64 -> u32)` values, so `clear()` is cheap and
+    /// keeps the bucket allocation for the next sample.
     hash_heads: HashMap<u64, u32>,
 }
 
-impl ParsedClonotypeBuilder {
-    fn with_capacity(row_count: usize) -> Self {
+impl ParsedClonotypeScratch {
+    fn reset(&mut self) {
+        self.nt_bytes.clear();
+        self.hash_heads.clear();
+    }
+}
+
+#[derive(Debug)]
+struct ParsedClonotypeBuilder<'a> {
+    key_bytes: Vec<u8>,
+    entries: Vec<BuildingClonotype>,
+    scratch: &'a mut ParsedClonotypeScratch,
+}
+
+impl<'a> ParsedClonotypeBuilder<'a> {
+    fn with_capacity(row_count: usize, scratch: &'a mut ParsedClonotypeScratch) -> Self {
+        // Avoid one very large allocator request at the exact boundary that
+        // became intermittently pathological late in TCR-beta parsing. The
+        // retained sample payload grows amortized as needed; the much more
+        // churn-prone hash/NT scratch allocations are reused across samples.
+        const INITIAL_REPERTOIRE_ROWS: usize = 16_384;
+        let initial_rows = row_count.min(INITIAL_REPERTOIRE_ROWS);
         Self {
-            key_bytes: Vec::with_capacity(row_count.saturating_mul(48)),
-            nt_bytes: Vec::with_capacity(row_count.saturating_mul(48)),
-            entries: Vec::with_capacity(row_count),
-            hash_heads: HashMap::with_capacity(row_count),
+            key_bytes: Vec::with_capacity(initial_rows.saturating_mul(48)),
+            entries: Vec::with_capacity(initial_rows),
+            scratch,
         }
     }
 
@@ -1928,7 +1949,7 @@ impl ParsedClonotypeBuilder {
         count: f64,
         nucleotide: Option<&str>,
     ) -> Result<()> {
-        let mut cursor = self.hash_heads.get(&hash).copied();
+        let mut cursor = self.scratch.hash_heads.get(&hash).copied();
         let mut matched = None;
         while let Some(index) = cursor {
             let entry = &self.entries[index as usize];
@@ -1950,11 +1971,15 @@ impl ParsedClonotypeBuilder {
                 if !convergent {
                     match first_nt {
                         None => {
-                            let span =
-                                append_arena_bytes(&mut self.nt_bytes, nucleotide.as_bytes())?;
+                            let span = append_arena_bytes(
+                                &mut self.scratch.nt_bytes,
+                                nucleotide.as_bytes(),
+                            )?;
                             self.entries[index].first_nt = Some(span);
                         }
-                        Some(span) if span.slice(&self.nt_bytes) != nucleotide.as_bytes() => {
+                        Some(span)
+                            if span.slice(&self.scratch.nt_bytes) != nucleotide.as_bytes() =>
+                        {
                             self.entries[index].convergent = true;
                             self.entries[index].first_nt = None;
                         }
@@ -1974,11 +1999,11 @@ impl ParsedClonotypeBuilder {
         let key = ByteSpan::new(key_start, self.key_bytes.len() - key_start)?;
         let first_nt = nucleotide
             .filter(|value| !value.is_empty())
-            .map(|value| append_arena_bytes(&mut self.nt_bytes, value.as_bytes()))
+            .map(|value| append_arena_bytes(&mut self.scratch.nt_bytes, value.as_bytes()))
             .transpose()?;
         let index = u32::try_from(self.entries.len())
             .map_err(|_| anyhow!("sample contains more than 4 billion clonotypes"))?;
-        let previous = self.hash_heads.insert(hash, index);
+        let previous = self.scratch.hash_heads.insert(hash, index);
         self.entries.push(BuildingClonotype {
             key,
             count,
@@ -2005,9 +2030,9 @@ impl ParsedClonotypeBuilder {
                 })
                 .collect(),
         }
-        // `hash_heads` and `nt_bytes` are dropped here, sample-by-sample,
-        // instead of retaining one nucleotide String per clonotype until the
-        // end of the whole modality.
+        // The hash index and NT convergence arena live in reusable parser
+        // scratch owned by the modality loop; finishing a sample therefore
+        // does not free/reallocate those large scratch buffers.
     }
 }
 
@@ -2450,6 +2475,7 @@ where
         bail!("No {label} files detected");
     }
     let mut parsed = Vec::new();
+    let mut parser_scratch = ParsedClonotypeScratch::default();
     let total = chosen.len();
     progress(
         1,
@@ -2491,6 +2517,7 @@ where
             &group,
             modality,
             spec.ambiguous_policy,
+            &mut parser_scratch,
             |detail| {
                 progress(
                     sample_progress,
@@ -2532,6 +2559,27 @@ where
             Err(e) => warnings.push(format!("{}: {e:#}", file.path.display())),
         }
     }
+    progress(
+        295,
+        1000,
+        &format!(
+            "{label}: parser scratch cleanup start (hash_capacity={}; nt_capacity_bytes={}; memory {})",
+            parser_scratch.hash_heads.capacity(),
+            parser_scratch.nt_bytes.capacity(),
+            native_process_memory_summary()
+        ),
+    );
+    let parser_scratch_drop_started = Instant::now();
+    drop(parser_scratch);
+    progress(
+        299,
+        1000,
+        &format!(
+            "{label}: parser scratch cleanup complete in {:.3}s (memory {})",
+            parser_scratch_drop_started.elapsed().as_secs_f64(),
+            native_process_memory_summary()
+        ),
+    );
     if parsed.len() < 4 {
         bail!(
             "Only {} usable {label} samples belong to this comparison",
@@ -3363,6 +3411,7 @@ fn parse_repertoire_file_with_audit<F>(
     group: &str,
     modality: CohortModality,
     policy: AmbiguousCallPolicy,
+    scratch: &mut ParsedClonotypeScratch,
     mut audit: F,
 ) -> Result<ParsedRepertoire>
 where
@@ -3373,6 +3422,26 @@ where
     // destruction, and compact-store finalization so a stale "parsing sample"
     // message cannot hide allocator work at one of those boundaries.
     let parse_started = Instant::now();
+    let scratch_reset_started = Instant::now();
+    scratch.reset();
+    audit(&format!(
+        "parser scratch reset in {:.3}s (hash_capacity={}; nt_capacity_bytes={}; memory {})",
+        scratch_reset_started.elapsed().as_secs_f64(),
+        scratch.hash_heads.capacity(),
+        scratch.nt_bytes.capacity(),
+        native_process_memory_summary()
+    ));
+    let builder_started = Instant::now();
+    let mut clonotypes = ParsedClonotypeBuilder::with_capacity(16_384, scratch);
+    audit(&format!(
+        "compact parser buffers initialized in {:.3}s before workbook open (entry_capacity={}; key_capacity_bytes={}; scratch_hash_capacity={}; scratch_nt_capacity_bytes={}; memory {})",
+        builder_started.elapsed().as_secs_f64(),
+        clonotypes.entries.capacity(),
+        clonotypes.key_bytes.capacity(),
+        clonotypes.scratch.hash_heads.capacity(),
+        clonotypes.scratch.nt_bytes.capacity(),
+        native_process_memory_summary()
+    ));
     let input_bytes = fs::metadata(path).ok().map(|meta| meta.len()).unwrap_or(0);
     audit(&format!(
         "open workbook start (input_bytes={input_bytes}; memory {})",
@@ -3423,7 +3492,7 @@ where
     let iso_idx = find_header(&columns, &["Isotype"]);
     let cdr3_idx = find_header(&columns, &["CDR3 Amino Acid Sequence"]);
     let nt_idx = find_header(&columns, &["Clonal Sequence"]);
-    let mut counts = Vec::with_capacity(row_capacity);
+    let mut counts = Vec::with_capacity(row_capacity.min(16_384));
     let mut feature_maps: BTreeMap<String, HashMap<String, f64>> = BTreeMap::new();
     for family in match modality {
         CohortModality::Bcr => vec!["Isotype", "V gene", "D gene", "J gene"],
@@ -3431,7 +3500,6 @@ where
     } {
         feature_maps.insert(family.to_string(), HashMap::new());
     }
-    let mut clonotypes = ParsedClonotypeBuilder::with_capacity(row_capacity);
     let mut top = 0.0_f64;
     let mut total = 0.0;
     let mut weighted_len = 0.0;
@@ -3511,8 +3579,8 @@ where
                 "row scan heartbeat (rows_seen={rows_seen}; positive_rows={positive_rows}; local_clonotypes={}; key_arena_bytes={}; nt_arena_bytes={}; hash_entries={}; elapsed={:.1}s; memory {})",
                 clonotypes.entries.len(),
                 clonotypes.key_bytes.len(),
-                clonotypes.nt_bytes.len(),
-                clonotypes.hash_heads.len(),
+                clonotypes.scratch.nt_bytes.len(),
+                clonotypes.scratch.hash_heads.len(),
                 scan_started.elapsed().as_secs_f64(),
                 native_process_memory_summary()
             ));
@@ -3859,9 +3927,14 @@ fn rarefy_metrics(counts: &[f64], depth: usize, reps: usize, seed: u64) -> (f64,
 
         let richness = sampled.len() as f64;
         let d = k as f64;
-        let shannon = sampled
-            .values()
-            .map(|value| {
+        // Legacy code accumulated Shannon terms in clonotype-index order.
+        // Preserve that exact deterministic floating-point order even though
+        // the sparse implementation uses a tiny HashMap internally.
+        let mut sampled_counts = sampled.into_iter().collect::<Vec<_>>();
+        sampled_counts.sort_unstable_by_key(|(clone_index, _)| *clone_index);
+        let shannon = sampled_counts
+            .iter()
+            .map(|(_, value)| {
                 let p = *value as f64 / d;
                 -p * p.ln()
             })
@@ -4906,8 +4979,79 @@ mod tests {
         assert!(sh >= 0.0);
     }
 
+    #[test]
+    fn dense_rarefaction_matches_legacy_reference_exactly() {
+        fn legacy(counts: &[f64], depth: usize, reps: usize, seed: u64) -> (f64, f64) {
+            let integer_counts = counts
+                .iter()
+                .map(|value| {
+                    if value.is_finite() && *value > 0.0 {
+                        value.round().max(0.0) as u64
+                    } else {
+                        0
+                    }
+                })
+                .collect::<Vec<_>>();
+            let total = integer_counts.iter().sum::<u64>();
+            let k = (depth as u64).min(total) as usize;
+            let mut rng = XorShift64::new(seed);
+            let mut richness_sum = 0.0;
+            let mut shannon_sum = 0.0;
+            let mut sampled_per_clone = vec![0u32; integer_counts.len()];
+            for _ in 0..reps {
+                let mut selected = HashSet::with_capacity(k.saturating_mul(2).max(16));
+                let start = total - k as u64;
+                for j in start..total {
+                    let t = rng.next_bounded(j + 1);
+                    if !selected.insert(t) {
+                        selected.insert(j);
+                    }
+                }
+                let mut positions = selected.into_iter().collect::<Vec<_>>();
+                positions.sort_unstable();
+                sampled_per_clone.fill(0);
+                let mut pos_i = 0usize;
+                let mut cumulative = 0u64;
+                for (clone_i, count) in integer_counts.iter().enumerate() {
+                    if *count == 0 {
+                        continue;
+                    }
+                    cumulative += *count;
+                    while pos_i < positions.len() && positions[pos_i] < cumulative {
+                        sampled_per_clone[clone_i] += 1;
+                        pos_i += 1;
+                    }
+                    if pos_i == positions.len() {
+                        break;
+                    }
+                }
+                let richness = sampled_per_clone.iter().filter(|value| **value > 0).count() as f64;
+                let d = k as f64;
+                let shannon = sampled_per_clone
+                    .iter()
+                    .filter(|value| **value > 0)
+                    .map(|value| {
+                        let p = *value as f64 / d;
+                        -p * p.ln()
+                    })
+                    .sum::<f64>();
+                richness_sum += richness;
+                shannon_sum += shannon;
+            }
+            (richness_sum / reps as f64, shannon_sum / reps as f64)
+        }
+
+        let counts = vec![0.0, 100.0, 50.0, f64::NAN, 25.0, 10.0, 1.0];
+        for seed in [1, 7, 0xDEADBEEF] {
+            let expected = legacy(&counts, 83, 5, seed);
+            let observed = rarefy_metrics(&counts, 83, 5, seed);
+            assert_eq!(observed, expected);
+        }
+    }
+
     fn compact_store(records: &[(&str, &str, &str, f64, Option<&str>)]) -> ParsedClonotypeStore {
-        let mut builder = ParsedClonotypeBuilder::default();
+        let mut scratch = ParsedClonotypeScratch::default();
+        let mut builder = ParsedClonotypeBuilder::with_capacity(records.len(), &mut scratch);
         for (v, j, cdr3, count, nt) in records {
             builder.record(v, j, cdr3, *count, *nt).unwrap();
         }
@@ -4935,7 +5079,8 @@ mod tests {
 
     #[test]
     fn arena_clonotype_tracking_preserves_exact_identity_and_convergence() {
-        let mut builder = ParsedClonotypeBuilder::default();
+        let mut scratch = ParsedClonotypeScratch::default();
+        let mut builder = ParsedClonotypeBuilder::with_capacity(4, &mut scratch);
         builder
             .record("TRBV1", "TRBJ1", "CASS", 10.0, Some("AAA"))
             .unwrap();
@@ -4967,7 +5112,8 @@ mod tests {
 
     #[test]
     fn hash_collision_does_not_merge_exact_clonotype_identity() {
-        let mut builder = ParsedClonotypeBuilder::default();
+        let mut scratch = ParsedClonotypeScratch::default();
+        let mut builder = ParsedClonotypeBuilder::with_capacity(3, &mut scratch);
         builder
             .record_hashed(7, "TRBV1", "TRBJ1", "CASSA", 10.0, Some("AAA"))
             .unwrap();
@@ -4996,7 +5142,8 @@ mod tests {
 
     #[test]
     fn exact_numeric_ids_survive_forced_hash_collisions() {
-        let mut left_builder = ParsedClonotypeBuilder::default();
+        let mut left_scratch = ParsedClonotypeScratch::default();
+        let mut left_builder = ParsedClonotypeBuilder::with_capacity(2, &mut left_scratch);
         left_builder
             .record_hashed(7, "TRBV1", "TRBJ1", "CASSA", 10.0, Some("AAA"))
             .unwrap();
@@ -5004,7 +5151,8 @@ mod tests {
             .record_hashed(7, "TRBV2", "TRBJ2", "CASSB", 20.0, Some("BBB"))
             .unwrap();
 
-        let mut right_builder = ParsedClonotypeBuilder::default();
+        let mut right_scratch = ParsedClonotypeScratch::default();
+        let mut right_builder = ParsedClonotypeBuilder::with_capacity(2, &mut right_scratch);
         right_builder
             .record_hashed(7, "TRBV1", "TRBJ1", "CASSA", 30.0, Some("CCC"))
             .unwrap();
@@ -5162,12 +5310,51 @@ mod tests {
     }
 
     #[test]
+    fn repertoire_parser_scratch_reuses_capacity_without_cross_sample_state() {
+        let mut scratch = ParsedClonotypeScratch::default();
+        let first = {
+            let mut builder = ParsedClonotypeBuilder::with_capacity(4, &mut scratch);
+            builder
+                .record("TRBV1", "TRBJ1", "CASSA", 10.0, Some("AAA"))
+                .unwrap();
+            builder
+                .record("TRBV1", "TRBJ1", "CASSA", 5.0, Some("BBB"))
+                .unwrap();
+            builder.finish()
+        };
+        let hash_capacity = scratch.hash_heads.capacity();
+        let nt_capacity = scratch.nt_bytes.capacity();
+        assert!(hash_capacity > 0);
+        assert!(nt_capacity > 0);
+
+        scratch.reset();
+        assert_eq!(scratch.hash_heads.len(), 0);
+        assert_eq!(scratch.nt_bytes.len(), 0);
+        assert_eq!(scratch.hash_heads.capacity(), hash_capacity);
+        assert_eq!(scratch.nt_bytes.capacity(), nt_capacity);
+
+        let second = {
+            let mut builder = ParsedClonotypeBuilder::with_capacity(2, &mut scratch);
+            builder
+                .record("TRBV2", "TRBJ2", "CASSB", 7.0, Some("CCC"))
+                .unwrap();
+            builder.finish()
+        };
+        assert_eq!(first.len(), 1);
+        assert!(first.entries[0].convergent);
+        assert_eq!(second.len(), 1);
+        assert!(!second.entries[0].convergent);
+        assert_eq!(second.entries[0].count, 7.0);
+    }
+
+    #[test]
     fn repertoire_working_set_cleanup_accepts_bulk_owned_samples() {
         let samples = (0..16)
             .map(|i| {
                 let cdr3 = format!("CASS{i}");
                 let nt = format!("NT{i}");
-                let mut builder = ParsedClonotypeBuilder::default();
+                let mut scratch = ParsedClonotypeScratch::default();
+                let mut builder = ParsedClonotypeBuilder::with_capacity(1, &mut scratch);
                 builder.record("V", "J", &cdr3, 1.0, Some(&nt)).unwrap();
                 ParsedRepertoire {
                     sample_id: format!("S{i}"),
@@ -5193,7 +5380,8 @@ mod tests {
             let nt_a1 = format!("NT{i}A1");
             let nt_a2 = format!("NT{i}A2");
             let nt_b = format!("NT{i}B1");
-            let mut builder = ParsedClonotypeBuilder::default();
+            let mut scratch = ParsedClonotypeScratch::default();
+            let mut builder = ParsedClonotypeBuilder::with_capacity(3, &mut scratch);
             builder
                 .record("V1", "J1", &cdr3_a, 75.0, Some(&nt_a1))
                 .unwrap();
