@@ -3812,30 +3812,35 @@ fn rarefy_metrics(counts: &[f64], depth: usize, reps: usize, seed: u64) -> (f64,
     if counts.is_empty() || depth == 0 || reps == 0 {
         return (f64::NAN, f64::NAN);
     }
-    let integer_counts = counts
-        .iter()
-        .map(|v| {
-            if v.is_finite() && *v > 0.0 {
-                v.round().max(0.0) as u64
-            } else {
-                0
-            }
-        })
-        .collect::<Vec<_>>();
-    let total = integer_counts.iter().sum::<u64>();
+
+    // The dense clonotype-ID representation can contain millions of clonotypes.
+    // Matched-depth rarefaction usually samples a relatively small number of
+    // reads. Do not allocate/clear a million-entry sampled_per_clone vector for
+    // every replicate. Instead, keep only non-zero clonotypes and use cumulative
+    // counts plus binary search to map sampled read positions back to clonotypes.
+    let mut cumulative = Vec::<u64>::new();
+    let mut total = 0u64;
+    for count in counts {
+        let integer = if count.is_finite() && *count > 0.0 {
+            count.round().max(0.0) as u64
+        } else {
+            0
+        };
+        if integer > 0 {
+            total = total.saturating_add(integer);
+            cumulative.push(total);
+        }
+    }
+
     if total == 0 {
         return (f64::NAN, f64::NAN);
     }
+
     let k = (depth as u64).min(total) as usize;
     let mut rng = XorShift64::new(seed);
     let mut richness_sum = 0.0;
     let mut shannon_sum = 0.0;
-    let mut sampled_per_clone = vec![0u32; integer_counts.len()];
 
-    // Exact rarefaction without replacement. Floyd's algorithm selects k
-    // distinct read positions uniformly from 0..total without expanding a
-    // potentially huge read-level vector. Sorted positions are then mapped
-    // back to clonotypes through cumulative clone counts.
     for _ in 0..reps {
         let mut selected = HashSet::with_capacity(k.saturating_mul(2).max(16));
         let start = total - k as u64;
@@ -3845,37 +3850,27 @@ fn rarefy_metrics(counts: &[f64], depth: usize, reps: usize, seed: u64) -> (f64,
                 selected.insert(j);
             }
         }
-        let mut positions = selected.into_iter().collect::<Vec<_>>();
-        positions.sort_unstable();
-        sampled_per_clone.fill(0);
-        let mut pos_i = 0usize;
-        let mut cumulative = 0u64;
-        for (clone_i, count) in integer_counts.iter().enumerate() {
-            if *count == 0 {
-                continue;
-            }
-            cumulative += *count;
-            while pos_i < positions.len() && positions[pos_i] < cumulative {
-                sampled_per_clone[clone_i] += 1;
-                pos_i += 1;
-            }
-            if pos_i == positions.len() {
-                break;
-            }
+
+        let mut sampled = HashMap::<usize, u32>::with_capacity(k.max(1));
+        for position in selected {
+            let clone_index = cumulative.partition_point(|value| *value <= position);
+            *sampled.entry(clone_index).or_insert(0) += 1;
         }
-        let richness = sampled_per_clone.iter().filter(|v| **v > 0).count() as f64;
+
+        let richness = sampled.len() as f64;
         let d = k as f64;
-        let shannon = sampled_per_clone
-            .iter()
-            .filter(|v| **v > 0)
-            .map(|v| {
-                let p = *v as f64 / d;
+        let shannon = sampled
+            .values()
+            .map(|value| {
+                let p = *value as f64 / d;
                 -p * p.ln()
             })
             .sum::<f64>();
+
         richness_sum += richness;
         shannon_sum += shannon;
     }
+
     (richness_sum / reps as f64, shannon_sum / reps as f64)
 }
 
