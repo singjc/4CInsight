@@ -1,9 +1,9 @@
 //! Local web server for the 4C Cohort Explorer browser client.
 //!
-//! Phase 3E.8 keeps authenticated metadata-backed comparison configuration and
-//! adds presentation payloads plus on-demand bulk export for completed frozen
-//! unified native jobs. The server reconstructs metadata/scientific state and
-//! derives plot coordinates from native results; WASM does not recompute science.
+//! Phase 3E.11 keeps authenticated metadata-backed comparison configuration and
+//! adds server/native repertoire lifetime diagnostics around frozen unified jobs.
+//! The server reconstructs metadata/scientific state and derives plot coordinates
+//! from native results; WASM does not recompute science.
 //! Existing native multi-omics statistics and report generation remain the
 //! scientific implementation, and authorization/storage semantics stay opaque.
 
@@ -21,7 +21,8 @@ use crate::{
     },
     corrected::{
         AdjustedFeatureResult, CorrectedExpressionResult, CorrectedModelSpec,
-        CorrectedRepertoireResult, DendrogramResult, OrdinationResult, run_corrected_expression,
+        CorrectedRepertoireResult, DendrogramResult, OrdinationResult,
+        native_process_memory_summary, native_runtime_context_summary, run_corrected_expression,
     },
     diagnostics::PbmcDiagnosticsConfig,
     input_conventions::{FilenameInputKind, classify_input_filename},
@@ -3492,6 +3493,15 @@ where
         None
     };
     progress(150, 1000, "Frozen QC stage complete");
+    progress(
+        151,
+        1000,
+        &format!(
+            "Server lifetime audit — frozen QC complete; runtime {}; memory {}",
+            native_runtime_context_summary(),
+            native_process_memory_summary()
+        ),
+    );
 
     if snapshot.request.run_full_unified {
         let reviewed_exclusions = snapshot
@@ -3521,6 +3531,23 @@ where
             }
             (original_comparison.clone(), None)
         };
+
+        // The complete native QC result is only needed to construct the audited
+        // downstream filter snapshot. Frozen server jobs previously retained
+        // both the full QC result and its cloned filter snapshot across the
+        // entire unified analysis. Release the redundant copy before any large
+        // repertoire working set is allocated.
+        let had_full_qc_result = qc_native.is_some();
+        drop(qc_native);
+        progress(
+            155,
+            1000,
+            &format!(
+                "Server lifetime audit — released redundant full QC result before unified analysis (had_full_qc_result={had_full_qc_result}; qc_snapshot_retained={}; memory {})",
+                qc_snapshot.is_some(),
+                native_process_memory_summary()
+            ),
+        );
 
         if comparison.case_ids.is_empty() || comparison.control_ids.is_empty() {
             bail!(
@@ -3644,6 +3671,15 @@ where
             pbmc_diagnostics,
         };
 
+        progress(
+            159,
+            1000,
+            &format!(
+                "Server lifetime audit — entering shared native unified analysis; runtime {}; memory {}",
+                native_runtime_context_summary(),
+                native_process_memory_summary()
+            ),
+        );
         progress(160, 1000, "Starting native unified multi-omics analysis");
         let mut primary_visualizations = None;
         let run = run_unified_cohort_analysis_with_primary_checkpoint(
@@ -3711,6 +3747,14 @@ where
                 );
             },
         )?;
+        progress(
+            812,
+            1000,
+            &format!(
+                "Server lifetime audit — shared native unified analysis returned; memory {}",
+                native_process_memory_summary()
+            ),
+        );
         progress(
             815,
             1000,
@@ -6522,6 +6566,18 @@ mod tests {
                 "TCR beta corrected — TCR beta: parsing complete (93 usable sample(s); 4293752 clonotypes; memory RSS=2048.0 MiB VmSize=3072.0 MiB VmHWM=2500.0 MiB VmPeak=4096.0 MiB)"
             ),
             "TCR beta corrected / parsing"
+        );
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
+                "TCR beta corrected — TCR beta: parsing 4C_97 (236/265) — row scan heartbeat (rows_seen=120000; positive_rows=119950; local_clonotypes=115000; elapsed=10.0s; memory RSS=2048.0 MiB VmSwap=0 KiB)"
+            ),
+            "TCR beta corrected / parsing"
+        );
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
+                "Server lifetime audit — released redundant full QC result before unified analysis (had_full_qc_result=true; qc_snapshot_retained=true; memory RSS=1024.0 MiB)"
+            ),
+            "Server lifetime audit"
         );
         assert_eq!(
             LocalProjectStore::progress_stage_name(

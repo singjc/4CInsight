@@ -28,6 +28,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AmbiguousCallPolicy {
@@ -2239,7 +2240,7 @@ fn release_repertoire_working_set(samples: Vec<ParsedRepertoire>) {
     drop(samples);
 }
 
-fn native_process_memory_summary() -> String {
+pub(crate) fn native_process_memory_summary() -> String {
     #[cfg(target_os = "linux")]
     {
         if let Ok(status) = fs::read_to_string("/proc/self/status") {
@@ -2247,16 +2248,52 @@ fn native_process_memory_summary() -> String {
             let size = proc_status_kib(&status, "VmSize:");
             let hwm = proc_status_kib(&status, "VmHWM:");
             let peak = proc_status_kib(&status, "VmPeak:");
+            let swap = proc_status_kib(&status, "VmSwap:");
+            let (available, swap_free) = fs::read_to_string("/proc/meminfo")
+                .ok()
+                .map(|meminfo| {
+                    (
+                        proc_status_kib(&meminfo, "MemAvailable:"),
+                        proc_status_kib(&meminfo, "SwapFree:"),
+                    )
+                })
+                .unwrap_or((None, None));
             return format!(
-                "RSS={} VmSize={} VmHWM={} VmPeak={}",
+                "RSS={} VmSize={} VmHWM={} VmPeak={} VmSwap={} MemAvailable={} SwapFree={}",
                 format_kib(rss),
                 format_kib(size),
                 format_kib(hwm),
-                format_kib(peak)
+                format_kib(peak),
+                format_kib(swap),
+                format_kib(available),
+                format_kib(swap_free)
             );
         }
     }
-    "RSS/VmSize unavailable on this platform".to_string()
+    "RSS/VmSize/swap unavailable on this platform".to_string()
+}
+
+pub(crate) fn native_runtime_context_summary() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let executable = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        return format!(
+            "exe={executable} version={} pid={} thread={:?}",
+            env!("CARGO_PKG_VERSION"),
+            std::process::id(),
+            std::thread::current().id()
+        );
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        format!("exe=wasm version={}", env!("CARGO_PKG_VERSION"))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2418,7 +2455,8 @@ where
         1,
         1000,
         &format!(
-            "{label}: parsing start ({total} candidate sample(s); memory {})",
+            "{label}: parsing start ({total} candidate sample(s); runtime {}; memory {})",
+            native_runtime_context_summary(),
             native_process_memory_summary()
         ),
     );
@@ -2430,19 +2468,67 @@ where
         } else {
             continue;
         };
+        let sample_progress = ((i + 1) * 300 / total.max(1)).max(1);
+        let sample_started = Instant::now();
         progress(
-            ((i + 1) * 300 / total.max(1)).max(1),
+            sample_progress,
             1000,
-            &format!("{label}: parsing {} ({}/{total})", file.sample_id, i + 1),
+            &format!(
+                "{label}: parsing {} ({}/{total}) — sample start; retained_samples={}; retained_clonotypes={}; memory {}",
+                file.sample_id,
+                i + 1,
+                parsed.len(),
+                parsed
+                    .iter()
+                    .map(|sample: &ParsedRepertoire| sample.clonotypes.len())
+                    .sum::<usize>(),
+                native_process_memory_summary()
+            ),
         );
-        match parse_repertoire_file(
+        let parsed_sample = parse_repertoire_file_with_audit(
             &file.path,
             &file.sample_id,
             &group,
             modality,
             spec.ambiguous_policy,
-        ) {
-            Ok(p) => parsed.push(p),
+            |detail| {
+                progress(
+                    sample_progress,
+                    1000,
+                    &format!(
+                        "{label}: parsing {} ({}/{total}) — {detail}",
+                        file.sample_id,
+                        i + 1
+                    ),
+                );
+            },
+        );
+        match parsed_sample {
+            Ok(p) => {
+                let sample_clonotypes = p.clonotypes.len();
+                let sample_key_bytes = p.clonotypes.key_bytes.len();
+                parsed.push(p);
+                let retained_clonotypes = parsed
+                    .iter()
+                    .map(|sample| sample.clonotypes.len())
+                    .sum::<usize>();
+                let retained_key_bytes = parsed
+                    .iter()
+                    .map(|sample| sample.clonotypes.key_bytes.len())
+                    .sum::<usize>();
+                progress(
+                    sample_progress,
+                    1000,
+                    &format!(
+                        "{label}: parsing {} ({}/{total}) — sample complete in {:.3}s; sample_clonotypes={sample_clonotypes}; sample_key_bytes={sample_key_bytes}; retained_samples={}; retained_clonotypes={retained_clonotypes}; retained_key_bytes={retained_key_bytes}; memory {}",
+                        file.sample_id,
+                        i + 1,
+                        sample_started.elapsed().as_secs_f64(),
+                        parsed.len(),
+                        native_process_memory_summary()
+                    ),
+                );
+            }
             Err(e) => warnings.push(format!("{}: {e:#}", file.path.display())),
         }
     }
@@ -3271,16 +3357,29 @@ fn sharing_fractions(
         .collect()
 }
 
-fn parse_repertoire_file(
+fn parse_repertoire_file_with_audit<F>(
     path: &Path,
     sample_id: &str,
     group: &str,
     modality: CohortModality,
     policy: AmbiguousCallPolicy,
-) -> Result<ParsedRepertoire> {
-    // Repertoire parsing consumes Calamine's sheet range directly. The older
-    // path cloned every cell into a second Vec<Vec<Data>> before analysis,
-    // temporarily duplicating large repertoire worksheets in memory.
+    mut audit: F,
+) -> Result<ParsedRepertoire>
+where
+    F: FnMut(&str),
+{
+    // The server and desktop both enter this exact parser. The audit callbacks
+    // deliberately bracket XLSX materialization, row scanning, worksheet
+    // destruction, and compact-store finalization so a stale "parsing sample"
+    // message cannot hide allocator work at one of those boundaries.
+    let parse_started = Instant::now();
+    let input_bytes = fs::metadata(path).ok().map(|meta| meta.len()).unwrap_or(0);
+    audit(&format!(
+        "open workbook start (input_bytes={input_bytes}; memory {})",
+        native_process_memory_summary()
+    ));
+
+    let open_started = Instant::now();
     let mut workbook: Xlsx<_> =
         open_workbook(path).with_context(|| format!("Could not open {}", path.display()))?;
     let sheet = workbook
@@ -3288,10 +3387,33 @@ fn parse_repertoire_file(
         .first()
         .cloned()
         .ok_or_else(|| anyhow!("Workbook has no worksheets"))?;
+    audit(&format!(
+        "workbook opened in {:.3}s; materializing first worksheet",
+        open_started.elapsed().as_secs_f64()
+    ));
+
+    let range_started = Instant::now();
     let range = workbook.worksheet_range(&sheet)?;
     let mut rows = range.rows();
     let header = rows.next().ok_or_else(|| anyhow!("Worksheet is empty"))?;
     let row_capacity = rows.size_hint().0;
+    audit(&format!(
+        "worksheet materialized in {:.3}s (estimated_data_rows={row_capacity}; memory {})",
+        range_started.elapsed().as_secs_f64(),
+        native_process_memory_summary()
+    ));
+
+    // No subsequent scientific operation needs the XLSX ZIP/shared-string
+    // container after worksheet_range() has returned its owned Range<Data>.
+    // Release it before allocating clonotype arenas so server-side frozen jobs
+    // do not retain both workbook internals and the growing parsed repertoire.
+    let workbook_drop_started = Instant::now();
+    drop(workbook);
+    audit(&format!(
+        "workbook container released in {:.3}s; scanning worksheet rows",
+        workbook_drop_started.elapsed().as_secs_f64()
+    ));
+
     let headers = header.iter().map(cell_text).collect::<Vec<_>>();
     let columns = header_map(&headers);
     let count_idx =
@@ -3315,7 +3437,233 @@ fn parse_repertoire_file(
     let mut total = 0.0;
     let mut weighted_len = 0.0;
     let mut weighted_len_den = 0.0;
-    for row in rows {
+    let scan_started = Instant::now();
+    let mut heartbeat_started = Instant::now();
+    let mut rows_seen = 0usize;
+    let mut positive_rows = 0usize;
+
+    for row in rows.by_ref() {
+        rows_seen += 1;
+        let count = row.get(count_idx).and_then(cell_f64).unwrap_or(0.0);
+        if count > 0.0 {
+            positive_rows += 1;
+            counts.push(count);
+            total += count;
+            top = top.max(count);
+            let cdr3 = cdr3_idx
+                .and_then(|idx| row.get(idx))
+                .map(cell_text)
+                .unwrap_or_default();
+            if !cdr3.is_empty() {
+                weighted_len += count * cdr3.chars().count() as f64;
+                weighted_len_den += count;
+            }
+            if modality == CohortModality::Bcr {
+                if let Some(idx) = iso_idx {
+                    let iso = row.get(idx).map(cell_text).unwrap_or_default();
+                    if !iso.is_empty() {
+                        *feature_maps
+                            .get_mut("Isotype")
+                            .unwrap()
+                            .entry(iso)
+                            .or_insert(0.0) += count;
+                    }
+                }
+            }
+            let v_raw = v_idx
+                .and_then(|idx| row.get(idx))
+                .map(cell_text)
+                .unwrap_or_default();
+            let d_raw = d_idx
+                .and_then(|idx| row.get(idx))
+                .map(cell_text)
+                .unwrap_or_default();
+            let j_raw = j_idx
+                .and_then(|idx| row.get(idx))
+                .map(cell_text)
+                .unwrap_or_default();
+            let v_calls = resolve_calls(&v_raw, policy);
+            let d_calls = resolve_calls(&d_raw, policy);
+            let j_calls = resolve_calls(&j_raw, policy);
+            add_resolved(feature_maps.get_mut("V gene").unwrap(), &v_calls, count);
+            if modality == CohortModality::Bcr {
+                add_resolved(feature_maps.get_mut("D gene").unwrap(), &d_calls, count);
+            }
+            add_resolved(feature_maps.get_mut("J gene").unwrap(), &j_calls, count);
+            if modality != CohortModality::Bcr {
+                let pair_map = feature_maps.get_mut("V-J pair").unwrap();
+                for (v, vw) in &v_calls {
+                    for (j, jw) in &j_calls {
+                        *pair_map.entry(format!("{v} | {j}")).or_insert(0.0) += count * vw * jw;
+                    }
+                }
+            }
+            if !cdr3.is_empty() && v_calls.len() == 1 && j_calls.len() == 1 {
+                let nt = nt_idx
+                    .and_then(|idx| row.get(idx))
+                    .map(cell_text)
+                    .filter(|value| !value.is_empty());
+                clonotypes.record(&v_calls[0].0, &j_calls[0].0, &cdr3, count, nt.as_deref())?;
+            }
+        }
+
+        if heartbeat_started.elapsed() >= Duration::from_secs(5) {
+            audit(&format!(
+                "row scan heartbeat (rows_seen={rows_seen}; positive_rows={positive_rows}; local_clonotypes={}; key_arena_bytes={}; nt_arena_bytes={}; hash_entries={}; elapsed={:.1}s; memory {})",
+                clonotypes.entries.len(),
+                clonotypes.key_bytes.len(),
+                clonotypes.nt_bytes.len(),
+                clonotypes.hash_heads.len(),
+                scan_started.elapsed().as_secs_f64(),
+                native_process_memory_summary()
+            ));
+            heartbeat_started = Instant::now();
+        }
+    }
+    drop(rows);
+
+    if total <= 0.0 {
+        bail!("No positive clone counts");
+    }
+    audit(&format!(
+        "row scan complete (rows_seen={rows_seen}; positive_rows={positive_rows}; local_clonotypes={}; elapsed={:.3}s); releasing worksheet cells; memory {}",
+        clonotypes.entries.len(),
+        scan_started.elapsed().as_secs_f64(),
+        native_process_memory_summary()
+    ));
+
+    // Range<Data> can itself own a large number of cell Strings. Make that
+    // destructor a measured parser boundary rather than letting it execute
+    // invisibly at function return.
+    let range_drop_started = Instant::now();
+    drop(range);
+    audit(&format!(
+        "worksheet cells released in {:.3}s; memory {}",
+        range_drop_started.elapsed().as_secs_f64(),
+        native_process_memory_summary()
+    ));
+
+    for map in feature_maps.values_mut() {
+        let denom = map.values().sum::<f64>();
+        if denom > 0.0 {
+            for value in map.values_mut() {
+                *value /= denom;
+            }
+        }
+    }
+
+    let final_clonotype_count = clonotypes.entries.len();
+    let final_key_bytes = clonotypes.key_bytes.len();
+    audit(&format!(
+        "compact clonotype finalize start (clonotypes={final_clonotype_count}; key_arena_bytes={final_key_bytes}; memory {})",
+        native_process_memory_summary()
+    ));
+    let finalize_started = Instant::now();
+    let clonotypes = clonotypes.finish();
+    audit(&format!(
+        "compact clonotype finalize complete in {:.3}s; parser total {:.3}s; memory {}",
+        finalize_started.elapsed().as_secs_f64(),
+        parse_started.elapsed().as_secs_f64(),
+        native_process_memory_summary()
+    ));
+
+    Ok(ParsedRepertoire {
+        sample_id: sample_id.to_string(),
+        group: group.to_string(),
+        counts,
+        clonotypes,
+        feature_maps,
+        top_clone_fraction: top / total,
+        weighted_mean_cdr3_aa_length: if weighted_len_den > 0.0 {
+            weighted_len / weighted_len_den
+        } else {
+            f64::NAN
+        },
+    })
+}
+
+fn repertoire_qc_metrics_from_counts(
+    counts: &[f64],
+    top_clone_fraction: f64,
+    weighted_mean_cdr3_aa_length: f64,
+) -> Result<Vec<(String, f64)>> {
+    let total = counts.iter().copied().sum::<f64>();
+    if total <= 0.0 {
+        bail!("No positive clone counts");
+    }
+    let probs = counts
+        .iter()
+        .copied()
+        .filter(|value| *value > 0.0)
+        .map(|value| value / total)
+        .collect::<Vec<_>>();
+    let richness = probs.len() as f64;
+    let shannon = -probs
+        .iter()
+        .copied()
+        .filter(|probability| *probability > 0.0)
+        .map(|probability| probability * probability.ln())
+        .sum::<f64>();
+    let simpson = 1.0
+        - probs
+            .iter()
+            .map(|probability| probability * probability)
+            .sum::<f64>();
+    let clonality = if richness > 1.0 {
+        1.0 - shannon / richness.ln()
+    } else {
+        0.0
+    };
+    Ok(vec![
+        ("Total clone count".to_string(), total),
+        ("Observed richness".to_string(), richness),
+        ("Shannon diversity".to_string(), shannon),
+        ("Simpson diversity".to_string(), simpson),
+        ("Clonality".to_string(), clonality),
+        ("Top clone fraction".to_string(), top_clone_fraction),
+        (
+            "Weighted mean CDR3 AA length".to_string(),
+            weighted_mean_cdr3_aa_length,
+        ),
+    ])
+}
+
+pub(crate) fn parse_repertoire_qc_metrics(
+    path: &Path,
+    _sample_id: &str,
+    _modality: CohortModality,
+) -> Result<Vec<(String, f64)>> {
+    // Cross-modal QC needs only seven depth/diversity summary scalars. The
+    // previous implementation used the full corrected parser, allocating and
+    // destroying exact clonotype arenas, V/J composition maps, nucleotide
+    // convergence state, and hash tables for every repertoire file immediately
+    // before the server reparsed the same inputs for corrected analysis. That
+    // is unnecessary allocator churn and is a concrete server/native lifecycle
+    // difference because frozen web jobs run QC immediately before unified
+    // science. Keep this preflight parser intentionally minimal.
+    let mut workbook: Xlsx<_> =
+        open_workbook(path).with_context(|| format!("Could not open {}", path.display()))?;
+    let sheet = workbook
+        .sheet_names()
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("Workbook has no worksheets"))?;
+    let range = workbook.worksheet_range(&sheet)?;
+    drop(workbook);
+    let mut rows = range.rows();
+    let header = rows.next().ok_or_else(|| anyhow!("Worksheet is empty"))?;
+    let row_capacity = rows.size_hint().0;
+    let headers = header.iter().map(cell_text).collect::<Vec<_>>();
+    let columns = header_map(&headers);
+    let count_idx =
+        find_header(&columns, &["Clone Count"]).ok_or_else(|| anyhow!("Missing Clone Count"))?;
+    let cdr3_idx = find_header(&columns, &["CDR3 Amino Acid Sequence"]);
+    let mut counts = Vec::with_capacity(row_capacity);
+    let mut top = 0.0_f64;
+    let mut total = 0.0_f64;
+    let mut weighted_len = 0.0_f64;
+    let mut weighted_len_den = 0.0_f64;
+    for row in rows.by_ref() {
         let count = row.get(count_idx).and_then(cell_f64).unwrap_or(0.0);
         if count <= 0.0 {
             continue;
@@ -3331,128 +3679,21 @@ fn parse_repertoire_file(
             weighted_len += count * cdr3.chars().count() as f64;
             weighted_len_den += count;
         }
-        if modality == CohortModality::Bcr {
-            if let Some(idx) = iso_idx {
-                let iso = row.get(idx).map(cell_text).unwrap_or_default();
-                if !iso.is_empty() {
-                    *feature_maps
-                        .get_mut("Isotype")
-                        .unwrap()
-                        .entry(iso)
-                        .or_insert(0.0) += count;
-                }
-            }
-        }
-        let v_raw = v_idx
-            .and_then(|idx| row.get(idx))
-            .map(cell_text)
-            .unwrap_or_default();
-        let d_raw = d_idx
-            .and_then(|idx| row.get(idx))
-            .map(cell_text)
-            .unwrap_or_default();
-        let j_raw = j_idx
-            .and_then(|idx| row.get(idx))
-            .map(cell_text)
-            .unwrap_or_default();
-        let v_calls = resolve_calls(&v_raw, policy);
-        let d_calls = resolve_calls(&d_raw, policy);
-        let j_calls = resolve_calls(&j_raw, policy);
-        add_resolved(feature_maps.get_mut("V gene").unwrap(), &v_calls, count);
-        if modality == CohortModality::Bcr {
-            add_resolved(feature_maps.get_mut("D gene").unwrap(), &d_calls, count);
-        }
-        add_resolved(feature_maps.get_mut("J gene").unwrap(), &j_calls, count);
-        if modality != CohortModality::Bcr {
-            let pair_map = feature_maps.get_mut("V-J pair").unwrap();
-            for (v, vw) in &v_calls {
-                for (j, jw) in &j_calls {
-                    *pair_map.entry(format!("{v} | {j}")).or_insert(0.0) += count * vw * jw;
-                }
-            }
-        }
-        if !cdr3.is_empty() && v_calls.len() == 1 && j_calls.len() == 1 {
-            let nt = nt_idx
-                .and_then(|idx| row.get(idx))
-                .map(cell_text)
-                .filter(|value| !value.is_empty());
-            clonotypes.record(&v_calls[0].0, &j_calls[0].0, &cdr3, count, nt.as_deref())?;
-        }
     }
+    drop(rows);
+    drop(range);
     if total <= 0.0 {
         bail!("No positive clone counts");
     }
-    for map in feature_maps.values_mut() {
-        let denom = map.values().sum::<f64>();
-        if denom > 0.0 {
-            for v in map.values_mut() {
-                *v /= denom;
-            }
-        }
-    }
-    Ok(ParsedRepertoire {
-        sample_id: sample_id.to_string(),
-        group: group.to_string(),
-        counts,
-        clonotypes: clonotypes.finish(),
-        feature_maps,
-        top_clone_fraction: top / total,
-        weighted_mean_cdr3_aa_length: if weighted_len_den > 0.0 {
+    repertoire_qc_metrics_from_counts(
+        &counts,
+        top / total,
+        if weighted_len_den > 0.0 {
             weighted_len / weighted_len_den
         } else {
             f64::NAN
         },
-    })
-}
-
-pub(crate) fn parse_repertoire_qc_metrics(
-    path: &Path,
-    sample_id: &str,
-    modality: CohortModality,
-) -> Result<Vec<(String, f64)>> {
-    let parsed = parse_repertoire_file(
-        path,
-        sample_id,
-        "QC",
-        modality,
-        AmbiguousCallPolicy::Exclude,
-    )?;
-    let total = parsed.counts.iter().copied().sum::<f64>();
-    if total <= 0.0 {
-        bail!("No positive clone counts");
-    }
-    let probs = parsed
-        .counts
-        .iter()
-        .copied()
-        .filter(|v| *v > 0.0)
-        .map(|v| v / total)
-        .collect::<Vec<_>>();
-    let richness = probs.len() as f64;
-    let shannon = -probs
-        .iter()
-        .copied()
-        .filter(|p| *p > 0.0)
-        .map(|p| p * p.ln())
-        .sum::<f64>();
-    let simpson = 1.0 - probs.iter().map(|p| p * p).sum::<f64>();
-    let clonality = if richness > 1.0 {
-        1.0 - shannon / richness.ln()
-    } else {
-        0.0
-    };
-    Ok(vec![
-        ("Total clone count".to_string(), total),
-        ("Observed richness".to_string(), richness),
-        ("Shannon diversity".to_string(), shannon),
-        ("Simpson diversity".to_string(), simpson),
-        ("Clonality".to_string(), clonality),
-        ("Top clone fraction".to_string(), parsed.top_clone_fraction),
-        (
-            "Weighted mean CDR3 AA length".to_string(),
-            parsed.weighted_mean_cdr3_aa_length,
-        ),
-    ])
+    )
 }
 
 fn resolve_calls(raw: &str, policy: AmbiguousCallPolicy) -> Vec<(String, f64)> {
@@ -5006,11 +5247,35 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn proc_status_memory_parser_extracts_kib_values() {
-        let status =
-            "Name:\tcfs-server\nVmPeak:\t  123456 kB\nVmSize:\t  120000 kB\nVmRSS:\t   64000 kB\n";
+        let status = "Name:\tcfs-server\nVmPeak:\t  123456 kB\nVmSize:\t  120000 kB\nVmRSS:\t   64000 kB\nVmSwap:\t    8192 kB\nMemAvailable:\t 2048000 kB\nSwapFree:\t 1024000 kB\n";
         assert_eq!(proc_status_kib(status, "VmRSS:"), Some(64_000));
         assert_eq!(proc_status_kib(status, "VmSize:"), Some(120_000));
         assert_eq!(proc_status_kib(status, "VmPeak:"), Some(123_456));
+        assert_eq!(proc_status_kib(status, "VmSwap:"), Some(8_192));
+        assert_eq!(proc_status_kib(status, "MemAvailable:"), Some(2_048_000));
+        assert_eq!(proc_status_kib(status, "SwapFree:"), Some(1_024_000));
+    }
+
+    #[test]
+    fn lightweight_repertoire_qc_summary_math_matches_legacy_formulas() {
+        let counts = vec![10.0, 5.0, 1.0, 4.0];
+        let metrics = repertoire_qc_metrics_from_counts(&counts, 0.5, 13.25).unwrap();
+        let by_name = metrics.into_iter().collect::<HashMap<_, _>>();
+
+        let total = counts.iter().copied().sum::<f64>();
+        let probs = counts.iter().map(|count| count / total).collect::<Vec<_>>();
+        let richness = probs.len() as f64;
+        let shannon = -probs.iter().map(|p| p * p.ln()).sum::<f64>();
+        let simpson = 1.0 - probs.iter().map(|p| p * p).sum::<f64>();
+        let clonality = 1.0 - shannon / richness.ln();
+
+        assert_eq!(by_name["Total clone count"], total);
+        assert_eq!(by_name["Observed richness"], richness);
+        assert!((by_name["Shannon diversity"] - shannon).abs() < 1e-12);
+        assert!((by_name["Simpson diversity"] - simpson).abs() < 1e-12);
+        assert!((by_name["Clonality"] - clonality).abs() < 1e-12);
+        assert_eq!(by_name["Top clone fraction"], 0.5);
+        assert_eq!(by_name["Weighted mean CDR3 AA length"], 13.25);
     }
 
     #[test]
