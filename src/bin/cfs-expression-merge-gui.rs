@@ -58,6 +58,7 @@ use cfs_expression_merger::report::{
     generate_corrected_html_report, generate_focused_candidate_html_report,
     generate_unified_detailed_html_report, generate_unified_simplified_html_report,
 };
+use cfs_expression_merger::ui_theme;
 use cfs_expression_merger::{
     ColumnOrder, DataKind, EntityCatalogEntry, EntityProfilePoint, MergeConfig, MergeSummary,
     MergedDatasetInfo, Metric, SampleDistributionSummary, all_metrics,
@@ -646,21 +647,7 @@ fn category_color(
 
 impl MergeApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_theme(egui::Theme::Dark);
-        cc.egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
-            style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-            style.spacing.button_padding = egui::vec2(11.0, 6.0);
-            style.spacing.interact_size.y = 28.0;
-            style.spacing.tooltip_width = 360.0;
-        });
-
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(22, 24, 29);
-        visuals.faint_bg_color = egui::Color32::from_rgb(29, 32, 39);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(17, 19, 23);
-        visuals.selection.bg_fill = egui::Color32::from_rgb(45, 125, 190);
-        visuals.hyperlink_color = egui::Color32::from_rgb(105, 180, 235);
-        cc.egui_ctx.set_visuals(visuals);
+        ui_theme::apply_4c_theme(&cc.egui_ctx);
 
         Self {
             active_tab: AppTab::Merge,
@@ -714,7 +701,7 @@ impl MergeApp {
             cohort_metadata: None,
             cohort_mapping: None,
             cohort_preset: ComparisonPreset::HypVsTrueHc,
-            unified_comparison_mode: UnifiedComparisonMode::BuiltIn,
+            unified_comparison_mode: UnifiedComparisonMode::CustomMetadata,
             custom_comparison_column: None,
             custom_case_values: HashSet::new(),
             custom_control_values: HashSet::new(),
@@ -977,72 +964,63 @@ impl MergeApp {
 
     fn render_header(&mut self, ui: &mut egui::Ui) {
         let accent = ui.visuals().selection.bg_fill;
-        egui::Frame::new()
-            .fill(ui.visuals().faint_bg_color)
-            .inner_margin(egui::Margin::symmetric(16, 12))
-            .corner_radius(10)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new("4C Cohort Explorer")
-                                .size(24.0)
-                                .strong()
-                                .color(accent),
-                        );
-                        ui.label(
-                            egui::RichText::new(
-                                "RNA merging plus metadata-driven multi-modal cohort analysis",
-                            )
-                            .weak(),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (kind_text, sample_count) = match self.active_tab {
-                            AppTab::Explore => {
-                                let text = match self.analysis_kind() {
-                                    DataKind::Gene => "Gene data",
-                                    DataKind::Transcript => "Transcript data",
-                                    DataKind::Auto => "Report type unknown",
-                                };
-                                (text, self.analysis_sample_count())
-                            }
-                            AppTab::Merge => {
-                                let text = match self.effective_kind() {
-                                    DataKind::Gene => "Gene data",
-                                    DataKind::Transcript => "Transcript data",
-                                    DataKind::Auto => "Report type unknown",
-                                };
-                                (text, self.files.len())
-                            }
-                            AppTab::Metadata => (
-                                "Sample metadata",
-                                self.metadata_builder
-                                    .as_ref()
-                                    .map(|meta| meta.rows.len())
-                                    .unwrap_or(0),
-                            ),
-                            AppTab::Cohort => (
-                                "Cohort project",
-                                self.cohort_scan
-                                    .as_ref()
-                                    .map(|scan| scan.unique_samples())
-                                    .unwrap_or(0),
-                            ),
-                            AppTab::Docs => (
-                                "Analysis guide",
-                                self.cohort_scan
-                                    .as_ref()
-                                    .map(|scan| scan.unique_samples())
-                                    .unwrap_or(0),
-                            ),
-                        };
-                        ui.label(egui::RichText::new(kind_text).strong());
-                        ui.separator();
-                        ui.label(format!("{sample_count} samples"));
-                    });
+        ui_theme::header_frame(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(ui_theme::APP_TITLE)
+                            .size(24.0)
+                            .strong()
+                            .color(accent),
+                    );
+                    ui.label(egui::RichText::new(ui_theme::APP_SUBTITLE).weak());
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (kind_text, sample_count) = match self.active_tab {
+                        AppTab::Explore => {
+                            let text = match self.analysis_kind() {
+                                DataKind::Gene => "Gene data",
+                                DataKind::Transcript => "Transcript data",
+                                DataKind::Auto => "Report type unknown",
+                            };
+                            (text, self.analysis_sample_count())
+                        }
+                        AppTab::Merge => {
+                            let text = match self.effective_kind() {
+                                DataKind::Gene => "Gene data",
+                                DataKind::Transcript => "Transcript data",
+                                DataKind::Auto => "Report type unknown",
+                            };
+                            (text, self.files.len())
+                        }
+                        AppTab::Metadata => (
+                            "Sample metadata",
+                            self.metadata_builder
+                                .as_ref()
+                                .map(|meta| meta.rows.len())
+                                .unwrap_or(0),
+                        ),
+                        AppTab::Cohort => (
+                            "Cohort project",
+                            self.cohort_scan
+                                .as_ref()
+                                .map(|scan| scan.unique_samples())
+                                .unwrap_or(0),
+                        ),
+                        AppTab::Docs => (
+                            "Analysis guide",
+                            self.cohort_scan
+                                .as_ref()
+                                .map(|scan| scan.unique_samples())
+                                .unwrap_or(0),
+                        ),
+                    };
+                    ui.label(egui::RichText::new(kind_text).strong());
+                    ui.separator();
+                    ui.label(format!("{sample_count} samples"));
                 });
             });
+        });
     }
 
     fn render_navigation(&mut self, ui: &mut egui::Ui) {
@@ -3255,164 +3233,251 @@ impl MergeApp {
             }
 
             let mut comparison_changed = false;
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("Comparison definition:").strong());
-                comparison_changed |= ui
-                    .selectable_value(
-                        &mut this.unified_comparison_mode,
-                        UnifiedComparisonMode::BuiltIn,
-                        "Built-in 4C presets",
-                    )
-                    .changed();
-                comparison_changed |= ui
-                    .selectable_value(
-                        &mut this.unified_comparison_mode,
-                        UnifiedComparisonMode::CustomMetadata,
-                        "Custom from metadata",
-                    )
-                    .changed();
-            });
+            ui.separator();
+            ui.label(egui::RichText::new("Comparison from metadata").strong());
+            ui.label(
+                egui::RichText::new(
+                    "Choose a grouping field, then select one or more observed metadata values for Case and Control. Values are populated from the loaded metadata, so nothing has to be typed or memorized.",
+                )
+                .small()
+                .weak(),
+            );
 
-            match this.unified_comparison_mode {
-                UnifiedComparisonMode::BuiltIn => {
+            if let Some((metadata, _, _, _)) = active.as_ref() {
+                let candidates = native_metadata_comparison_candidates(metadata);
+                let suggested = suggested_native_comparison_column(metadata);
+                let current_valid = this
+                    .custom_comparison_column
+                    .as_ref()
+                    .is_some_and(|column| candidates.iter().any(|(name, _, _)| name == column));
+                if !current_valid {
+                    this.custom_comparison_column = suggested.clone();
+                    this.custom_case_values.clear();
+                    this.custom_control_values.clear();
+                    this.custom_comparison_name.clear();
+                    this.custom_case_label.clear();
+                    this.custom_control_label.clear();
+                    comparison_changed = true;
+                }
+
+                if this.unified_comparison_mode == UnifiedComparisonMode::BuiltIn {
                     ui.horizontal_wrapped(|ui| {
-                        comparison_changed |= ui
-                            .selectable_value(
-                                &mut this.cohort_preset,
-                                ComparisonPreset::HypVsTrueHc,
-                                "HYP vs True_HC",
-                            )
-                            .changed();
-                        comparison_changed |= ui
-                            .selectable_value(
-                                &mut this.cohort_preset,
-                                ComparisonPreset::HypMecfsVsMecfsOnly,
-                                "HYP+ME/CFS vs ME/CFS-only",
-                            )
-                            .changed();
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 170, 80),
+                            format!(
+                                "Legacy preset active: {}",
+                                this.cohort_preset.display_name()
+                            ),
+                        );
+                        if ui.small_button("Use metadata grouping instead").clicked() {
+                            this.unified_comparison_mode = UnifiedComparisonMode::CustomMetadata;
+                            comparison_changed = true;
+                        }
                     });
                 }
-                UnifiedComparisonMode::CustomMetadata => {
-                    if let Some((metadata, _, _, _)) = active.as_ref() {
-                        let candidate_columns = metadata
-                            .columns
-                            .iter()
-                            .filter(|column| column.as_str() != metadata.id_column.as_str())
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        if this
-                            .custom_comparison_column
-                            .as_ref()
-                            .map_or(true, |column| !candidate_columns.contains(column))
-                        {
-                            this.custom_comparison_column = candidate_columns
-                                .iter()
-                                .find(|column| {
-                                    column.as_str() == "analysis_group"
-                                        && metadata_unique_values(metadata, column).len() >= 2
-                                })
-                                .cloned()
-                                .or_else(|| {
-                                    candidate_columns.iter().find(|column| {
-                                        let n = metadata_unique_values(metadata, column).len();
-                                        (2..=20).contains(&n)
-                                    }).cloned()
-                                });
-                            this.custom_case_values.clear();
-                            this.custom_control_values.clear();
+
+                let metadata_mode = this.unified_comparison_mode == UnifiedComparisonMode::CustomMetadata;
+                ui.add_enabled_ui(metadata_mode, |ui| {
+                    let mut selected_column = this.custom_comparison_column.clone();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Grouping field");
+                        egui::ComboBox::from_id_salt("native_metadata_comparison_column")
+                            .selected_text(
+                                selected_column
+                                    .clone()
+                                    .unwrap_or_else(|| "(choose metadata field)".to_string()),
+                            )
+                            .width(300.0)
+                            .show_ui(ui, |ui| {
+                                for (name, distinct, comparison_ready) in &candidates {
+                                    let label = if *comparison_ready {
+                                        format!("{name} ({distinct} values)")
+                                    } else {
+                                        format!("{name} ({distinct} values; high-cardinality)")
+                                    };
+                                    ui.selectable_value(
+                                        &mut selected_column,
+                                        Some(name.clone()),
+                                        label,
+                                    );
+                                }
+                            });
+                        if let Some(suggested) = suggested.as_deref() {
+                            ui.label(
+                                egui::RichText::new(format!("Suggested: {suggested}"))
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    });
+
+                    if selected_column != this.custom_comparison_column {
+                        this.custom_comparison_column = selected_column.clone();
+                        this.custom_case_values.clear();
+                        this.custom_control_values.clear();
+                        this.custom_comparison_name.clear();
+                        this.custom_case_label.clear();
+                        this.custom_control_label.clear();
+                        comparison_changed = true;
+                    }
+
+                    if let Some(column) = selected_column {
+                        let values = metadata_unique_values(metadata, &column);
+                        if values.len() > 100 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "This field has {} distinct non-empty values; only the first 100 are exposed. Prefer a lower-cardinality categorical field for cohort comparison.",
+                                    values.len()
+                                ))
+                                .color(egui::Color32::LIGHT_RED),
+                            );
                         }
 
-                        let mut selected_column = this.custom_comparison_column.clone();
+                        let mut case_values = this.custom_case_values.clone();
+                        let mut control_values = this.custom_control_values.clone();
+                        let mut selection_changed = false;
                         ui.horizontal_wrapped(|ui| {
-                            ui.label("Grouping column:");
-                            egui::ComboBox::from_id_salt("unified_custom_comparison_column")
-                                .selected_text(selected_column.clone().unwrap_or_else(|| "(choose column)".to_string()))
+                            ui.label("Case values");
+                            egui::ComboBox::from_id_salt("native_metadata_case_values")
+                                .selected_text(native_selection_label(&case_values))
+                                .width(280.0)
                                 .show_ui(ui, |ui| {
-                                    for column in &candidate_columns {
-                                        ui.selectable_value(&mut selected_column, Some(column.clone()), column);
+                                    for (value, count) in values.iter().take(100) {
+                                        let mut selected = case_values.contains(value);
+                                        if ui
+                                            .checkbox(
+                                                &mut selected,
+                                                format!("{value}  (n={count})"),
+                                            )
+                                            .changed()
+                                        {
+                                            selection_changed = true;
+                                            if selected {
+                                                case_values.insert(value.clone());
+                                                control_values.remove(value);
+                                            } else {
+                                                case_values.remove(value);
+                                            }
+                                        }
                                     }
                                 });
+                            ui.label("Control values");
+                            egui::ComboBox::from_id_salt("native_metadata_control_values")
+                                .selected_text(native_selection_label(&control_values))
+                                .width(280.0)
+                                .show_ui(ui, |ui| {
+                                    for (value, count) in values.iter().take(100) {
+                                        let mut selected = control_values.contains(value);
+                                        if ui
+                                            .checkbox(
+                                                &mut selected,
+                                                format!("{value}  (n={count})"),
+                                            )
+                                            .changed()
+                                        {
+                                            selection_changed = true;
+                                            if selected {
+                                                control_values.insert(value.clone());
+                                                case_values.remove(value);
+                                            } else {
+                                                control_values.remove(value);
+                                            }
+                                        }
+                                    }
+                                });
+                            if ui.small_button("Clear groups").clicked() {
+                                case_values.clear();
+                                control_values.clear();
+                                selection_changed = true;
+                            }
                         });
-                        if selected_column != this.custom_comparison_column {
-                            this.custom_comparison_column = selected_column;
-                            this.custom_case_values.clear();
-                            this.custom_control_values.clear();
-                            this.custom_comparison_name.clear();
-                            this.custom_case_label.clear();
-                            this.custom_control_label.clear();
+
+                        if selection_changed {
+                            this.custom_case_values = case_values.clone();
+                            this.custom_control_values = control_values.clone();
                             comparison_changed = true;
                         }
 
-                        if let Some(column) = this.custom_comparison_column.clone() {
-                            let values = metadata_unique_values(metadata, &column);
+                        let case_rows = native_selected_metadata_rows(&values, &case_values);
+                        let control_rows = native_selected_metadata_rows(&values, &control_values);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Selected metadata rows: {case_rows} Case / {control_rows} Control · {} value(s) / {} value(s)",
+                                case_values.len(),
+                                control_values.len()
+                            ))
+                            .small(),
+                        );
+                        if case_values.is_empty() || control_values.is_empty() {
                             ui.label(
                                 egui::RichText::new(
-                                    "Assign one or more metadata values to the case and control groups. Values not selected for either group are outside this comparison.",
+                                    "Select at least one value for each group before running QC or analysis.",
                                 )
-                                .small()
-                                .weak(),
+                                .color(egui::Color32::LIGHT_RED),
                             );
-                            egui::ScrollArea::vertical()
-                                .max_height(210.0)
-                                .show(ui, |ui| {
-                                    egui::Grid::new("unified_custom_comparison_values")
-                                        .striped(true)
-                                        .show(ui, |ui| {
-                                            ui.label(egui::RichText::new("Value").strong());
-                                            ui.label(egui::RichText::new("n").strong());
-                                            ui.label(egui::RichText::new("Case").strong());
-                                            ui.label(egui::RichText::new("Control").strong());
-                                            ui.end_row();
-                                            for (value, count) in values.iter().take(100) {
-                                                ui.label(value);
-                                                ui.label(count.to_string());
-                                                let mut case = this.custom_case_values.contains(value);
-                                                let mut control = this.custom_control_values.contains(value);
-                                                if ui.checkbox(&mut case, "").changed() {
-                                                    comparison_changed = true;
-                                                    if case {
-                                                        this.custom_case_values.insert(value.clone());
-                                                        this.custom_control_values.remove(value);
-                                                    } else {
-                                                        this.custom_case_values.remove(value);
-                                                    }
-                                                }
-                                                if ui.checkbox(&mut control, "").changed() {
-                                                    comparison_changed = true;
-                                                    if control {
-                                                        this.custom_control_values.insert(value.clone());
-                                                        this.custom_case_values.remove(value);
-                                                    } else {
-                                                        this.custom_control_values.remove(value);
-                                                    }
-                                                }
-                                                ui.end_row();
-                                            }
-                                        });
-                                });
-                            if values.len() > 100 {
-                                ui.label(egui::RichText::new("Only the first 100 distinct values are shown; choose a lower-cardinality categorical grouping field for a comparison.").small().weak());
-                            }
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("Case label:");
-                                comparison_changed |= ui.text_edit_singleline(&mut this.custom_case_label).changed();
-                                ui.label("Control label:");
-                                comparison_changed |= ui.text_edit_singleline(&mut this.custom_control_label).changed();
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("Comparison name (optional):");
-                                comparison_changed |= ui
-                                    .add_sized([420.0, 24.0], egui::TextEdit::singleline(&mut this.custom_comparison_name))
-                                    .changed();
-                            });
                         }
+
+                        egui::CollapsingHeader::new("Optional comparison labels")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Case label:");
+                                    comparison_changed |= ui
+                                        .text_edit_singleline(&mut this.custom_case_label)
+                                        .changed();
+                                    ui.label("Control label:");
+                                    comparison_changed |= ui
+                                        .text_edit_singleline(&mut this.custom_control_label)
+                                        .changed();
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Comparison name:");
+                                    comparison_changed |= ui
+                                        .add_sized(
+                                            [420.0, 24.0],
+                                            egui::TextEdit::singleline(
+                                                &mut this.custom_comparison_name,
+                                            ),
+                                        )
+                                        .changed();
+                                });
+                            });
                     } else {
                         ui.colored_label(
-                            egui::Color32::from_rgb(225, 120, 110),
-                            "Load metadata before defining a custom comparison.",
+                            egui::Color32::LIGHT_RED,
+                            "Choose a metadata grouping field before defining Case and Control.",
                         );
                     }
-                }
+                });
+
+                egui::CollapsingHeader::new("Legacy 4C preset comparisons (optional)")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "These presets are retained only for reproducing earlier 4C analyses. New analyses should normally use the metadata grouping controls above.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Use HYP vs True_HC").clicked() {
+                                this.cohort_preset = ComparisonPreset::HypVsTrueHc;
+                                this.unified_comparison_mode = UnifiedComparisonMode::BuiltIn;
+                                comparison_changed = true;
+                            }
+                            if ui.button("Use HYP+ME/CFS vs ME/CFS-only").clicked() {
+                                this.cohort_preset = ComparisonPreset::HypMecfsVsMecfsOnly;
+                                this.unified_comparison_mode = UnifiedComparisonMode::BuiltIn;
+                                comparison_changed = true;
+                            }
+                        });
+                    });
+            } else {
+                ui.colored_label(
+                    egui::Color32::from_rgb(225, 120, 110),
+                    "Load metadata before defining the Case / Control comparison.",
+                );
             }
 
             if comparison_changed {
@@ -9751,15 +9816,9 @@ impl MergeApp {
         title: &str,
         add_contents: impl FnOnce(&mut Self, &mut egui::Ui),
     ) {
-        egui::Frame::group(ui.style())
-            .fill(ui.visuals().faint_bg_color)
-            .inner_margin(12)
-            .corner_radius(8)
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(title).size(17.0).strong());
-                ui.add_space(4.0);
-                add_contents(self, ui);
-            });
+        ui_theme::card(ui, title, |ui| {
+            add_contents(self, ui);
+        });
     }
 
     fn load_merge_metadata_path(&mut self, path: PathBuf) {
@@ -10627,6 +10686,48 @@ impl MergeApp {
     }
 }
 
+fn native_metadata_comparison_candidates(metadata: &MetadataTable) -> Vec<(String, usize, bool)> {
+    metadata
+        .columns
+        .iter()
+        .filter(|column| column.as_str() != metadata.id_column.as_str())
+        .filter_map(|column| {
+            let distinct = metadata_unique_values(metadata, column).len();
+            (distinct >= 2).then(|| (column.clone(), distinct, (2..=20).contains(&distinct)))
+        })
+        .collect()
+}
+
+fn suggested_native_comparison_column(metadata: &MetadataTable) -> Option<String> {
+    let candidates = native_metadata_comparison_candidates(metadata);
+    candidates
+        .iter()
+        .find(|(name, distinct, _)| name == "analysis_group" && *distinct >= 2)
+        .map(|(name, _, _)| name.clone())
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|(_, _, comparison_ready)| *comparison_ready)
+                .map(|(name, _, _)| name.clone())
+        })
+}
+
+fn native_selection_label(values: &HashSet<String>) -> String {
+    match values.len() {
+        0 => "(select one or more)".to_string(),
+        1 => values.iter().next().cloned().unwrap_or_default(),
+        n => format!("{n} values selected"),
+    }
+}
+
+fn native_selected_metadata_rows(values: &[(String, usize)], selected: &HashSet<String>) -> usize {
+    values
+        .iter()
+        .filter(|(value, _)| selected.contains(value))
+        .map(|(_, count)| *count)
+        .sum()
+}
+
 fn metric_help(metric: Metric) -> &'static str {
     match metric {
         Metric::RawCount => "Raw RNA-seq gene counts from the source report.",
@@ -10805,5 +10906,56 @@ mod merge_metadata_gui_tests {
             )),
             "Normal_FJ_RNA_20"
         );
+    }
+
+    #[test]
+    fn native_metadata_grouping_prefers_analysis_group_then_first_low_cardinality_field() {
+        let metadata = MetadataTable {
+            path: PathBuf::from("metadata.tsv"),
+            columns: vec![
+                "sample_id".to_string(),
+                "batch".to_string(),
+                "analysis_group".to_string(),
+                "free_text".to_string(),
+            ],
+            rows: vec![
+                vec!["S1", "A", "Case", "x"],
+                vec!["S2", "A", "Control", "y"],
+                vec!["S3", "B", "Case", "z"],
+            ]
+            .into_iter()
+            .map(|row| row.into_iter().map(str::to_string).collect())
+            .collect(),
+            id_column: "sample_id".to_string(),
+        };
+        assert_eq!(
+            suggested_native_comparison_column(&metadata).as_deref(),
+            Some("analysis_group")
+        );
+
+        let mut without_analysis_group = metadata.clone();
+        without_analysis_group.columns.remove(2);
+        for row in &mut without_analysis_group.rows {
+            row.remove(2);
+        }
+        assert_eq!(
+            suggested_native_comparison_column(&without_analysis_group).as_deref(),
+            Some("batch")
+        );
+    }
+
+    #[test]
+    fn native_metadata_group_selection_counts_rows_and_labels_without_typed_values() {
+        let values = vec![
+            ("HYP+ME/CFS".to_string(), 12),
+            ("ME/CFS".to_string(), 14),
+            ("True_HC".to_string(), 79),
+        ];
+        let cases = HashSet::from(["HYP+ME/CFS".to_string(), "ME/CFS".to_string()]);
+        let controls = HashSet::from(["True_HC".to_string()]);
+        assert_eq!(native_selected_metadata_rows(&values, &cases), 26);
+        assert_eq!(native_selected_metadata_rows(&values, &controls), 79);
+        assert_eq!(native_selection_label(&cases), "2 values selected");
+        assert_eq!(native_selection_label(&controls), "True_HC");
     }
 }
