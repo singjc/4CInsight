@@ -2,7 +2,7 @@
 
 This directory contains the WASM/`eframe` browser client for 4C Cohort Explorer.
 
-## Current status: Phase 3E.4 scientific-result readiness + background export finalization (v0.16.12)
+## Current status: Phase 3E.5 primary-results checkpoint + bounded sensitivity refits (v0.16.13)
 
 The browser now renders bounded interactive presentation views directly from the completed native unified result and can download every retained job artifact as one authenticated ZIP. No statistical calculation is duplicated in WASM; full-resolution tables and both HTML reports remain the authoritative persisted outputs.
 
@@ -105,12 +105,14 @@ Every file still gets an independent opaque object ID, integrity hash, deletion 
 
 After uploaded objects have explicit roles and the current mapping audit succeeds, a new job freezes the exact assigned input bytes and logical manifest. The server reconstructs the native cohort state from that immutable snapshot and calls the existing unified Rust analysis workflow. Browser code does not reproduce corrected statistics.
 
-Persisted states remain:
+Persisted unified-job states now include:
 
 ```text
 queued
 preparing
 running
+primary_results_ready   # primary corrected modalities/candidates are reviewable
+results_ready           # PBMC/confounding sensitivity diagnostics have finished
 complete / failed / cancelled
 ```
 
@@ -135,8 +137,8 @@ The web crate has its own `Cargo.lock` once generated locally. Keep/stage the up
 See [`../docs/web_development.md`](../docs/web_development.md) for the complete API, storage, privacy, batch-upload, mapping, job, cancellation, and parity-validation notes.
 
 
-### Phase 3E.4 result-ready behavior
+### Phase 3E.5 primary/result-ready behavior
 
-Unified jobs publish a persisted `results_ready` state immediately after the native scientific result and lightweight browser summary are complete. The browser can inspect the final cohort/modality/candidate result while interactive visualization enrichment, self-contained HTML reports, and exhaustive technical artifacts continue finalizing. The job transitions to `complete` when optional exports finish.
+Unified jobs publish `primary_results_ready` once the corrected gene/transcript, repertoire/isotype, immune/pathway, supporting-direction, reviewed-QC, and initial candidate results are complete. PBMC/confounding sensitivity refits can continue afterward without hiding those primary results. When sensitivity diagnostics finish, the same frozen job advances to `results_ready`; visualization/report/table finalization can continue until `complete`.
 
-The scientific worker semaphore is released when a unified job reaches `results_ready`; subsequent scientific work is no longer blocked solely by report/table finalization.
+The local scientific worker semaphore remains held through finalization in v0.16.13. Results are visible early, but a new CPU-heavy fit is not allowed to contend with a previous job's large HTML/table export on the same workstation.

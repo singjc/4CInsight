@@ -154,6 +154,20 @@ pub struct UnifiedCohortAnalysisRun {
     pub warnings: Vec<String>,
 }
 
+/// Borrowed view of the completed primary corrected/modal analysis before
+/// optional PBMC/confounding sensitivity diagnostics run. This checkpoint is
+/// presentation-only: it lets the web server expose already-final primary
+/// cohort results without duplicating or cloning the large native result.
+pub struct UnifiedPrimaryCheckpoint<'a> {
+    pub cohort: &'a CohortDefinitionSnapshot,
+    pub settings: &'a CohortAnalysisSettingsSnapshot,
+    pub qc_snapshot: Option<&'a OutlierFilterSnapshot>,
+    pub primary: &'a CorrectedAnalysisBundle,
+    pub exploratory_support: &'a ExploratorySupportBundle,
+    pub candidates: &'a FocusedCandidateSummary,
+    pub warnings: &'a [String],
+}
+
 impl UnifiedCohortAnalysisRun {
     pub fn has_qc_filter(&self) -> bool {
         self.qc_snapshot.as_ref().is_some_and(|snapshot| {
@@ -191,10 +205,39 @@ pub fn run_unified_cohort_analysis<F>(
     cohort: CohortDefinitionSnapshot,
     settings: CohortAnalysisSettingsSnapshot,
     qc_snapshot: Option<OutlierFilterSnapshot>,
-    mut progress: F,
+    progress: F,
 ) -> Result<UnifiedCohortAnalysisRun>
 where
     F: FnMut(usize, usize, &str),
+{
+    run_unified_cohort_analysis_with_primary_checkpoint(
+        scan,
+        metadata,
+        cohort,
+        settings,
+        qc_snapshot,
+        progress,
+        |_| {},
+    )
+}
+
+/// Execute the same unified native analysis while publishing a borrowed
+/// checkpoint after all primary corrected modalities/supporting direction
+/// checks are final but before optional PBMC/confounding sensitivity refits.
+/// The ordinary native/desktop entry point above remains behaviorally
+/// identical and simply ignores this checkpoint.
+pub fn run_unified_cohort_analysis_with_primary_checkpoint<F, G>(
+    scan: &ProjectScan,
+    metadata: &MetadataTable,
+    cohort: CohortDefinitionSnapshot,
+    settings: CohortAnalysisSettingsSnapshot,
+    qc_snapshot: Option<OutlierFilterSnapshot>,
+    mut progress: F,
+    mut primary_ready: G,
+) -> Result<UnifiedCohortAnalysisRun>
+where
+    F: FnMut(usize, usize, &str),
+    G: for<'a> FnMut(UnifiedPrimaryCheckpoint<'a>),
 {
     let selection = settings.modalities.clone();
     let comparison = cohort.comparison.clone();
@@ -456,6 +499,65 @@ where
         stage += 1;
     }
 
+    let mut candidates = build_focused_candidate_summary(
+        &cohort.metadata_path,
+        &comparison.case_label,
+        &comparison.control_label,
+        comparison.case_ids.len(),
+        comparison.control_ids.len(),
+        settings.candidate.clone(),
+        primary.gene.as_ref(),
+        exploratory_support.gene.as_ref(),
+        primary.transcript.as_ref(),
+        exploratory_support.transcript.as_ref(),
+        primary.bcr.as_ref(),
+        primary.bcr_isotype.as_ref(),
+        primary.tcr_alpha.as_ref(),
+        primary.tcr_beta.as_ref(),
+        primary.immune.as_ref(),
+        primary.pathway.as_ref(),
+    );
+
+    let mut checkpoint_warnings = primary.warnings();
+    if let Some(error) = exploratory_support.gene_error.as_ref() {
+        checkpoint_warnings.push(format!("Exploratory gene support: {error}"));
+    }
+    if let Some(error) = exploratory_support.transcript_error.as_ref() {
+        checkpoint_warnings.push(format!("Exploratory transcript support: {error}"));
+    }
+    if let Some(qc) = qc_snapshot.as_ref() {
+        checkpoint_warnings.extend(
+            qc.audit
+                .warnings
+                .iter()
+                .map(|warning| format!("Sample outlier QC: {warning}")),
+        );
+        for modality in &qc.audit.modalities {
+            checkpoint_warnings.extend(
+                modality
+                    .warnings
+                    .iter()
+                    .map(|warning| format!("Sample outlier QC / {}: {warning}", modality.modality)),
+            );
+        }
+    }
+
+    // All primary corrected modalities, pathway/supporting checks and the
+    // initial candidate ranking are final here. PBMC/confounding diagnostics
+    // are an optional robustness layer and can be substantially more expensive
+    // because they refit the gene model with extra covariates. Publish this
+    // borrowed checkpoint so clients can inspect the primary scientific result
+    // without cloning the large native result or waiting for sensitivity refits.
+    primary_ready(UnifiedPrimaryCheckpoint {
+        cohort: &cohort,
+        settings: &settings,
+        qc_snapshot: qc_snapshot.as_ref(),
+        primary: &primary,
+        exploratory_support: &exploratory_support,
+        candidates: &candidates,
+        warnings: &checkpoint_warnings,
+    });
+
     let (mut diagnostics, mut diagnostics_error) = (None, None);
     if let Some(config) = settings.pbmc_diagnostics.as_ref() {
         progress(
@@ -488,35 +590,11 @@ where
         }
     }
 
-    let mut candidates = build_focused_candidate_summary(
-        &cohort.metadata_path,
-        &comparison.case_label,
-        &comparison.control_label,
-        comparison.case_ids.len(),
-        comparison.control_ids.len(),
-        settings.candidate.clone(),
-        primary.gene.as_ref(),
-        exploratory_support.gene.as_ref(),
-        primary.transcript.as_ref(),
-        exploratory_support.transcript.as_ref(),
-        primary.bcr.as_ref(),
-        primary.bcr_isotype.as_ref(),
-        primary.tcr_alpha.as_ref(),
-        primary.tcr_beta.as_ref(),
-        primary.immune.as_ref(),
-        primary.pathway.as_ref(),
-    );
     if let Some(result) = diagnostics.as_ref() {
         annotate_focused_candidate_robustness(&mut candidates, result);
     }
 
-    let mut warnings = primary.warnings();
-    if let Some(error) = exploratory_support.gene_error.as_ref() {
-        warnings.push(format!("Exploratory gene support: {error}"));
-    }
-    if let Some(error) = exploratory_support.transcript_error.as_ref() {
-        warnings.push(format!("Exploratory transcript support: {error}"));
-    }
+    let mut warnings = checkpoint_warnings;
     if let Some(error) = diagnostics_error.as_ref() {
         warnings.push(format!("PBMC/confounding diagnostics: {error}"));
     }
@@ -527,22 +605,6 @@ where
                 .iter()
                 .map(|warning| format!("PBMC/confounding diagnostics: {warning}")),
         );
-    }
-    if let Some(qc) = qc_snapshot.as_ref() {
-        warnings.extend(
-            qc.audit
-                .warnings
-                .iter()
-                .map(|warning| format!("Sample outlier QC: {warning}")),
-        );
-        for modality in &qc.audit.modalities {
-            warnings.extend(
-                modality
-                    .warnings
-                    .iter()
-                    .map(|warning| format!("Sample outlier QC / {}: {warning}", modality.modality)),
-            );
-        }
     }
 
     progress(stage_total * 1000, stage_total * 1000, "Analysis complete");

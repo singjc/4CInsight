@@ -1,6 +1,6 @@
 //! Local web server for the 4C Cohort Explorer browser client.
 //!
-//! Phase 3E.4 keeps authenticated metadata-backed comparison configuration and
+//! Phase 3E.5 keeps authenticated metadata-backed comparison configuration and
 //! adds presentation payloads plus on-demand bulk export for completed frozen
 //! unified native jobs. The server reconstructs metadata/scientific state and
 //! derives plot coordinates from native results; WASM does not recompute science.
@@ -11,7 +11,8 @@ use crate::{
     analysis::{
         CohortAnalysisSettingsSnapshot, CohortDefinitionSnapshot, CohortModalitySelection,
         TECHNICAL_EXPORT_MANIFEST_NAME, TechnicalExportManifest, UnifiedCohortAnalysisRun,
-        run_unified_cohort_analysis, write_unified_analysis_tables_with_progress,
+        UnifiedPrimaryCheckpoint, run_unified_cohort_analysis_with_primary_checkpoint,
+        write_unified_analysis_tables_with_progress,
     },
     cohort::{
         CohortComparison, CohortComparisonDefinition, CohortModality, DetectedCohortFile,
@@ -601,6 +602,7 @@ pub enum JobStatus {
     Queued,
     Preparing,
     Running,
+    PrimaryResultsReady,
     ResultsReady,
     Complete,
     Failed,
@@ -695,6 +697,18 @@ struct JobWorkerProgress {
     message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobReadyStage {
+    Primary,
+    FullScience,
+}
+
+#[derive(Debug, Clone)]
+struct JobWorkerReady {
+    stage: JobReadyStage,
+    result: JobResultSummary,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSummaryResponse {
     pub job_id: String,
@@ -732,6 +746,8 @@ pub struct UnifiedAnalysisSummary {
     pub modalities: Vec<UnifiedModalitySummary>,
     pub exploratory_gene_available: bool,
     pub exploratory_transcript_available: bool,
+    #[serde(default)]
+    pub pbmc_diagnostics_requested: bool,
     pub pbmc_diagnostics_available: bool,
     pub candidates: Vec<UnifiedCandidateSummary>,
     #[serde(default)]
@@ -1991,8 +2007,10 @@ impl LocalProjectStore {
     ) -> Result<()> {
         let _guard = self.mutation_lock.lock().await;
         let mut record = self.read_job_record(project_id, job_id).await?;
-        if !matches!(record.status, JobStatus::Running | JobStatus::ResultsReady)
-            || record.cancel_requested
+        if !matches!(
+            record.status,
+            JobStatus::Running | JobStatus::PrimaryResultsReady | JobStatus::ResultsReady
+        ) || record.cancel_requested
         {
             return Ok(());
         }
@@ -2009,6 +2027,30 @@ impl LocalProjectStore {
         }
         record.progress_message = message;
         record.updated_unix_seconds = unix_seconds()?;
+        write_json_atomic(&self.job_record_path(project_id, job_id), &record).await?;
+        Ok(())
+    }
+
+    async fn publish_job_primary_results_ready(
+        &self,
+        project_id: Uuid,
+        job_id: Uuid,
+        result: JobResultSummary,
+    ) -> Result<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let mut record = self.read_job_record(project_id, job_id).await?;
+        if record.cancel_requested
+            || matches!(record.status, JobStatus::Cancelled | JobStatus::Failed)
+        {
+            return Ok(());
+        }
+        record.status = JobStatus::PrimaryResultsReady;
+        record.progress_message =
+            "Primary corrected results ready; PBMC/confounding sensitivity diagnostics are still running"
+                .to_string();
+        record.updated_unix_seconds = unix_seconds()?;
+        record.result = Some(result);
+        record.error = None;
         write_json_atomic(&self.job_record_path(project_id, job_id), &record).await?;
         Ok(())
     }
@@ -2132,7 +2174,7 @@ impl LocalProjectStore {
         self: Arc<Self>,
         project_id: Uuid,
         job_id: Uuid,
-        mut scientific_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+        _scientific_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         let preparation = self
             .update_job_state(
@@ -2215,7 +2257,7 @@ impl LocalProjectStore {
         let job_dir = self.job_dir(project_id, job_id);
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::unbounded_channel::<JobWorkerProgress>();
-        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<JobResultSummary>();
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<JobWorkerReady>();
         let mut worker = tokio::task::spawn_blocking(move || {
             execute_frozen_job(
                 &job_dir,
@@ -2227,8 +2269,8 @@ impl LocalProjectStore {
                         message: message.to_string(),
                     });
                 },
-                |result| {
-                    let _ = ready_tx.send(result);
+                |stage, result| {
+                    let _ = ready_tx.send(JobWorkerReady { stage, result });
                 },
             )
         });
@@ -2239,9 +2281,23 @@ impl LocalProjectStore {
                     let _ = self.update_job_progress(project_id, job_id, progress).await;
                 }
                 Some(ready) = ready_rx.recv() => {
-                    let _ = self.publish_job_result_ready(project_id, job_id, ready).await;
-                    if scientific_permit.is_some() {
-                        scientific_permit.take();
+                    match ready.stage {
+                        JobReadyStage::Primary => {
+                            let _ = self
+                                .publish_job_primary_results_ready(project_id, job_id, ready.result)
+                                .await;
+                        }
+                        JobReadyStage::FullScience => {
+                            let _ = self
+                                .publish_job_result_ready(project_id, job_id, ready.result)
+                                .await;
+                            // Keep the local worker slot for the lifetime of the
+                            // full job, including optional export finalization.
+                            // Results are already visible, but allowing a new
+                            // CPU-heavy scientific fit to overlap a previous
+                            // report/table export caused severe resource
+                            // contention on local workstations.
+                        }
                     }
                 }
             }
@@ -2390,6 +2446,20 @@ impl LocalProjectStore {
                         );
                     }
                     job.error = None;
+                    job.updated_unix_seconds = unix_seconds()?;
+                    write_json_atomic(&self.job_record_path(project_id, job.job_id), &job).await?;
+                    changed += 1;
+                } else if job.status == JobStatus::PrimaryResultsReady {
+                    job.status = JobStatus::Failed;
+                    job.progress_message = "Primary corrected results preserved; sensitivity diagnostics were interrupted by server restart".to_string();
+                    if let Some(result) = job.result.as_mut() {
+                        result.warnings.push(
+                            "The local server restarted after primary corrected results were published but before PBMC/confounding sensitivity diagnostics finished. Primary modality statistics remain available, but robustness annotations/diagnostic outputs are incomplete; rerun only if those sensitivity diagnostics are required.".to_string(),
+                        );
+                    }
+                    job.error = Some(
+                        "Optional PBMC/confounding sensitivity diagnostics were interrupted after primary corrected results became available.".to_string(),
+                    );
                     job.updated_unix_seconds = unix_seconds()?;
                     write_json_atomic(&self.job_record_path(project_id, job.job_id), &job).await?;
                     changed += 1;
@@ -3141,7 +3211,7 @@ fn execute_frozen_job<F, R>(
 ) -> Result<JobResultSummary>
 where
     F: FnMut(usize, usize, &str),
-    R: FnMut(JobResultSummary),
+    R: FnMut(JobReadyStage, JobResultSummary),
 {
     progress(0, 1000, "Validating frozen mapping and input snapshot");
     let snapshot_root = job_dir.join("snapshot");
@@ -3397,7 +3467,8 @@ where
         };
 
         progress(160, 1000, "Starting native unified multi-omics analysis");
-        let run = run_unified_cohort_analysis(
+        let mut primary_visualizations = None;
+        let run = run_unified_cohort_analysis_with_primary_checkpoint(
             &scan,
             &metadata,
             cohort,
@@ -3407,6 +3478,52 @@ where
                 let denom = total.max(1);
                 let scaled = 160 + done.min(denom) * 650 / denom;
                 progress(scaled, 1000, message);
+            },
+            |checkpoint| {
+                if checkpoint.settings.pbmc_diagnostics.is_some() {
+                    let mut checkpoint_warnings = warnings.clone();
+                    checkpoint_warnings.extend(checkpoint.warnings.iter().cloned());
+                    checkpoint_warnings.push(
+                        "Primary corrected modality results are final. PBMC/confounding sensitivity diagnostics are still running; candidate robustness annotations may be enriched when those optional diagnostics finish."
+                            .to_string(),
+                    );
+                    let gene = checkpoint
+                        .primary
+                        .gene
+                        .as_ref()
+                        .map(summarize_corrected_gene);
+                    let mut primary_summary = summarize_unified_primary_checkpoint(&checkpoint);
+                    publish_ready(
+                        JobReadyStage::Primary,
+                        JobResultSummary {
+                            mapping: mapping.clone(),
+                            qc: qc.clone(),
+                            gene: gene.clone(),
+                            unified: Some(primary_summary.clone()),
+                            warnings: checkpoint_warnings.clone(),
+                            artifacts: artifacts.clone(),
+                        },
+                    );
+
+                    // The browser visualizations depend only on already-final
+                    // primary modalities. Build and republish them before the
+                    // optional sensitivity refits so a long PBMC diagnostic
+                    // does not leave the early result as a text-only summary.
+                    primary_summary.visualizations =
+                        build_unified_visualizations_from_primary(checkpoint.primary);
+                    primary_visualizations = Some(primary_summary.visualizations.clone());
+                    publish_ready(
+                        JobReadyStage::Primary,
+                        JobResultSummary {
+                            mapping: mapping.clone(),
+                            qc: qc.clone(),
+                            gene,
+                            unified: Some(primary_summary),
+                            warnings: checkpoint_warnings,
+                            artifacts: artifacts.clone(),
+                        },
+                    );
+                }
             },
         )?;
         progress(
@@ -3418,21 +3535,32 @@ where
         let mut unified = summarize_unified_run_core(&run);
         let gene = run.primary.gene.as_ref().map(summarize_corrected_gene);
 
-        publish_ready(JobResultSummary {
-            mapping: mapping.clone(),
-            qc: qc.clone(),
-            gene: gene.clone(),
-            unified: Some(unified.clone()),
-            warnings: warnings.clone(),
-            artifacts: artifacts.clone(),
-        });
-        progress(
-            820,
-            1000,
-            "Scientific result ready in browser; preparing interactive visualization payload in background",
+        publish_ready(
+            JobReadyStage::FullScience,
+            JobResultSummary {
+                mapping: mapping.clone(),
+                qc: qc.clone(),
+                gene: gene.clone(),
+                unified: Some(unified.clone()),
+                warnings: warnings.clone(),
+                artifacts: artifacts.clone(),
+            },
         );
-
-        unified.visualizations = build_unified_visualizations(&run);
+        if primary_visualizations.is_some() {
+            progress(
+                820,
+                1000,
+                "Scientific result ready in browser; reusing primary visualization payload",
+            );
+        } else {
+            progress(
+                820,
+                1000,
+                "Scientific result ready in browser; preparing interactive visualization payload in background",
+            );
+        }
+        unified.visualizations =
+            primary_visualizations.unwrap_or_else(|| build_unified_visualizations(&run));
         progress(
             835,
             1000,
@@ -3445,14 +3573,17 @@ where
             &serde_json::to_vec_pretty(&unified)?,
             &mut artifact_budget,
         )?);
-        publish_ready(JobResultSummary {
-            mapping: mapping.clone(),
-            qc: qc.clone(),
-            gene: gene.clone(),
-            unified: Some(unified.clone()),
-            warnings: warnings.clone(),
-            artifacts: artifacts.clone(),
-        });
+        publish_ready(
+            JobReadyStage::FullScience,
+            JobResultSummary {
+                mapping: mapping.clone(),
+                qc: qc.clone(),
+                gene: gene.clone(),
+                unified: Some(unified.clone()),
+                warnings: warnings.clone(),
+                artifacts: artifacts.clone(),
+            },
+        );
         progress(
             840,
             1000,
@@ -3594,29 +3725,33 @@ fn summarize_corrected_gene(result: &CorrectedExpressionResult) -> GeneCorrected
     }
 }
 
-fn summarize_unified_run_core(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSummary {
+fn summarize_unified_components(
+    settings: &CohortAnalysisSettingsSnapshot,
+    primary: &crate::analysis::CorrectedAnalysisBundle,
+    exploratory_support: &crate::analysis::ExploratorySupportBundle,
+    qc_snapshot: Option<&crate::outliers::OutlierFilterSnapshot>,
+    candidates_source: &crate::focused::FocusedCandidateSummary,
+    pbmc_diagnostics_available: bool,
+) -> UnifiedAnalysisSummary {
     let mut modalities = Vec::new();
-    if run.settings.modalities.gene {
+    if settings.modalities.gene {
         modalities.push(unified_modality_summary(
             "Gene expression",
-            run.primary.gene.as_ref().map(|result| result.tests.len()),
-            run.primary.gene_error.as_deref(),
+            primary.gene.as_ref().map(|result| result.tests.len()),
+            primary.gene_error.as_deref(),
         ));
     }
-    if run.settings.modalities.transcript {
+    if settings.modalities.transcript {
         modalities.push(unified_modality_summary(
             "Transcript expression",
-            run.primary
-                .transcript
-                .as_ref()
-                .map(|result| result.tests.len()),
-            run.primary.transcript_error.as_deref(),
+            primary.transcript.as_ref().map(|result| result.tests.len()),
+            primary.transcript_error.as_deref(),
         ));
     }
-    if run.settings.modalities.bcr {
+    if settings.modalities.bcr {
         modalities.push(unified_modality_summary(
             "BCR",
-            run.primary.bcr.as_ref().map(|result| {
+            primary.bcr.as_ref().map(|result| {
                 result.metric_tests.len()
                     + result
                         .compositions
@@ -3624,23 +3759,23 @@ fn summarize_unified_run_core(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysis
                         .map(|composition| composition.tests.len())
                         .sum::<usize>()
             }),
-            run.primary.bcr_error.as_deref(),
+            primary.bcr_error.as_deref(),
         ));
     }
-    if run.settings.modalities.bcr_isotype {
+    if settings.modalities.bcr_isotype {
         modalities.push(unified_modality_summary(
             "BCR isotype",
-            run.primary
+            primary
                 .bcr_isotype
                 .as_ref()
                 .map(|result| result.tests.len()),
-            run.primary.bcr_isotype_error.as_deref(),
+            primary.bcr_isotype_error.as_deref(),
         ));
     }
-    if run.settings.modalities.tcr_alpha {
+    if settings.modalities.tcr_alpha {
         modalities.push(unified_modality_summary(
             "TCR alpha",
-            run.primary.tcr_alpha.as_ref().map(|result| {
+            primary.tcr_alpha.as_ref().map(|result| {
                 result.metric_tests.len()
                     + result
                         .compositions
@@ -3648,13 +3783,13 @@ fn summarize_unified_run_core(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysis
                         .map(|composition| composition.tests.len())
                         .sum::<usize>()
             }),
-            run.primary.tcr_alpha_error.as_deref(),
+            primary.tcr_alpha_error.as_deref(),
         ));
     }
-    if run.settings.modalities.tcr_beta {
+    if settings.modalities.tcr_beta {
         modalities.push(unified_modality_summary(
             "TCR beta",
-            run.primary.tcr_beta.as_ref().map(|result| {
+            primary.tcr_beta.as_ref().map(|result| {
                 result.metric_tests.len()
                     + result
                         .compositions
@@ -3662,29 +3797,26 @@ fn summarize_unified_run_core(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysis
                         .map(|composition| composition.tests.len())
                         .sum::<usize>()
             }),
-            run.primary.tcr_beta_error.as_deref(),
+            primary.tcr_beta_error.as_deref(),
         ));
     }
-    if run.settings.modalities.immune {
+    if settings.modalities.immune {
         modalities.push(unified_modality_summary(
             "Immune infiltrate",
-            run.primary.immune.as_ref().map(|result| result.tests.len()),
-            run.primary.immune_error.as_deref(),
+            primary.immune.as_ref().map(|result| result.tests.len()),
+            primary.immune_error.as_deref(),
         ));
     }
-    if run.settings.modalities.pathway {
+    if settings.modalities.pathway {
         modalities.push(unified_modality_summary(
             "Pathway ORA",
-            run.primary
-                .pathway
-                .as_ref()
-                .map(|result| result.tests.len()),
-            run.primary.pathway_error.as_deref(),
+            primary.pathway.as_ref().map(|result| result.tests.len()),
+            primary.pathway_error.as_deref(),
         ));
     }
 
     let mut candidates = Vec::new();
-    for row in run.candidates.genes.iter().take(15) {
+    for row in candidates_source.genes.iter().take(15) {
         candidates.push(UnifiedCandidateSummary {
             rank: row.rank,
             modality: "Gene".to_string(),
@@ -3695,7 +3827,7 @@ fn summarize_unified_run_core(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysis
             robustness: row.robustness.clone(),
         });
     }
-    for row in run.candidates.pathways.iter().take(12) {
+    for row in candidates_source.pathways.iter().take(12) {
         candidates.push(UnifiedCandidateSummary {
             rank: row.rank,
             modality: "Pathway".to_string(),
@@ -3706,7 +3838,7 @@ fn summarize_unified_run_core(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysis
             robustness: None,
         });
     }
-    for row in run.candidates.other.iter().take(20) {
+    for row in candidates_source.other.iter().take(20) {
         candidates.push(UnifiedCandidateSummary {
             rank: row.rank,
             modality: row.modality.clone(),
@@ -3719,27 +3851,56 @@ fn summarize_unified_run_core(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysis
     }
 
     UnifiedAnalysisSummary {
-        comparison_name: run.primary.comparison.name.clone(),
-        case_samples: run.case_n(),
-        control_samples: run.control_n(),
-        excluded_sample_ids: run
-            .qc_snapshot
-            .as_ref()
+        comparison_name: primary.comparison.name.clone(),
+        case_samples: primary.comparison.case_ids.len(),
+        control_samples: primary.comparison.control_ids.len(),
+        excluded_sample_ids: qc_snapshot
             .map(|snapshot| snapshot.excluded_ids.clone())
             .unwrap_or_default(),
         modalities,
-        exploratory_gene_available: run.exploratory_support.gene.is_some(),
-        exploratory_transcript_available: run.exploratory_support.transcript.is_some(),
-        pbmc_diagnostics_available: run.diagnostics.is_some(),
+        exploratory_gene_available: exploratory_support.gene.is_some(),
+        exploratory_transcript_available: exploratory_support.transcript.is_some(),
+        pbmc_diagnostics_requested: settings.pbmc_diagnostics.is_some(),
+        pbmc_diagnostics_available,
         candidates,
         visualizations: UnifiedVisualizationSummary::default(),
     }
 }
 
+fn summarize_unified_primary_checkpoint(
+    checkpoint: &UnifiedPrimaryCheckpoint<'_>,
+) -> UnifiedAnalysisSummary {
+    summarize_unified_components(
+        checkpoint.settings,
+        checkpoint.primary,
+        checkpoint.exploratory_support,
+        checkpoint.qc_snapshot,
+        checkpoint.candidates,
+        false,
+    )
+}
+
+fn summarize_unified_run_core(run: &UnifiedCohortAnalysisRun) -> UnifiedAnalysisSummary {
+    summarize_unified_components(
+        &run.settings,
+        &run.primary,
+        &run.exploratory_support,
+        run.qc_snapshot.as_ref(),
+        &run.candidates,
+        run.diagnostics.is_some(),
+    )
+}
+
 fn build_unified_visualizations(run: &UnifiedCohortAnalysisRun) -> UnifiedVisualizationSummary {
+    build_unified_visualizations_from_primary(&run.primary)
+}
+
+fn build_unified_visualizations_from_primary(
+    primary: &crate::analysis::CorrectedAnalysisBundle,
+) -> UnifiedVisualizationSummary {
     let mut out = UnifiedVisualizationSummary::default();
 
-    if let Some(result) = run.primary.gene.as_ref() {
+    if let Some(result) = primary.gene.as_ref() {
         out.expression_panels
             .push(expression_visualization("Gene expression", result));
         if let Some(ord) = result.pca.as_ref() {
@@ -3751,7 +3912,7 @@ fn build_unified_visualizations(run: &UnifiedCohortAnalysisRun) -> UnifiedVisual
                 .push(dendrogram_visualization("Gene expression", tree));
         }
     }
-    if let Some(result) = run.primary.transcript.as_ref() {
+    if let Some(result) = primary.transcript.as_ref() {
         out.expression_panels
             .push(expression_visualization("Transcript expression", result));
         if let Some(ord) = result.pca.as_ref() {
@@ -3763,10 +3924,10 @@ fn build_unified_visualizations(run: &UnifiedCohortAnalysisRun) -> UnifiedVisual
                 .push(dendrogram_visualization("Transcript expression", tree));
         }
     }
-    if let Some(result) = run.primary.bcr.as_ref() {
+    if let Some(result) = primary.bcr.as_ref() {
         push_repertoire_visualizations(&mut out, "BCR", result);
     }
-    if let Some(result) = run.primary.bcr_isotype.as_ref() {
+    if let Some(result) = primary.bcr_isotype.as_ref() {
         out.effect_panels.push(effect_visualization(
             "BCR isotype",
             "CLR isotype effects",
@@ -3781,13 +3942,13 @@ fn build_unified_visualizations(run: &UnifiedCohortAnalysisRun) -> UnifiedVisual
                 .push(dendrogram_visualization("BCR isotype", tree));
         }
     }
-    if let Some(result) = run.primary.tcr_alpha.as_ref() {
+    if let Some(result) = primary.tcr_alpha.as_ref() {
         push_repertoire_visualizations(&mut out, "TCR alpha", result);
     }
-    if let Some(result) = run.primary.tcr_beta.as_ref() {
+    if let Some(result) = primary.tcr_beta.as_ref() {
         push_repertoire_visualizations(&mut out, "TCR beta", result);
     }
-    if let Some(result) = run.primary.immune.as_ref() {
+    if let Some(result) = primary.immune.as_ref() {
         out.effect_panels.push(effect_visualization(
             "Immune infiltrate",
             "Adjusted immune-cell effects",
@@ -3802,7 +3963,7 @@ fn build_unified_visualizations(run: &UnifiedCohortAnalysisRun) -> UnifiedVisual
                 .push(dendrogram_visualization("Immune infiltrate", tree));
         }
     }
-    if let Some(result) = run.primary.pathway.as_ref() {
+    if let Some(result) = primary.pathway.as_ref() {
         let mut rows = result
             .tests
             .iter()
@@ -4964,7 +5125,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         app_version: env!("CARGO_PKG_VERSION"),
-        api_version: 10,
+        api_version: 11,
         default_ttl_hours: state.default_ttl_hours,
         max_ttl_hours: MAX_TTL_HOURS,
         upload_enabled: true,
@@ -5942,6 +6103,14 @@ mod tests {
         assert_eq!(audit.case_samples, Some(1));
         assert_eq!(audit.control_samples, Some(1));
         assert_eq!(audit.metadata_only_samples, 2);
+    }
+
+    #[test]
+    fn primary_results_ready_status_serializes_as_stable_api_value() {
+        assert_eq!(
+            serde_json::to_string(&JobStatus::PrimaryResultsReady).unwrap(),
+            "\"primary_results_ready\""
+        );
     }
 
     #[test]

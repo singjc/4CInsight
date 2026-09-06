@@ -4,14 +4,21 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains a command-line interface, an `egui` desktop interface, and a browser/WASM client served by a local Rust `cfs-server`. The native Rust application remains the scientific reference implementation. The browser path is a thin same-origin client over authenticated opaque projects/objects/jobs and now drives the existing native frozen unified cohort-analysis workflow rather than maintaining a separate web statistics engine.
 
+## What v0.16.13 adds
+
+- Adds **Phase 3E.5: primary-results checkpoint before optional sensitivity refits**. Once corrected gene/transcript, repertoire/isotype, immune, pathway, supporting direction checks, reviewed QC, and the initial candidate ranking are complete, the browser receives a persisted `primary_results_ready` result immediately instead of waiting for PBMC/confounding sensitivity refits.
+- Keeps PBMC/confounding diagnostics in the same frozen unified job. When those diagnostics finish, the same job advances to `results_ready` and candidate robustness annotations are enriched; the local worker slot remains held through optional export finalization so a new CPU-heavy scientific job cannot contend with a previous job's report/table export on the same workstation.
+- Prevents the expensive immune-composition-adjusted gene sensitivity model from looking like a frozen job: its internal normalization/model progress is now forwarded to the browser.
+- Reuses already-computed positive-count median-ratio size factors when a sensitivity refit has the exact same model sample population/source metric, avoiding another full count-normalization pass.
+- Parallelizes corrected gene/transcript per-feature NB2 model fitting in bounded native batches (up to 8 workers on native targets; WASM stays serial). Statistics, BH/FDR, feature filtering, and final deterministic rankings are unchanged.
+- Advances `/api/health` to API v11. Existing `results_ready`/terminal jobs remain readable; the new intermediate API state serializes as `primary_results_ready`.
+
 ## What v0.16.12 adds
 
-- Adds **Phase 3E.4: scientific-result readiness decoupled from export finalization**. The native unified result is persisted and shown immediately after scientific computation, while browser visualization enrichment, HTML reports, and exhaustive technical artifacts continue finalizing for that same frozen run.
+- Adds **Phase 3E.4: scientific-result readiness decoupled from export finalization**. The complete native unified result is persisted and shown before browser visualization enrichment, HTML reports, and exhaustive technical artifacts finish finalizing for that same frozen run.
 - Adds interactive browser plots for corrected gene/transcript volcano views, repertoire/isotype/immune corrected-effect panels, native PCA/PCoA ordinations with PERMANOVA context, native hierarchical dendrograms, pathway enrichment, and modality result coverage. Full-resolution rows remain in the authenticated native tables/reports.
-- Keeps large expression plots responsive by persisting a deterministic bounded visualization preview that always prioritizes the strongest corrected signals and samples the remaining tested background. This does not change testing, ranking, q-values, candidate prioritization, or report generation.
-- Adds authenticated **Download all as ZIP** for a persisted job. `GET /api/projects/{project_id}/jobs/{job_id}/artifacts.zip` assembles every retained artifact on demand plus `artifact_manifest.json`; it does not persist a second archive copy or put the recovery token in the URL.
-- Protects the local server from accidental giant in-memory bundles with a 1 GiB uncompressed per-request bulk-download safety ceiling; individual authenticated artifact downloads remain available.
-- Advances `/api/health` to API v10. Phase 3E.4 introduces the persisted `results_ready` job state; older jobs remain readable.
+- Adds authenticated **Download all as ZIP** for a persisted job and keeps the recovery token in the bearer header rather than a download URL.
+- Advances `/api/health` to API v10 with the persisted `results_ready` job state.
 
 ## What v0.16.10 adds
 
@@ -668,4 +675,4 @@ The expression count model does **not** claim to reproduce the full DESeq2, edge
 
 Frozen unified jobs now publish the native scientific result as soon as the native analysis completes. The browser can inspect cohort/modality summaries and prioritized signals while interactive visualization enrichment, HTML reports, and exhaustive technical-table artifacts continue finalizing for the same immutable job. Export latency therefore no longer hides an already-completed scientific result.
 
-The scientific worker semaphore is released when a unified job reaches `results_ready`; subsequent scientific work is no longer blocked solely by report/table finalization.
+In v0.16.13 the browser still receives `results_ready` before optional export finalization, but the default local scientific semaphore remains held until that job finishes finalizing. This prevents a new CPU-heavy fit from competing with an older job's large report/table export on the same workstation.

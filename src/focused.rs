@@ -704,6 +704,8 @@ mod tests {
             source_metric: "Raw Count".to_string(),
             normalization: String::new(),
             model_description: String::new(),
+            model_sample_ids: Vec::new(),
+            size_factors: Vec::new(),
             n_input_samples: 20,
             n_model_samples: 20,
             n_subjects: 20,

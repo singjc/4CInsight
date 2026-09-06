@@ -10,7 +10,8 @@ use crate::cohort::{
 };
 use crate::corrected::{
     CorrectedExpressionResult, CorrectedModelSpec, OrdinationPoint, OrdinationResult,
-    parse_immune_file, run_corrected_expression, write_adjusted_tests, write_ordination,
+    parse_immune_file, run_corrected_expression, run_corrected_expression_with_reference,
+    write_adjusted_tests, write_ordination,
 };
 use crate::metadata::row_matching_ids;
 use anyhow::{Context, Result, bail};
@@ -468,14 +469,25 @@ where
                 if !spec.covariates.iter().any(|c| c == "QC_Immune_PC2") {
                     spec.covariates.push("QC_Immune_PC2".to_string());
                 }
-                match run_corrected_expression(
+                let normalization_reference =
+                    qc_restricted_gene.as_ref().or(baseline_gene.as_ref());
+                match run_corrected_expression_with_reference(
                     merged_gene_tsv,
                     &augmented,
                     comparison,
                     "Raw Count",
                     "Gene",
                     &spec,
-                    |_done, _total, _msg| {},
+                    normalization_reference,
+                    |done, total, msg| {
+                        let denom = total.max(1);
+                        let nested = 5_000 + done.min(denom) * 1_000 / denom;
+                        progress(
+                            nested,
+                            8_000,
+                            &format!("Immune-adjusted gene sensitivity — {msg}"),
+                        );
+                    },
                 ) {
                     Ok(r) => Some(r),
                     Err(e) => {

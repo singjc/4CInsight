@@ -1,4 +1,4 @@
-//! Same-origin Phase-3E.3 client for the local `cfs-server` API.
+//! Same-origin Phase-3E.5 client for the local `cfs-server` API.
 
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -239,6 +239,8 @@ pub struct UnifiedAnalysisSummary {
     pub modalities: Vec<UnifiedModalitySummary>,
     pub exploratory_gene_available: bool,
     pub exploratory_transcript_available: bool,
+    #[serde(default)]
+    pub pbmc_diagnostics_requested: bool,
     pub pbmc_diagnostics_available: bool,
     pub candidates: Vec<UnifiedCandidateSummary>,
     #[serde(default)]

@@ -190,6 +190,13 @@ pub struct CorrectedExpressionResult {
     pub source_metric: String,
     pub normalization: String,
     pub model_description: String,
+    /// Canonical model sample order used for count normalization/model fitting.
+    /// Kept so sensitivity refits with the exact same sample population can
+    /// reuse the already-computed median-ratio size factors without another
+    /// full expression-matrix pass.
+    pub model_sample_ids: Vec<String>,
+    /// Positive-count median-ratio size factors aligned to `model_sample_ids`.
+    pub size_factors: Vec<f64>,
     pub n_input_samples: usize,
     pub n_model_samples: usize,
     pub n_subjects: usize,
@@ -970,6 +977,157 @@ struct VariableRow {
     values: Vec<f64>,
 }
 
+#[derive(Debug)]
+struct ExpressionModelWorkRow {
+    feature: String,
+    secondary: String,
+    counts: Vec<f64>,
+}
+
+fn trim_variable_rows(rows: &mut Vec<VariableRow>, keep: usize) {
+    if rows.len() <= keep {
+        return;
+    }
+    rows.sort_by(|a, b| b.variance.total_cmp(&a.variance));
+    rows.truncate(keep);
+}
+
+fn model_expression_slice(
+    rows: &[ExpressionModelWorkRow],
+    size_factors: &[f64],
+    design: &DesignMatrix,
+    min_count: f64,
+    min_present: usize,
+) -> (Vec<AdjustedFeatureResult>, usize, Vec<VariableRow>) {
+    let mut tests = Vec::with_capacity(rows.len());
+    let mut filtered = 0usize;
+    let mut variable = Vec::new();
+    for row in rows {
+        let normalized = row
+            .counts
+            .iter()
+            .zip(size_factors.iter())
+            .map(|(count, sf)| count / sf.max(1e-12))
+            .collect::<Vec<_>>();
+        if normalized
+            .iter()
+            .filter(|value| **value >= min_count)
+            .count()
+            < min_present
+        {
+            filtered += 1;
+            continue;
+        }
+        let y = normalized
+            .iter()
+            .map(|value| (value + 0.5).log2())
+            .collect::<Vec<_>>();
+        if let Some(test) = make_nb_adjusted_test(
+            row.feature.clone(),
+            row.secondary.clone(),
+            &row.counts,
+            &normalized,
+            size_factors,
+            design,
+        ) {
+            tests.push(test);
+        }
+        let variance = sample_variance(&y);
+        if variance.is_finite() {
+            variable.push(VariableRow {
+                variance,
+                values: y,
+            });
+        }
+    }
+    // The final ordination only needs the global top 300 rows. Retaining the
+    // best 350 per worker is sufficient to preserve that global top set while
+    // bounding merge memory for transcript-scale matrices.
+    trim_variable_rows(&mut variable, 350);
+    (tests, filtered, variable)
+}
+
+fn expression_model_worker_count(row_count: usize) -> usize {
+    if row_count == 0 {
+        return 1;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        1
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::available_parallelism()
+            .map(|value| value.get().min(8).min(row_count).max(1))
+            .unwrap_or(1)
+    }
+}
+
+fn model_expression_batch_parallel(
+    rows: &[ExpressionModelWorkRow],
+    size_factors: &[f64],
+    design: &DesignMatrix,
+    min_count: f64,
+    min_present: usize,
+) -> Result<(Vec<AdjustedFeatureResult>, usize, Vec<VariableRow>)> {
+    if rows.is_empty() {
+        return Ok((Vec::new(), 0, Vec::new()));
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        return Ok(model_expression_slice(
+            rows,
+            size_factors,
+            design,
+            min_count,
+            min_present,
+        ));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let worker_count = expression_model_worker_count(rows.len());
+        if worker_count == 1 || rows.len() < 256 {
+            return Ok(model_expression_slice(
+                rows,
+                size_factors,
+                design,
+                min_count,
+                min_present,
+            ));
+        }
+        let chunk_size = rows.len().div_ceil(worker_count);
+        return std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for chunk in rows.chunks(chunk_size) {
+                handles.push(scope.spawn(move || {
+                    model_expression_slice(chunk, size_factors, design, min_count, min_present)
+                }));
+            }
+            let mut tests = Vec::new();
+            let mut filtered = 0usize;
+            let mut variable = Vec::new();
+            for handle in handles {
+                let (mut local_tests, local_filtered, mut local_variable) = handle
+                    .join()
+                    .map_err(|_| anyhow!("parallel corrected-expression worker panicked"))?;
+                tests.append(&mut local_tests);
+                filtered += local_filtered;
+                variable.append(&mut local_variable);
+            }
+            trim_variable_rows(&mut variable, 350);
+            Ok((tests, filtered, variable))
+        });
+    }
+    #[allow(unreachable_code)]
+    Ok(model_expression_slice(
+        rows,
+        size_factors,
+        design,
+        min_count,
+        min_present,
+    ))
+}
+
 pub fn run_corrected_expression<F>(
     merged_tsv: &Path,
     metadata: &MetadataTable,
@@ -977,6 +1135,35 @@ pub fn run_corrected_expression<F>(
     source_metric: &str,
     feature_label: &str,
     spec: &CorrectedModelSpec,
+    progress: F,
+) -> Result<CorrectedExpressionResult>
+where
+    F: FnMut(usize, usize, &str),
+{
+    run_corrected_expression_with_reference(
+        merged_tsv,
+        metadata,
+        comparison,
+        source_metric,
+        feature_label,
+        spec,
+        None,
+        progress,
+    )
+}
+
+/// Run the corrected expression model while optionally reusing count
+/// normalization from a prior corrected run that used the exact same model
+/// sample population and source metric. The statistical model is unchanged;
+/// only the redundant median-ratio normalization pass is skipped when safe.
+pub fn run_corrected_expression_with_reference<F>(
+    merged_tsv: &Path,
+    metadata: &MetadataTable,
+    comparison: &CohortComparison,
+    source_metric: &str,
+    feature_label: &str,
+    spec: &CorrectedModelSpec,
+    normalization_reference: Option<&CorrectedExpressionResult>,
     mut progress: F,
 ) -> Result<CorrectedExpressionResult>
 where
@@ -1021,55 +1208,75 @@ where
     }
 
     let total_rows = count_delimited_rows(merged_tsv, b'\t')?.saturating_sub(1);
-    // Pass 1: DESeq2-style `poscounts` median-ratio size factors. P² keeps the
-    // median estimate bounded-memory even for transcript-scale matrices.
-    let mut medians = vec![P2Median::new(); design_cols.len()];
-    let mut pass1 = ReaderBuilder::new()
-        .delimiter(b'\t')
-        .flexible(true)
-        .from_path(merged_tsv)?;
-    for (row_idx, record) in pass1.records().enumerate() {
-        let record = record?;
-        let counts = values_at_columns_with_zero(&record, &design_cols);
-        let positive = counts
-            .iter()
-            .copied()
-            .filter(|x| *x > 0.0)
-            .collect::<Vec<_>>();
-        if positive.len() >= 2 {
-            let gmean =
-                (positive.iter().map(|x| x.ln()).sum::<f64>() / positive.len() as f64).exp();
-            if gmean > 0.0 && gmean.is_finite() {
-                for (j, count) in counts.iter().enumerate() {
-                    if *count > 0.0 {
-                        medians[j].push(*count / gmean);
+    let reusable_normalization = normalization_reference.filter(|reference| {
+        reference.source_metric == source_metric
+            && reference.model_sample_ids.as_slice() == design.sample_ids.as_slice()
+            && reference.size_factors.len() == design.sample_ids.len()
+            && reference
+                .size_factors
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+    });
+    let size_factors = if let Some(reference) = reusable_normalization {
+        progress(
+            total_rows,
+            (total_rows * 2).max(1),
+            &format!("{feature_label}: reusing precomputed count size factors"),
+        );
+        reference.size_factors.clone()
+    } else {
+        // Pass 1: DESeq2-style `poscounts` median-ratio size factors. P² keeps the
+        // median estimate bounded-memory even for transcript-scale matrices.
+        let mut medians = vec![P2Median::new(); design_cols.len()];
+        let mut pass1 = ReaderBuilder::new()
+            .delimiter(b'\t')
+            .flexible(true)
+            .from_path(merged_tsv)?;
+        for (row_idx, record) in pass1.records().enumerate() {
+            let record = record?;
+            let counts = values_at_columns_with_zero(&record, &design_cols);
+            let mut positive_count = 0usize;
+            let mut positive_log_sum = 0.0_f64;
+            for count in &counts {
+                if *count > 0.0 {
+                    positive_count += 1;
+                    positive_log_sum += count.ln();
+                }
+            }
+            if positive_count >= 2 {
+                let gmean = (positive_log_sum / positive_count as f64).exp();
+                if gmean > 0.0 && gmean.is_finite() {
+                    for (j, count) in counts.iter().enumerate() {
+                        if *count > 0.0 {
+                            medians[j].push(*count / gmean);
+                        }
                     }
                 }
             }
+            if row_idx % 1000 == 0 {
+                progress(
+                    row_idx + 1,
+                    (total_rows * 2).max(1),
+                    &format!("{feature_label}: estimating count size factors"),
+                );
+            }
         }
-        if row_idx % 1000 == 0 {
-            progress(
-                row_idx + 1,
-                (total_rows * 2).max(1),
-                &format!("{feature_label}: estimating count size factors"),
-            );
+        let mut factors = medians
+            .iter()
+            .map(|m| {
+                m.value()
+                    .filter(|v| *v > 0.0 && v.is_finite())
+                    .unwrap_or(1.0)
+            })
+            .collect::<Vec<_>>();
+        let sf_gmean = (factors.iter().map(|x| x.ln()).sum::<f64>() / factors.len() as f64).exp();
+        if sf_gmean.is_finite() && sf_gmean > 0.0 {
+            for sf in &mut factors {
+                *sf /= sf_gmean;
+            }
         }
-    }
-    let mut size_factors = medians
-        .iter()
-        .map(|m| {
-            m.value()
-                .filter(|v| *v > 0.0 && v.is_finite())
-                .unwrap_or(1.0)
-        })
-        .collect::<Vec<_>>();
-    let sf_gmean =
-        (size_factors.iter().map(|x| x.ln()).sum::<f64>() / size_factors.len() as f64).exp();
-    if sf_gmean.is_finite() && sf_gmean > 0.0 {
-        for sf in &mut size_factors {
-            *sf /= sf_gmean;
-        }
-    }
+        factors
+    };
 
     let min_present = ((design.x.len() as f64 * spec.min_fraction_samples).ceil() as usize).max(3);
     let mut tests = Vec::new();
@@ -1079,53 +1286,52 @@ where
         .delimiter(b'\t')
         .flexible(true)
         .from_path(merged_tsv)?;
-    for (row_idx, record) in pass2.records().enumerate() {
+    const MODEL_BATCH_ROWS: usize = 4096;
+    let mut work_batch = Vec::with_capacity(MODEL_BATCH_ROWS);
+    let mut modeled_rows = 0usize;
+
+    let mut finish_batch = |batch: &mut Vec<ExpressionModelWorkRow>| -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let batch_rows = batch.len();
+        let (mut batch_tests, batch_filtered, mut batch_variable) =
+            model_expression_batch_parallel(
+                batch,
+                &size_factors,
+                &design,
+                spec.min_count,
+                min_present,
+            )?;
+        tests.append(&mut batch_tests);
+        filtered += batch_filtered;
+        top_variable.append(&mut batch_variable);
+        trim_variable_rows(&mut top_variable, 350);
+        modeled_rows += batch_rows;
+        progress(
+            total_rows + modeled_rows.min(total_rows),
+            (total_rows * 2).max(1),
+            &format!(
+                "{feature_label}: adjusted feature models ({} worker(s))",
+                expression_model_worker_count(batch_rows)
+            ),
+        );
+        batch.clear();
+        Ok(())
+    };
+
+    for record in pass2.records() {
         let record = record?;
-        let feature = record.get(0).unwrap_or_default().to_string();
-        let secondary = record.get(1).unwrap_or_default().to_string();
-        let counts = values_at_columns_with_zero(&record, &design_cols);
-        let normalized = counts
-            .iter()
-            .zip(size_factors.iter())
-            .map(|(c, sf)| c / sf.max(1e-12))
-            .collect::<Vec<_>>();
-        if normalized.iter().filter(|v| **v >= spec.min_count).count() < min_present {
-            filtered += 1;
-            continue;
-        }
-        let y = normalized
-            .iter()
-            .map(|x| (x + 0.5).log2())
-            .collect::<Vec<_>>();
-        if let Some(test) = make_nb_adjusted_test(
-            feature,
-            secondary,
-            &counts,
-            &normalized,
-            &size_factors,
-            &design,
-        ) {
-            tests.push(test);
-        }
-        let v = sample_variance(&y);
-        if v.is_finite() {
-            top_variable.push(VariableRow {
-                variance: v,
-                values: y,
-            });
-            if top_variable.len() > 700 {
-                top_variable.sort_by(|a, b| b.variance.total_cmp(&a.variance));
-                top_variable.truncate(350);
-            }
-        }
-        if row_idx % 500 == 0 {
-            progress(
-                total_rows + row_idx + 1,
-                (total_rows * 2).max(1),
-                &format!("{feature_label}: adjusted feature models"),
-            );
+        work_batch.push(ExpressionModelWorkRow {
+            feature: record.get(0).unwrap_or_default().to_string(),
+            secondary: record.get(1).unwrap_or_default().to_string(),
+            counts: values_at_columns_with_zero(&record, &design_cols),
+        });
+        if work_batch.len() >= MODEL_BATCH_ROWS {
+            finish_batch(&mut work_batch)?;
         }
     }
+    finish_batch(&mut work_batch)?;
     apply_bh_adjusted(&mut tests);
     top_variable.sort_by(|a, b| b.variance.total_cmp(&a.variance));
     top_variable.truncate(300);
@@ -1186,6 +1392,8 @@ where
         } else {
             format!("Negative-binomial log-link model: group + {} covariate(s), per-feature dispersion, model-based Wald SE; sample-level log2-normalized sensitivity", spec.covariates.len())
         },
+        model_sample_ids: design.sample_ids.clone(),
+        size_factors,
         n_input_samples: candidate_ids.len(),
         n_model_samples: design.x.len(),
         n_subjects: design.n_subjects(),
@@ -3444,6 +3652,44 @@ mod tests {
         assert!(b > 1.5 && b < 2.5);
         assert!(se.is_finite() && se > 0.0);
         assert!(p < 0.05);
+    }
+
+    #[test]
+    fn parallel_expression_batch_matches_serial_modeling() {
+        let design = DesignMatrix {
+            sample_ids: (0..10).map(|i| format!("S{i}")).collect(),
+            group_case: (0..10).map(|i| i >= 5).collect(),
+            subjects: (0..10).map(|i| format!("P{i}")).collect(),
+            x: (0..10)
+                .map(|i| vec![1.0, if i >= 5 { 1.0 } else { 0.0 }])
+                .collect(),
+            column_names: vec!["Intercept".into(), "Group".into()],
+            group_col: 1,
+            dropped_missing_covariates: 0,
+        };
+        let rows = (0..300)
+            .map(|feature_idx| ExpressionModelWorkRow {
+                feature: format!("F{feature_idx}"),
+                secondary: String::new(),
+                counts: (0..10)
+                    .map(|sample_idx| {
+                        let base = 8.0 + (feature_idx % 7) as f64;
+                        if sample_idx >= 5 { base * 2.0 } else { base }
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let size_factors = vec![1.0; 10];
+        let serial = model_expression_slice(&rows, &size_factors, &design, 1.0, 3);
+        let parallel =
+            model_expression_batch_parallel(&rows, &size_factors, &design, 1.0, 3).unwrap();
+        assert_eq!(serial.1, parallel.1);
+        assert_eq!(serial.0.len(), parallel.0.len());
+        for (left, right) in serial.0.iter().zip(parallel.0.iter()) {
+            assert_eq!(left.feature, right.feature);
+            assert!((left.beta_group - right.beta_group).abs() < 1e-12);
+            assert!((left.p_value - right.p_value).abs() < 1e-12);
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # 4C Cohort Explorer web development
 
-## Current status: Phase 3E.4 scientific-result readiness + background export finalization (v0.16.12)
+## Current status: Phase 3E.5 primary-results checkpoint + bounded sensitivity refits (v0.16.13)
 
 Phase 3D.2 has been exercised on a realistic private project with 2,140 uploaded objects / 4.21 GiB, Phase 3E.1 has produced full unified report/table artifacts, and Phase 3E.2 validated metadata-backed Case/Control configuration. Phase 3E.3 now presents the same completed native unified result interactively in the browser and adds a one-click authenticated ZIP of all retained job artifacts.
 
@@ -12,7 +12,7 @@ Desktop
         ↓
     existing Rust unified scientific analysis
 
-Browser (Phase 3E.4)
+Browser (Phase 3E.5)
     egui / eframe WebRunner (WASM)
         ↓ same-origin HTTP + bearer capability
     cfs-server (Axum, native Rust)
@@ -24,7 +24,7 @@ Browser (Phase 3E.4)
               ├── metadata-backed Case/Control selection
               ├── native mapping + frozen QC review
               ├── immutable persisted job snapshots
-              ├── existing run_unified_cohort_analysis()
+              ├── existing unified native analysis + primary-results checkpoint
               ├── simplified + full reports from one result
               ├── interactive native-result visualization payloads
               ├── authenticated individual + bulk ZIP downloads
@@ -523,7 +523,7 @@ Expected capabilities include:
 ```json
 {
   "status": "ok",
-  "api_version": 9,
+  "api_version": 11,
   "upload_enabled": true,
   "mapping_enabled": true,
   "analysis_enabled": true,
@@ -691,11 +691,19 @@ For private patient data, a self-hosted server using a secure local/NAS path rem
 
 ## Next web milestone
 
-After Phase 3E.3 is locally validated for browser visualization parity and bulk export, the next infrastructure phase can move to an operator-managed S3/MinIO storage implementation behind the existing opaque storage contract plus HTTPS/reverse-proxy/deployment hardening. Do not introduce a login/account system merely for localhost development.
+After Phase 3E.5 is locally validated for primary-result readiness and acceptable optional sensitivity runtime, return to browser result/dashboard polish before operator-managed S3/MinIO storage and HTTPS/reverse-proxy deployment hardening. Do not introduce a login/account system merely for localhost development.
 
+
+## Phase 3E.5 primary-results checkpoint
+
+The primary corrected modalities and initial candidate ranking are now published as `primary_results_ready` before optional PBMC/confounding sensitivity refits. This state is intentionally non-terminal: the browser can inspect the main cohort result, but robustness annotations may still be enriched. The scientific semaphore remains held until the optional sensitivity stage finishes and the job advances to `results_ready`.
+
+The immune-composition-adjusted corrected-gene refit reuses existing count size factors whenever the sensitivity sample population is unchanged and fits feature models in bounded native worker batches. The same native NB2 model and downstream FDR calculations are preserved.
+
+The local job semaphore is deliberately retained until optional export finalization ends. Phase 3E.4 briefly released it at `results_ready`, but that allowed large HTML/table exports from an older job to contend with a new NB2 scientific fit and could make sensitivity analysis appear to regress. Results remain visible early; only the next heavy job waits.
 
 ## Phase 3E.4 result-ready job state
 
 A unified job transitions from `running` to `results_ready` immediately after the native unified scientific analysis and lightweight result summary are complete. The persisted result is readable while visualization/report/table finalization continues. When optional exports finish the job becomes `complete`. If the local server restarts while a job is `results_ready`, the scientific result is preserved and the job is recovered as complete with a warning that optional export finalization was interrupted.
 
-The scientific worker semaphore is released when a unified job reaches `results_ready`; subsequent scientific work is no longer blocked solely by report/table finalization.
+In v0.16.13 the local scientific worker semaphore remains held through that job's export finalization. `results_ready` still makes the scientific result immediately readable, but the default one-worker local profile avoids running a new CPU-heavy fit concurrently with a previous job's HTML/table export.
