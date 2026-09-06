@@ -2,7 +2,7 @@
 
 This directory contains the WASM/`eframe` browser client for 4C Cohort Explorer.
 
-## Current status: Phase 3E.6 runtime stabilization + encrypted project keys (v0.16.14)
+## Current status: Phase 3E.8 shared-core repertoire teardown stabilization (v0.16.16)
 
 The browser now renders bounded interactive presentation views directly from the completed native unified result and can download every retained job artifact as one authenticated ZIP. No statistical calculation is duplicated in WASM; full-resolution tables and both HTML reports remain the authoritative persisted outputs.
 
@@ -149,3 +149,12 @@ See [`../docs/web_development.md`](../docs/web_development.md) for the complete 
 Unified jobs publish `primary_results_ready` once the corrected gene/transcript, repertoire/isotype, immune/pathway, supporting-direction, reviewed-QC, and initial candidate results are complete. PBMC/confounding sensitivity refits can continue afterward without hiding those primary results. When sensitivity diagnostics finish, the same frozen job advances to `results_ready`; visualization/report/table finalization can continue until `complete`.
 
 The local scientific worker semaphore remains held through finalization in v0.16.13. Results are visible early, but a new CPU-heavy fit is not allowed to contend with a previous job's large HTML/table export on the same workstation.
+
+
+### Phase 3E.8 repertoire working-set stabilization
+
+The browser timing table can now distinguish real BCR/TCR scientific work from raw parsed-repertoire cleanup. Large TCR-beta jobs use the shared native compact clonotype representation and report a dedicated `working-set cleanup` stage; the modality is not marked complete until that cleanup is actually finished. Primary corrected results are also published independently of whether PBMC diagnostics were selected.
+
+### Phase 3E.7 transcript/runtime + reliable encrypted-key saving
+
+The browser now receives `primary_results_ready` before optional TPM direction-concordance and PBMC/confounding enrichment. Job telemetry remains live during those optional layers. Exact TPM support is faster through single-pass byte-position progress and bounded native feature batches. Encrypted `.4ckey` export now deliberately separates encryption from the final user-gesture save click so Firefox/Chromium cannot silently block the download after asynchronous WebCrypto work.

@@ -1,6 +1,6 @@
 //! Local web server for the 4C Cohort Explorer browser client.
 //!
-//! Phase 3E.6 keeps authenticated metadata-backed comparison configuration and
+//! Phase 3E.8 keeps authenticated metadata-backed comparison configuration and
 //! adds presentation payloads plus on-demand bulk export for completed frozen
 //! unified native jobs. The server reconstructs metadata/scientific state and
 //! derives plot coordinates from native results; WASM does not recompute science.
@@ -2022,6 +2022,8 @@ impl LocalProjectStore {
                 Some("distance matrices")
             } else if detail.contains("composition + ordination/PERMANOVA") {
                 Some("composition + ordination/PERMANOVA")
+            } else if detail.contains("releasing parsed repertoire working set") {
+                Some("working-set cleanup")
             } else if detail.contains("estimating count size factors")
                 || detail.contains("reusing precomputed count size factors")
             {
@@ -2030,6 +2032,10 @@ impl LocalProjectStore {
                 Some("feature models")
             } else if detail.contains("differential transcript-usage screen") {
                 Some("DTU screen")
+            } else if detail.contains("DTU gene-total pass") {
+                Some("DTU gene totals")
+            } else if detail.contains("DTU transcript-model pass") {
+                Some("DTU transcript models")
             } else {
                 None
             };
@@ -2200,9 +2206,13 @@ impl LocalProjectStore {
         }
         record.status = JobStatus::PrimaryResultsReady;
         record.progress_message =
-            "Primary corrected results ready; PBMC/confounding sensitivity diagnostics are still running"
+            "Primary corrected results ready; optional TPM direction support and PBMC/confounding sensitivity enrichment may still be running"
                 .to_string();
-        Self::enter_job_stage(&mut record, "PBMC/confounding sensitivity".to_string(), now);
+        Self::enter_job_stage(
+            &mut record,
+            "Post-primary supporting analyses".to_string(),
+            now,
+        );
         record.updated_unix_seconds = now;
         record.result = Some(result);
         record.error = None;
@@ -2611,14 +2621,14 @@ impl LocalProjectStore {
                     changed += 1;
                 } else if job.status == JobStatus::PrimaryResultsReady {
                     job.status = JobStatus::Failed;
-                    job.progress_message = "Primary corrected results preserved; sensitivity diagnostics were interrupted by server restart".to_string();
+                    job.progress_message = "Primary corrected results preserved; optional supporting/robustness enrichment was interrupted by server restart".to_string();
                     if let Some(result) = job.result.as_mut() {
                         result.warnings.push(
-                            "The local server restarted after primary corrected results were published but before PBMC/confounding sensitivity diagnostics finished. Primary modality statistics remain available, but robustness annotations/diagnostic outputs are incomplete; rerun only if those sensitivity diagnostics are required.".to_string(),
+                            "The local server restarted after primary corrected results were published but before optional TPM direction support and/or PBMC/confounding sensitivity enrichment finished. Primary modality statistics remain available; rerun only if those supporting annotations/diagnostics are required.".to_string(),
                         );
                     }
                     job.error = Some(
-                        "Optional PBMC/confounding sensitivity diagnostics were interrupted after primary corrected results became available.".to_string(),
+                        "Optional supporting/robustness enrichment was interrupted after primary corrected results became available.".to_string(),
                     );
                     job.updated_unix_seconds = unix_seconds()?;
                     write_json_atomic(&self.job_record_path(project_id, job.job_id), &job).await?;
@@ -3644,50 +3654,57 @@ where
                 progress(scaled, 1000, message);
             },
             |checkpoint| {
-                if checkpoint.settings.pbmc_diagnostics.is_some() {
-                    let mut checkpoint_warnings = warnings.clone();
-                    checkpoint_warnings.extend(checkpoint.warnings.iter().cloned());
-                    checkpoint_warnings.push(
-                        "Primary corrected modality results are final. PBMC/confounding sensitivity diagnostics are still running; candidate robustness annotations may be enriched when those optional diagnostics finish."
-                            .to_string(),
-                    );
-                    let gene = checkpoint
-                        .primary
-                        .gene
-                        .as_ref()
-                        .map(summarize_corrected_gene);
-                    let mut primary_summary = summarize_unified_primary_checkpoint(&checkpoint);
-                    publish_ready(
-                        JobReadyStage::Primary,
-                        JobResultSummary {
-                            mapping: mapping.clone(),
-                            qc: qc.clone(),
-                            gene: gene.clone(),
-                            unified: Some(primary_summary.clone()),
-                            warnings: checkpoint_warnings.clone(),
-                            artifacts: artifacts.clone(),
-                        },
-                    );
-
-                    // The browser visualizations depend only on already-final
-                    // primary modalities. Build and republish them before the
-                    // optional sensitivity refits so a long PBMC diagnostic
-                    // does not leave the early result as a text-only summary.
-                    primary_summary.visualizations =
-                        build_unified_visualizations_from_primary(checkpoint.primary);
-                    primary_visualizations = Some(primary_summary.visualizations.clone());
-                    publish_ready(
-                        JobReadyStage::Primary,
-                        JobResultSummary {
-                            mapping: mapping.clone(),
-                            qc: qc.clone(),
-                            gene,
-                            unified: Some(primary_summary),
-                            warnings: checkpoint_warnings,
-                            artifacts: artifacts.clone(),
-                        },
-                    );
+                let mut checkpoint_warnings = warnings.clone();
+                checkpoint_warnings.extend(checkpoint.warnings.iter().cloned());
+                let mut pending_layers = Vec::new();
+                if checkpoint.settings.exploratory_direction_check {
+                    pending_layers.push("TPM direction-concordance support");
                 }
+                if checkpoint.settings.pbmc_diagnostics.is_some() {
+                    pending_layers.push("PBMC/confounding sensitivity enrichment");
+                }
+                if !pending_layers.is_empty() {
+                    checkpoint_warnings.push(format!(
+                        "Primary corrected modality results are final. Optional {} may still be running; candidate support/robustness annotations can be enriched when those layers finish.",
+                        pending_layers.join(" and ")
+                    ));
+                }
+                let gene = checkpoint
+                    .primary
+                    .gene
+                    .as_ref()
+                    .map(summarize_corrected_gene);
+                let mut primary_summary = summarize_unified_primary_checkpoint(&checkpoint);
+                publish_ready(
+                    JobReadyStage::Primary,
+                    JobResultSummary {
+                        mapping: mapping.clone(),
+                        qc: qc.clone(),
+                        gene: gene.clone(),
+                        unified: Some(primary_summary.clone()),
+                        warnings: checkpoint_warnings.clone(),
+                        artifacts: artifacts.clone(),
+                    },
+                );
+
+                // The browser visualizations depend only on already-final
+                // primary modalities. Build and republish them before optional
+                // supporting/robustness layers so the checkpoint is useful
+                // regardless of whether PBMC diagnostics were requested.
+                primary_summary.visualizations =
+                    build_unified_visualizations_from_primary(checkpoint.primary);
+                primary_visualizations = Some(primary_summary.visualizations.clone());
+                publish_ready(
+                    JobReadyStage::Primary,
+                    JobResultSummary {
+                        mapping: mapping.clone(),
+                        qc: qc.clone(),
+                        gene,
+                        unified: Some(primary_summary),
+                        warnings: checkpoint_warnings,
+                        artifacts: artifacts.clone(),
+                    },
+                );
             },
         )?;
         progress(
@@ -6477,6 +6494,18 @@ mod tests {
                 "Immune-adjusted gene sensitivity — Gene: adjusted feature models (8 worker(s))"
             ),
             "Immune-adjusted gene sensitivity / feature models"
+        );
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
+                "TCR beta corrected — TCR beta: releasing parsed repertoire working set (283 samples; 1234567 clonotypes; 12000 composition entries; 8 worker(s))"
+            ),
+            "TCR beta corrected / working-set cleanup"
+        );
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
+                "Transcript corrected — Transcript: DTU transcript-model pass"
+            ),
+            "Transcript corrected / DTU transcript models"
         );
         assert_eq!(
             LocalProjectStore::progress_stage_name(

@@ -120,6 +120,8 @@ struct RemoteApiState {
     credential_passphrase: String,
     credential_passphrase_confirm: String,
     credential_file_status: String,
+    credential_prepared_filename: Option<String>,
+    credential_prepared_bytes: Vec<u8>,
     confirm_delete: bool,
     objects: Vec<ObjectSummaryResponse>,
     assignment_roles: BTreeMap<String, String>,
@@ -168,6 +170,8 @@ impl Default for RemoteApiState {
             credential_passphrase: String::new(),
             credential_passphrase_confirm: String::new(),
             credential_file_status: String::new(),
+            credential_prepared_filename: None,
+            credential_prepared_bytes: Vec::new(),
             confirm_delete: false,
             objects: Vec::new(),
             assignment_roles: BTreeMap::new(),
@@ -442,6 +446,9 @@ impl WebShellApp {
             }
             state.busy = true;
             state.last_error = None;
+            state.credential_prepared_filename = None;
+            state.credential_prepared_bytes.clear();
+            state.credential_file_status.clear();
             state.status_message = "Encrypting project access key locally…".to_string();
             (
                 project_id,
@@ -466,24 +473,77 @@ impl WebShellApp {
                 Ok(bytes) => {
                     let short = project_id.chars().take(8).collect::<String>();
                     let filename = format!("4c-project-{short}.4ckey");
-                    match save_browser_download(&filename, &bytes) {
-                        Ok(()) => {
-                            state.credential_passphrase.clear();
-                            state.credential_passphrase_confirm.clear();
-                            state.credential_file_status = format!(
-                                "Saved encrypted key {filename}. Keep the file and its passphrase separate."
-                            );
-                            state.status_message = "Encrypted project key saved".to_string();
-                            state.last_error = None;
-                        }
-                        Err(error) => {
-                            state.status_message = "Project-key download failed".to_string();
-                            state.last_error = Some(error);
-                        }
-                    }
+                    state.credential_prepared_filename = Some(filename.clone());
+                    state.credential_prepared_bytes = bytes;
+                    state.credential_passphrase.clear();
+                    state.credential_passphrase_confirm.clear();
+                    state.credential_file_status = format!(
+                        "Encrypted key prepared as {filename}. Click ‘Save prepared .4ckey…’ to choose/save the file. This second click is deliberate so browsers retain a trusted user gesture for the download dialog."
+                    );
+                    state.status_message = "Encrypted project key prepared".to_string();
+                    state.last_error = None;
                 }
                 Err(error) => {
                     state.status_message = "Project-key encryption failed".to_string();
+                    state.last_error = Some(error);
+                }
+            }
+            drop(state);
+            ctx.request_repaint();
+        });
+    }
+
+    fn download_prepared_project_key(&self, ctx: egui::Context) {
+        let remote = self.remote.clone();
+        let promise = {
+            let mut state = remote.borrow_mut();
+            if state.busy {
+                return;
+            }
+            let Some(filename) = state.credential_prepared_filename.clone() else {
+                state.last_error =
+                    Some("Prepare an encrypted .4ckey before saving it.".to_string());
+                return;
+            };
+            if state.credential_prepared_bytes.is_empty() {
+                state.last_error =
+                    Some("Prepared project-key data is empty; prepare it again.".to_string());
+                return;
+            }
+            match credentials::begin_save_prepared_project_key(
+                &filename,
+                &state.credential_prepared_bytes,
+            ) {
+                Ok(promise) => {
+                    state.status_message =
+                        "Opening browser save/download flow for encrypted project key…".to_string();
+                    state.last_error = None;
+                    promise
+                }
+                Err(error) => {
+                    state.status_message = "Project-key save could not start".to_string();
+                    state.last_error = Some(error);
+                    return;
+                }
+            }
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = credentials::finish_save_prepared_project_key(promise).await;
+            let mut state = remote.borrow_mut();
+            match result {
+                Ok(mode) => {
+                    let filename = state
+                        .credential_prepared_filename
+                        .clone()
+                        .unwrap_or_else(|| "project.4ckey".to_string());
+                    state.credential_file_status = format!(
+                        "Encrypted key save started/completed for {filename} ({mode}). If your browser is configured to save downloads automatically, it may use the default Downloads folder instead of prompting for a location."
+                    );
+                    state.status_message = "Encrypted project key save completed".to_string();
+                    state.last_error = None;
+                }
+                Err(error) => {
+                    state.status_message = "Project-key save failed or was cancelled".to_string();
                     state.last_error = Some(error);
                 }
             }
@@ -586,6 +646,8 @@ impl WebShellApp {
                             }
                             state.credential_passphrase.clear();
                             state.credential_passphrase_confirm.clear();
+                            state.credential_prepared_filename = None;
+                            state.credential_prepared_bytes.clear();
                             state.credential_file_status =
                                 "Encrypted project key loaded. Click Recover / refresh project to authenticate."
                                     .to_string();
@@ -2172,7 +2234,7 @@ impl WebShellApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.remote.borrow().clone();
         let connected = snapshot.health.is_some();
-        let phase_label = "Web · Phase 3E.6";
+        let phase_label = "Web · Phase 3E.8";
         let server_label = if connected {
             "Local server connected"
         } else {
@@ -2226,7 +2288,7 @@ impl WebShellApp {
     fn overview(&mut self, ui: &mut egui::Ui) {
         ui.heading("Browser client + local Rust server");
         ui.label(
-            "Phase 3E.6 adds persisted per-stage runtime telemetry, encrypted browser-side project-key files, and a stabilized/parallel corrected-repertoire path while preserving the Phase 3E.5 early primary-results checkpoint.",
+            "Phase 3E.8 keeps the Phase 3E.7 primary-result/timing/key workflow and fixes the shared native repertoire teardown exposed by real-cohort telemetry: compact clonotype storage, an explicit measured working-set cleanup stage, and completion only after cleanup actually returns.",
         );
         ui.add_space(10.0);
 
@@ -2285,7 +2347,7 @@ impl WebShellApp {
             .inner_margin(12)
             .corner_radius(8)
             .show(ui, |ui| {
-            ui.label(egui::RichText::new("What works in Phase 3E.6").strong());
+            ui.label(egui::RichText::new("What works in Phase 3E.8").strong());
             for item in [
                 "One Rust cfs-server serves both web/dist and /api from 127.0.0.1:8080 by default.",
                 "A private temporary project can be created with an opaque UUID and independent recovery token.",
@@ -2424,7 +2486,7 @@ impl WebShellApp {
     fn cohort_shell(&mut self, ui: &mut egui::Ui) {
         ui.heading("Cohort Analysis — frozen native unified workflow");
         ui.label(
-            "Phase 3E.6 keeps the validated high-throughput ingest/mapping and frozen unified native analysis, adds end-to-end stage timing/last-progress telemetry, stabilizes corrected repertoire execution, and supports encrypted local .4ckey recovery files without changing the server capability-token model.",
+            "Phase 3E.8 keeps the validated high-throughput ingest/mapping, frozen unified native analysis, timing telemetry, primary-results checkpoint, and encrypted .4ckey workflow while stabilizing the shared BCR/TCR working set so very large TCR-beta payload destruction is measured and allocation-efficient.",
         );
         ui.add_space(8.0);
 
@@ -2529,7 +2591,7 @@ impl WebShellApp {
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(
-                        "Encrypted project key (optional): save the UUID + recovery token into a local .4ckey file encrypted entirely in this browser. The passphrase is never sent to cfs-server and is not stored by 4C.",
+                        "Encrypted project key (optional): first prepare the encrypted UUID + recovery token locally, then use the separate Save prepared .4ckey… button. The two-step flow preserves a trusted browser click for the save/download dialog. The passphrase is never sent to cfs-server and is not stored by 4C.",
                     )
                     .small(),
                 );
@@ -2567,11 +2629,22 @@ impl WebShellApp {
                         !snapshot.busy
                             && !snapshot.recovery_project_id.trim().is_empty()
                             && !snapshot.recovery_token.trim().is_empty(),
-                        egui::Button::new("Save encrypted .4ckey"),
+                        egui::Button::new("Prepare encrypted .4ckey"),
                     )
                     .clicked()
                 {
                     self.save_encrypted_project_key(ui.ctx().clone());
+                }
+                if ui
+                    .add_enabled(
+                        !snapshot.busy
+                            && snapshot.credential_prepared_filename.is_some()
+                            && !snapshot.credential_prepared_bytes.is_empty(),
+                        egui::Button::new("Save prepared .4ckey…"),
+                    )
+                    .clicked()
+                {
+                    self.download_prepared_project_key(ui.ctx().clone());
                 }
                 if ui
                     .add_enabled(!snapshot.busy, egui::Button::new("Load encrypted .4ckey…"))
@@ -2587,6 +2660,8 @@ impl WebShellApp {
                     state.credential_passphrase.clear();
                     state.credential_passphrase_confirm.clear();
                     state.credential_file_status.clear();
+                    state.credential_prepared_filename = None;
+                    state.credential_prepared_bytes.clear();
                     state.project = RemoteProjectSummary::default();
                     state.objects.clear();
                     state.assignment_roles.clear();
@@ -3634,7 +3709,7 @@ impl WebShellApp {
                                 );
                                 ui.label(
                                     egui::RichText::new(
-                                        "PBMC/confounding sensitivity diagnostics are still running. Primary modality statistics are final; robustness annotations and diagnostic outputs may be enriched when that optional sensitivity stage finishes.",
+                                        "Primary modality statistics are final. Optional TPM direction-concordance support and PBMC/confounding sensitivity enrichment may still be running; support/robustness annotations and diagnostic outputs can be enriched when those optional layers finish.",
                                     )
                                     .small(),
                                 );

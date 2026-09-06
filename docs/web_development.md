@@ -1,6 +1,6 @@
 # 4C Cohort Explorer web development
 
-## Current status: Phase 3E.6 runtime stabilization + encrypted project keys (v0.16.14)
+## Current status: Phase 3E.8 shared-core repertoire teardown stabilization (v0.16.16)
 
 Phase 3D.2 has been exercised on a realistic private project with 2,140 uploaded objects / 4.21 GiB, Phase 3E.1 has produced full unified report/table artifacts, and Phase 3E.2 validated metadata-backed Case/Control configuration. Phase 3E.3 now presents the same completed native unified result interactively in the browser and adds a one-click authenticated ZIP of all retained job artifacts.
 
@@ -12,7 +12,7 @@ Desktop
         ↓
     existing Rust unified scientific analysis
 
-Browser (Phase 3E.6)
+Browser (Phase 3E.8)
     egui / eframe WebRunner (WASM)
         ↓ same-origin HTTP + bearer capability
     cfs-server (Axum, native Rust)
@@ -715,3 +715,25 @@ Phase 3E.6 responds to repeated realistic-cohort stalls by treating timing as pe
 The corrected repertoire path was audited end to end. Large parsed clonotype maps are moved rather than cloned, deterministic matched-depth summaries are evaluated with bounded native workers, independent composition/ordination work is parallelized, Morisita-Horn distances are reused for PCoA + clustering, and PERMANOVA no longer recomputes invariant squared-distance totals on every permutation. The native statistical definitions and deterministic seeds remain unchanged.
 
 The browser can also export a local encrypted `.4ckey` recovery file. Encryption/decryption happens entirely in browser WebCrypto using PBKDF2-HMAC-SHA-256 + AES-256-GCM. The plaintext recovery token and key-file passphrase are not sent to the server. The encrypted payload is bound to the browser origin that created it so a credential file is not silently replayed against a different server origin. Users should keep the encrypted file and its passphrase separately; losing both the original recovery token and the encrypted key/passphrase still makes a private project unrecoverable by design.
+
+## Phase 3E.7 primary-result decoupling and transcript/runtime stabilization
+
+Phase 3E.7 responds to a measured real-cohort stall in the optional transcript TPM direction-concordance stage. That stage is supporting evidence, not the primary corrected analysis, so `primary_results_ready` is now published before exploratory TPM direction checks and before PBMC/confounding sensitivity enrichment. The final unified result later enriches the same candidates with TPM direction and robustness annotations.
+
+The merged-matrix execution path was audited for redundant input passes. Corrected expression modeling and exploratory TPM comparisons no longer parse the entire file solely to count rows; progress uses the `csv::Reader` byte position. Exploratory TPM testing remains statistically identical but is processed in bounded native batches (up to eight workers), with Mann-Whitney and Cliff's delta sharing one ranking pass. Transcript DTU now exposes separate gene-total and transcript-model passes.
+
+Encrypted project-key export now uses a two-step browser flow: **Prepare encrypted .4ckey** performs PBKDF2/AES-GCM locally, then **Save prepared .4ckey…** performs the actual save from a fresh user click. This avoids browsers silently blocking downloads after asynchronous cryptography. Chromium-family browsers can use `showSaveFilePicker`; Firefox falls back to a normal download and therefore follows the browser's configured download-directory/prompt behavior.
+
+## Phase 3E.8 shared-core repertoire teardown stabilization
+
+Real-cohort stage telemetry exposed a hidden boundary bug: TCR-beta parsing, sharing, matched-depth diversity, distance matrices, and composition/ordination/PERMANOVA all completed quickly, but the final progress callback fired before Rust destroyed the very large parsed repertoire working set. The job could therefore display `TCR beta corrected` for a long period even though the TCR-beta statistics were already complete.
+
+The fix is in the shared native `corrected.rs` implementation used by both the desktop GUI and `cfs-server`:
+
+- a parsed clonotype now has one keyed allocation carrying count + minimal nucleotide-convergence state instead of three duplicate keyed maps and a full nucleotide `HashSet`;
+- convergence remains exact: a clonotype is convergent iff at least two distinct non-empty nucleotide sequences were observed;
+- the raw parsed repertoire working set is released explicitly with bounded native parallelism;
+- progress enters `BCR/TCR ... / working-set cleanup` before destruction and only emits `corrected repertoire analysis complete` after cleanup returns;
+- primary corrected-result publication no longer depends on PBMC diagnostics being enabled.
+
+This iteration intentionally preserves rarefaction, sharing classification, Morisita-Horn/Jaccard distances, V/J/V-J/isotype composition models, PERMANOVA, BH/FDR, and deterministic seeds.

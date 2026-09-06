@@ -4,6 +4,23 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains a command-line interface, an `egui` desktop interface, and a browser/WASM client served by a local Rust `cfs-server`. The native Rust application remains the scientific reference implementation. The browser path is a thin same-origin client over authenticated opaque projects/objects/jobs and now drives the existing native frozen unified cohort-analysis workflow rather than maintaining a separate web statistics engine.
 
+## What v0.16.16 adds
+
+- Adds **Phase 3E.8 shared-core repertoire working-set stabilization** after real-cohort timing proved that TCR-beta scientific substages finished in about a minute while the function then spent far longer silently destroying the raw parsed repertoire payload.
+- Replaces three duplicate clonotype-keyed structures (`clonotype_aa`, `aa_to_nt`, `aa_read_counts`) with one compact clonotype map that retains exactly the downstream information required: read count, one representative nucleotide sequence, and whether a second distinct nucleotide sequence was observed. This preserves convergence/private/public/distance semantics while substantially reducing allocation count and teardown cost for very large TCR-beta cohorts.
+- Makes repertoire cleanup an explicit measured stage and performs bounded parallel working-set destruction before emitting `corrected repertoire analysis complete`, so the browser cannot report a modality complete while Rust is still reclaiming millions of allocations.
+- Publishes the primary-results checkpoint regardless of whether PBMC diagnostics are enabled; optional TPM/PBMC enrichment is described according to the actual requested layers.
+- Keeps the native desktop and server on the same `run_corrected_repertoire()` implementation; this is a shared scientific-core performance fix, not a web-only alternative engine.
+
+## What v0.16.15 adds
+
+- Adds **Phase 3E.7 end-to-end transcript/runtime stabilization**. The primary corrected-result checkpoint now fires immediately after corrected modalities/pathway results, before optional gene/transcript TPM direction-concordance and PBMC/confounding enrichment, so a large supporting TPM scan can no longer block access to the main scientific result.
+- Removes redundant whole-file row-count pre-scans from corrected gene/transcript modeling and exploratory TPM direction checks. Progress is derived from CSV byte position instead, eliminating an otherwise complete extra parse of potentially multi-GiB merged matrices.
+- Speeds exact exploratory TPM direction tests without changing their statistics: rows are processed in bounded native batches (up to 8 workers), Mann-Whitney p-values and Cliff's delta share one rank pass, and detailed byte/row progress is forwarded to persisted job telemetry.
+- Makes transcript DTU explicitly observable as separate gene-total and transcript-model passes while retaining the existing DTU method and result semantics.
+- Fixes encrypted `.4ckey` saving in browsers that drop user activation across asynchronous WebCrypto work. Encryption is prepared first, then a second explicit **Save prepared .4ckey…** click invokes a browser save picker where supported or a normal trusted download in Firefox. Browser download-location prompting still follows the user's browser settings.
+- Keeps `/api/health` at API v12 because no server contract/schema change is required; existing v0.16.14 jobs/credentials remain compatible.
+
 ## What v0.16.14 adds
 
 - Adds **Phase 3E.6 end-to-end runtime telemetry**. Persisted jobs now record job start time, current stage, current-stage start time, last progress update, and completed stage durations so a long calculation can be diagnosed from the browser without inferring timing from a percentage label.

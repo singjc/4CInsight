@@ -1807,17 +1807,58 @@ fn ln_choose(n: usize, k: usize) -> f64 {
         .sum()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+struct ParsedClonotype {
+    count: f64,
+    /// One representative non-empty nucleotide sequence is sufficient to
+    /// determine whether a second distinct sequence is ever observed.
+    first_nt: Option<String>,
+    convergent: bool,
+}
+
+#[derive(Debug)]
 struct ParsedRepertoire {
     sample_id: String,
     group: String,
     counts: Vec<f64>,
-    clonotype_aa: HashMap<String, f64>,
-    aa_to_nt: HashMap<String, HashSet<String>>,
-    aa_read_counts: HashMap<String, f64>,
+    /// Keep one keyed allocation per amino-acid clonotype.  The older
+    /// representation duplicated every clonotype key across three HashMaps
+    /// (`clonotype_aa`, `aa_to_nt`, and `aa_read_counts`) and retained a full
+    /// HashSet of nucleotide strings even though downstream analysis only
+    /// needs total reads and whether >=2 distinct nucleotide sequences exist.
+    /// Large TCR-beta cohorts can contain millions of clonotypes, so those
+    /// duplicate allocations also made end-of-stage destruction extremely
+    /// expensive.
+    clonotypes: HashMap<String, ParsedClonotype>,
     feature_maps: BTreeMap<String, HashMap<String, f64>>,
     top_clone_fraction: f64,
     weighted_mean_cdr3_aa_length: f64,
+}
+
+fn record_parsed_clonotype(
+    clonotypes: &mut HashMap<String, ParsedClonotype>,
+    key: String,
+    count: f64,
+    nucleotide: Option<String>,
+) {
+    let clonotype = clonotypes.entry(key).or_insert_with(|| ParsedClonotype {
+        count: 0.0,
+        first_nt: None,
+        convergent: false,
+    });
+    clonotype.count += count;
+    if let Some(nucleotide) = nucleotide.filter(|value| !value.is_empty()) {
+        if !clonotype.convergent {
+            match clonotype.first_nt.as_deref() {
+                None => clonotype.first_nt = Some(nucleotide),
+                Some(first) if first != nucleotide.as_str() => {
+                    clonotype.convergent = true;
+                    clonotype.first_nt = None;
+                }
+                Some(_) => {}
+            }
+        }
+    }
 }
 
 fn repertoire_sample_summary(
@@ -1842,10 +1883,10 @@ fn repertoire_sample_summary(
     };
     let (private, longitudinal, public) = sharing;
     let convergent_reads = sample
-        .aa_to_nt
-        .iter()
-        .filter(|(_, nts)| nts.len() > 1)
-        .map(|(aa, _)| sample.aa_read_counts.get(aa).copied().unwrap_or(0.0))
+        .clonotypes
+        .values()
+        .filter(|clonotype| clonotype.convergent)
+        .map(|clonotype| clonotype.count)
         .sum::<f64>();
     CorrectedRepertoireSample {
         sample_id: sample.sample_id.clone(),
@@ -1883,6 +1924,45 @@ fn repertoire_summary_worker_count(sample_count: usize) -> usize {
         std::thread::available_parallelism()
             .map(|value| value.get().min(8).min(sample_count).max(1))
             .unwrap_or(1)
+    }
+}
+
+/// Release the large parsed repertoire working set with bounded parallelism.
+///
+/// TCR-beta projects can contain millions of clonotype/string allocations.
+/// Rust drops locals after evaluating the return expression, which previously
+/// meant the function emitted "analysis complete" and then appeared frozen
+/// while one thread destructed that working set.  Moving samples into a small
+/// number of independent buckets makes that cleanup explicit and lets the
+/// allocator reclaim independent sample maps concurrently.
+fn release_repertoire_working_set(samples: Vec<ParsedRepertoire>) {
+    if samples.is_empty() {
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        drop(samples);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let workers = std::thread::available_parallelism()
+            .map(|value| value.get().min(8).min(samples.len()).max(1))
+            .unwrap_or(1);
+        if workers == 1 || samples.len() < 8 {
+            drop(samples);
+            return;
+        }
+        let mut buckets = std::iter::repeat_with(Vec::new)
+            .take(workers)
+            .collect::<Vec<Vec<ParsedRepertoire>>>();
+        for (index, sample) in samples.into_iter().enumerate() {
+            buckets[index % workers].push(sample);
+        }
+        std::thread::scope(|scope| {
+            for bucket in buckets {
+                scope.spawn(move || drop(bucket));
+            }
+        });
     }
 }
 
@@ -2274,17 +2354,22 @@ where
         );
         (compositions, morisita, jaccard, dendrogram)
     };
-    progress(
-        1000,
-        1000,
-        &format!("{label}: corrected repertoire analysis complete"),
-    );
     if spec.subject_column.is_none() {
         warnings.push("No subject ID column was selected: public/private sharing is sample-based and PERMANOVA permutations are unrestricted. Select a patient/subject column for longitudinally aware results.".to_string());
     }
-    Ok(CorrectedRepertoireResult {
+    let files_used = model_samples.len();
+    let raw_clonotypes = model_samples
+        .iter()
+        .map(|sample| sample.clonotypes.len())
+        .sum::<usize>();
+    let raw_feature_entries = model_samples
+        .iter()
+        .flat_map(|sample| sample.feature_maps.values())
+        .map(|map| map.len())
+        .sum::<usize>();
+    let result = CorrectedRepertoireResult {
         modality: label.to_string(),
-        files_used: model_samples.len(),
+        files_used,
         matched_depth,
         rarefaction_reps: spec.rarefaction_reps,
         ambiguous_policy: spec.ambiguous_policy,
@@ -2295,7 +2380,27 @@ where
         jaccard,
         dendrogram,
         warnings,
-    })
+    };
+
+    // Do not report completion until the raw parsed working set has actually
+    // been released.  Previously the final callback happened before implicit
+    // local destruction, so a very large TCR-beta cleanup could look like a
+    // multi-hour post-completion hang.
+    progress(
+        960,
+        1000,
+        &format!(
+            "{label}: releasing parsed repertoire working set ({files_used} samples; {raw_clonotypes} clonotypes; {raw_feature_entries} composition entries; {} worker(s))",
+            repertoire_summary_worker_count(files_used)
+        ),
+    );
+    release_repertoire_working_set(model_samples);
+    progress(
+        1000,
+        1000,
+        &format!("{label}: corrected repertoire analysis complete"),
+    );
+    Ok(result)
 }
 
 pub fn run_corrected_isotype<F>(
@@ -2369,9 +2474,7 @@ where
             sample_id,
             group,
             counts: Vec::new(),
-            clonotype_aa: HashMap::new(),
-            aa_to_nt: HashMap::new(),
-            aa_read_counts: HashMap::new(),
+            clonotypes: HashMap::new(),
             feature_maps: BTreeMap::from([("Isotype".to_string(), feature_map)]),
             top_clone_fraction: f64::NAN,
             weighted_mean_cdr3_aa_length: f64::NAN,
@@ -2623,13 +2726,17 @@ fn repertoire_distance_matrices(samples: &[ParsedRepertoire]) -> (Vec<Vec<f64>>,
     let mut sums_sq = vec![0.0; n];
     let mut richness = vec![0usize; n];
     for (i, sample) in samples.iter().enumerate() {
-        let total = sample.clonotype_aa.values().sum::<f64>();
+        let total = sample
+            .clonotypes
+            .values()
+            .map(|clonotype| clonotype.count)
+            .sum::<f64>();
         if total <= 0.0 {
             continue;
         }
-        richness[i] = sample.clonotype_aa.len();
-        for (clono, count) in &sample.clonotype_aa {
-            let p = count / total;
+        richness[i] = sample.clonotypes.len();
+        for (clono, clonotype) in &sample.clonotypes {
+            let p = clonotype.count / total;
             sums_sq[i] += p * p;
             inverted.entry(clono.as_str()).or_default().push((i, p));
         }
@@ -2691,7 +2798,7 @@ fn sharing_fractions(
     let mut prevalence: HashMap<&str, (&str, bool, usize)> = HashMap::new();
     for (i, sample) in samples.iter().enumerate() {
         let subject = subjects[i].as_str();
-        for clono in sample.clonotype_aa.keys() {
+        for clono in sample.clonotypes.keys() {
             prevalence
                 .entry(clono.as_str())
                 .and_modify(|(first_subject, multiple_subjects, n_samples)| {
@@ -2707,14 +2814,19 @@ fn sharing_fractions(
         .iter()
         .enumerate()
         .map(|(i, sample)| {
-            let total = sample.clonotype_aa.values().sum::<f64>();
+            let total = sample
+                .clonotypes
+                .values()
+                .map(|clonotype| clonotype.count)
+                .sum::<f64>();
             if total <= 0.0 {
                 return (f64::NAN, f64::NAN, f64::NAN);
             }
             let mut private = 0.0;
             let mut longitudinal = 0.0;
             let mut public = 0.0;
-            for (clono, count) in &sample.clonotype_aa {
+            for (clono, clonotype) in &sample.clonotypes {
+                let count = clonotype.count;
                 if let Some((first_subject, multiple_subjects, n_samples)) =
                     prevalence.get(clono.as_str())
                 {
@@ -2763,9 +2875,7 @@ fn parse_repertoire_file(
     } {
         feature_maps.insert(family.to_string(), HashMap::new());
     }
-    let mut clonotype_aa = HashMap::new();
-    let mut aa_to_nt: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut aa_read_counts = HashMap::new();
+    let mut clonotypes: HashMap<String, ParsedClonotype> = HashMap::new();
     let mut top = 0.0_f64;
     let mut total = 0.0;
     let mut weighted_len = 0.0;
@@ -2828,14 +2938,11 @@ fn parse_repertoire_file(
         }
         if !cdr3.is_empty() && v_calls.len() == 1 && j_calls.len() == 1 {
             let aa_key = format!("{}|{}|{}", v_calls[0].0, j_calls[0].0, cdr3);
-            *clonotype_aa.entry(aa_key.clone()).or_insert(0.0) += count;
-            *aa_read_counts.entry(aa_key.clone()).or_insert(0.0) += count;
-            if let Some(idx) = nt_idx {
-                let nt = row.get(idx).map(cell_text).unwrap_or_default();
-                if !nt.is_empty() {
-                    aa_to_nt.entry(aa_key).or_default().insert(nt);
-                }
-            }
+            let nt = nt_idx
+                .and_then(|idx| row.get(idx))
+                .map(cell_text)
+                .filter(|value| !value.is_empty());
+            record_parsed_clonotype(&mut clonotypes, aa_key, count, nt);
         }
     }
     if total <= 0.0 {
@@ -2853,9 +2960,7 @@ fn parse_repertoire_file(
         sample_id: sample_id.to_string(),
         group: group.to_string(),
         counts,
-        clonotype_aa,
-        aa_to_nt,
-        aa_read_counts,
+        clonotypes,
         feature_maps,
         top_clone_fraction: top / total,
         weighted_mean_cdr3_aa_length: if weighted_len_den > 0.0 {
@@ -4123,25 +4228,89 @@ mod tests {
     }
 
     #[test]
+    fn compact_clonotype_tracking_preserves_convergence_semantics() {
+        let mut clonotypes = HashMap::new();
+        record_parsed_clonotype(
+            &mut clonotypes,
+            "TRBV1|TRBJ1|CASS".to_string(),
+            10.0,
+            Some("AAA".to_string()),
+        );
+        record_parsed_clonotype(
+            &mut clonotypes,
+            "TRBV1|TRBJ1|CASS".to_string(),
+            5.0,
+            Some("AAA".to_string()),
+        );
+        let clonotype = clonotypes.get("TRBV1|TRBJ1|CASS").unwrap();
+        assert_eq!(clonotype.count, 15.0);
+        assert!(!clonotype.convergent);
+
+        record_parsed_clonotype(
+            &mut clonotypes,
+            "TRBV1|TRBJ1|CASS".to_string(),
+            2.0,
+            Some("BBB".to_string()),
+        );
+        let clonotype = clonotypes.get("TRBV1|TRBJ1|CASS").unwrap();
+        assert_eq!(clonotype.count, 17.0);
+        assert!(clonotype.convergent);
+        assert!(clonotype.first_nt.is_none());
+
+        record_parsed_clonotype(&mut clonotypes, "TRBV2|TRBJ2|CASR".to_string(), 3.0, None);
+        let clonotype = clonotypes.get("TRBV2|TRBJ2|CASR").unwrap();
+        assert_eq!(clonotype.count, 3.0);
+        assert!(!clonotype.convergent);
+        assert!(clonotype.first_nt.is_none());
+    }
+
+    #[test]
+    fn repertoire_working_set_cleanup_accepts_owned_samples() {
+        let samples = (0..16)
+            .map(|i| {
+                let mut clonotypes = HashMap::new();
+                record_parsed_clonotype(
+                    &mut clonotypes,
+                    format!("V|J|CASS{i}"),
+                    1.0,
+                    Some(format!("NT{i}")),
+                );
+                ParsedRepertoire {
+                    sample_id: format!("S{i}"),
+                    group: "Case".to_string(),
+                    counts: vec![1.0],
+                    clonotypes,
+                    feature_maps: BTreeMap::new(),
+                    top_clone_fraction: 1.0,
+                    weighted_mean_cdr3_aa_length: 5.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        release_repertoire_working_set(samples);
+    }
+
+    #[test]
     fn parallel_repertoire_summary_matches_direct_sample_calculation() {
         let mut samples = Vec::new();
         let mut subjects = Vec::new();
         for i in 0..16 {
-            let mut clonotype_aa = HashMap::new();
-            clonotype_aa.insert(format!("CASS{i}A"), 100.0);
-            clonotype_aa.insert(format!("CASS{i}B"), 50.0);
-            let mut aa_to_nt = HashMap::new();
-            aa_to_nt.insert(
+            let mut clonotypes = HashMap::new();
+            clonotypes.insert(
                 format!("CASS{i}A"),
-                [format!("NT{i}A1"), format!("NT{i}A2")]
-                    .into_iter()
-                    .collect(),
+                ParsedClonotype {
+                    count: 100.0,
+                    first_nt: Some(format!("NT{i}A1")),
+                    convergent: true,
+                },
             );
-            aa_to_nt.insert(
+            clonotypes.insert(
                 format!("CASS{i}B"),
-                [format!("NT{i}B1")].into_iter().collect(),
+                ParsedClonotype {
+                    count: 50.0,
+                    first_nt: Some(format!("NT{i}B1")),
+                    convergent: false,
+                },
             );
-            let aa_read_counts = clonotype_aa.clone();
             samples.push(ParsedRepertoire {
                 sample_id: format!("S{i}"),
                 group: if i >= 8 {
@@ -4150,9 +4319,7 @@ mod tests {
                     "Control".into()
                 },
                 counts: vec![100.0, 50.0, 25.0, 10.0],
-                clonotype_aa,
-                aa_to_nt,
-                aa_read_counts,
+                clonotypes,
                 feature_maps: BTreeMap::new(),
                 top_clone_fraction: 100.0 / 185.0,
                 weighted_mean_cdr3_aa_length: 12.0,
