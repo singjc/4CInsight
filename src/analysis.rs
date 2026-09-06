@@ -594,7 +594,7 @@ pub fn write_unified_analysis_tables_with_progress<F>(
 where
     F: FnMut(usize, usize, &str),
 {
-    const STAGES: usize = 12;
+    const STAGES: usize = 14;
     progress(0, STAGES, "Preparing technical table export");
     let safe_name: String = run
         .primary
@@ -811,6 +811,11 @@ where
         }
     }
     progress(7, STAGES, "Technical tables: BCR isotype composition");
+    progress(
+        7,
+        STAGES,
+        "Technical tables: writing immune and pathway results",
+    );
     if let Some(result) = run.primary.immune.as_ref() {
         write_adjusted_tests(&outdir.join("immune_adjusted_tests.tsv"), &result.tests)?;
         if let Some(ordination) = result.pca.as_ref() {
@@ -829,38 +834,75 @@ where
     if let Some(result) = run.primary.pathway.as_ref() {
         write_pathway_ora(&outdir.join("pathway_ora.tsv"), result)?;
     }
-    progress(8, STAGES, "Technical tables: immune and pathway results");
-    if let Some(result) = run.exploratory_support.gene.as_ref() {
-        write_feature_tests(
-            &outdir.join("supporting_gene_tpm_direction_tests.tsv"),
-            &result.tests,
-        )?;
-    }
-    if let Some(result) = run.exploratory_support.transcript.as_ref() {
-        write_feature_tests(
-            &outdir.join("supporting_transcript_tpm_direction_tests.tsv"),
-            &result.tests,
-        )?;
-    }
-    if let Some(qc) = run.qc_snapshot.as_ref() {
-        write_outlier_filter_snapshot_csv(&outdir.join("sample_outlier_qc.csv"), qc)?;
-        write_outlier_filter_modalities_tsv(&outdir.join("sample_outlier_qc_modalities.tsv"), qc)?;
-        write_outlier_filter_summary(&outdir.join("sample_outlier_qc_summary.txt"), qc)?;
+    progress(
+        8,
+        STAGES,
+        "Technical tables: immune and pathway results complete",
+    );
+
+    let supporting_gene = run.exploratory_support.gene.as_ref();
+    let supporting_transcript = run.exploratory_support.transcript.as_ref();
+    if supporting_gene.is_some() || supporting_transcript.is_some() {
+        progress(
+            8,
+            STAGES,
+            &format!(
+                "Technical tables: writing supporting direction checks (gene {} rows; transcript {} rows)",
+                supporting_gene.map_or(0, |result| result.tests.len()),
+                supporting_transcript.map_or(0, |result| result.tests.len())
+            ),
+        );
+        let gene_path = outdir.join("supporting_gene_tpm_direction_tests.tsv");
+        let transcript_path = outdir.join("supporting_transcript_tpm_direction_tests.tsv");
+        let (gene_export, transcript_export) = std::thread::scope(|scope| {
+            let gene = supporting_gene
+                .map(|result| scope.spawn(|| write_feature_tests(&gene_path, &result.tests)));
+            let transcript = supporting_transcript
+                .map(|result| scope.spawn(|| write_feature_tests(&transcript_path, &result.tests)));
+            (
+                gene.map(|worker| worker.join()),
+                transcript.map(|worker| worker.join()),
+            )
+        });
+        if let Some(result) = gene_export {
+            result.map_err(|_| anyhow!("supporting gene direction export worker panicked"))??;
+        }
+        if let Some(result) = transcript_export {
+            result
+                .map_err(|_| anyhow!("supporting transcript direction export worker panicked"))??;
+        }
     }
     progress(
         9,
         STAGES,
-        "Technical tables: supporting expression and QC provenance",
+        "Technical tables: supporting expression direction checks complete",
     );
+
+    if let Some(qc) = run.qc_snapshot.as_ref() {
+        progress(9, STAGES, "Technical tables: writing QC provenance");
+        write_outlier_filter_snapshot_csv(&outdir.join("sample_outlier_qc.csv"), qc)?;
+        write_outlier_filter_modalities_tsv(&outdir.join("sample_outlier_qc_modalities.tsv"), qc)?;
+        write_outlier_filter_summary(&outdir.join("sample_outlier_qc_summary.txt"), qc)?;
+    }
+    progress(10, STAGES, "Technical tables: QC provenance complete");
 
     let candidate_dir = outdir.join("key_findings");
     write_key_findings_tables(&candidate_dir, &run.candidates)?;
-    progress(10, STAGES, "Technical tables: candidate prioritization");
+    progress(11, STAGES, "Technical tables: candidate prioritization");
 
     if let Some(diagnostics) = run.diagnostics.as_ref() {
+        progress(
+            11,
+            STAGES,
+            "Technical tables: writing PBMC/confounding diagnostics",
+        );
         write_pbmc_diagnostics_tables(&outdir.join("pbmc_confounding_diagnostics"), diagnostics)?;
     }
-    progress(11, STAGES, "Technical tables: PBMC/confounding diagnostics");
+    progress(
+        12,
+        STAGES,
+        "Technical tables: PBMC/confounding diagnostics complete",
+    );
 
     let comparison_definition = match &run.cohort.comparison_definition {
         CohortComparisonDefinition::Preset(preset) => {
@@ -926,6 +968,7 @@ where
         }
     }
     fs::write(outdir.join("analysis_summary.txt"), summary)?;
+    progress(13, STAGES, "Technical tables: analysis summary written");
     progress(STAGES, STAGES, "Technical table materialization complete");
     Ok(outdir)
 }

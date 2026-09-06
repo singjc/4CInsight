@@ -5,6 +5,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow, bail};
 use calamine::{Data, Reader, Xlsx, open_workbook};
 use csv::ReaderBuilder;
+use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -2033,8 +2034,30 @@ fn feature_result_order(a: &FeatureTestResult, b: &FeatureTestResult) -> Orderin
         .then_with(|| a.feature.cmp(&b.feature))
 }
 
+#[derive(Serialize)]
+struct FeatureTestExportRow<'a> {
+    feature: &'a str,
+    secondary_id: &'a str,
+    n_case: usize,
+    n_control: usize,
+    mean_case: f64,
+    mean_control: f64,
+    median_case: f64,
+    median_control: f64,
+    effect: f64,
+    cliffs_delta: f64,
+    p_value: f64,
+    q_value: f64,
+    detection_case: Option<f64>,
+    detection_control: Option<f64>,
+}
+
 pub fn write_feature_tests(path: &Path, tests: &[FeatureTestResult]) -> Result<()> {
-    let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     writer.write_record([
         "feature",
         "secondary_id",
@@ -2052,24 +2075,22 @@ pub fn write_feature_tests(path: &Path, tests: &[FeatureTestResult]) -> Result<(
         "detection_control",
     ])?;
     for r in tests {
-        writer.write_record([
-            r.feature.clone(),
-            r.secondary_id.clone(),
-            r.n_case.to_string(),
-            r.n_control.to_string(),
-            r.mean_case.to_string(),
-            r.mean_control.to_string(),
-            r.median_case.to_string(),
-            r.median_control.to_string(),
-            r.effect.to_string(),
-            r.cliffs_delta.to_string(),
-            r.p_value.to_string(),
-            r.q_value.to_string(),
-            r.detection_case.map(|x| x.to_string()).unwrap_or_default(),
-            r.detection_control
-                .map(|x| x.to_string())
-                .unwrap_or_default(),
-        ])?;
+        writer.serialize(FeatureTestExportRow {
+            feature: &r.feature,
+            secondary_id: &r.secondary_id,
+            n_case: r.n_case,
+            n_control: r.n_control,
+            mean_case: r.mean_case,
+            mean_control: r.mean_control,
+            median_case: r.median_case,
+            median_control: r.median_control,
+            effect: r.effect,
+            cliffs_delta: r.cliffs_delta,
+            p_value: r.p_value,
+            q_value: r.q_value,
+            detection_case: r.detection_case,
+            detection_control: r.detection_control,
+        })?;
     }
     writer.flush()?;
     Ok(())
