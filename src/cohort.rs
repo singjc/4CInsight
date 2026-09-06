@@ -2097,7 +2097,11 @@ pub fn write_feature_tests(path: &Path, tests: &[FeatureTestResult]) -> Result<(
 }
 
 pub fn write_bcr_sample_summaries(path: &Path, rows: &[BcrSampleSummary]) -> Result<()> {
-    let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     writer.write_record([
         "sample_id",
         "group",
@@ -2111,40 +2115,43 @@ pub fn write_bcr_sample_summaries(path: &Path, rows: &[BcrSampleSummary]) -> Res
         "weighted_mean_cdr3_aa_length",
     ])?;
     for r in rows {
-        writer.write_record([
-            r.sample_id.clone(),
-            r.group.clone(),
-            r.total_clone_count.to_string(),
-            r.unique_clones.to_string(),
-            r.shannon.to_string(),
-            r.simpson.to_string(),
-            r.clonality.to_string(),
-            r.effective_n.to_string(),
-            r.top_clone_fraction.to_string(),
-            r.weighted_mean_cdr3_aa_length.to_string(),
-        ])?;
+        writer.serialize((
+            &r.sample_id,
+            &r.group,
+            r.total_clone_count,
+            r.unique_clones,
+            r.shannon,
+            r.simpson,
+            r.clonality,
+            r.effective_n,
+            r.top_clone_fraction,
+            r.weighted_mean_cdr3_aa_length,
+        ))?;
     }
     writer.flush()?;
     Ok(())
 }
 
 pub fn write_bcr_isotype_values(path: &Path, rows: &[BcrIsotypeSampleValue]) -> Result<()> {
-    let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     writer.write_record(["sample_id", "group", "isotype", "fraction"])?;
     for r in rows {
-        writer.write_record([
-            r.sample_id.clone(),
-            r.group.clone(),
-            r.isotype.clone(),
-            r.fraction.to_string(),
-        ])?;
+        writer.serialize((&r.sample_id, &r.group, &r.isotype, r.fraction))?;
     }
     writer.flush()?;
     Ok(())
 }
 
 pub fn write_tcr_sample_summaries(path: &Path, rows: &[TcrSampleSummary]) -> Result<()> {
-    let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     writer.write_record([
         "sample_id",
         "group",
@@ -2159,35 +2166,33 @@ pub fn write_tcr_sample_summaries(path: &Path, rows: &[TcrSampleSummary]) -> Res
         "weighted_mean_cdr3_aa_length",
     ])?;
     for r in rows {
-        writer.write_record([
-            r.sample_id.clone(),
-            r.group.clone(),
-            r.chain.clone(),
-            r.total_clone_count.to_string(),
-            r.unique_clones.to_string(),
-            r.shannon.to_string(),
-            r.simpson.to_string(),
-            r.clonality.to_string(),
-            r.effective_n.to_string(),
-            r.top_clone_fraction.to_string(),
-            r.weighted_mean_cdr3_aa_length.to_string(),
-        ])?;
+        writer.serialize((
+            &r.sample_id,
+            &r.group,
+            &r.chain,
+            r.total_clone_count,
+            r.unique_clones,
+            r.shannon,
+            r.simpson,
+            r.clonality,
+            r.effective_n,
+            r.top_clone_fraction,
+            r.weighted_mean_cdr3_aa_length,
+        ))?;
     }
     writer.flush()?;
     Ok(())
 }
 
 pub fn write_immune_values(path: &Path, rows: &[ImmuneSampleValue]) -> Result<()> {
-    let mut writer = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     writer.write_record(["sample_id", "group", "cell_type", "lineage", "ssgsea_score"])?;
     for r in rows {
-        writer.write_record([
-            r.sample_id.clone(),
-            r.group.clone(),
-            r.cell_type.clone(),
-            r.lineage.clone(),
-            r.score.to_string(),
-        ])?;
+        writer.serialize((&r.sample_id, &r.group, &r.cell_type, &r.lineage, r.score))?;
     }
     writer.flush()?;
     Ok(())
@@ -2200,6 +2205,8 @@ fn write_mapping_audit_delimited(
 ) -> Result<()> {
     let mut writer = csv::WriterBuilder::new()
         .delimiter(delimiter)
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
         .from_path(path)?;
     writer.write_record([
         "sample_id",
@@ -2223,7 +2230,7 @@ fn write_mapping_audit_delimited(
             MappingStatus::Ambiguous => "ambiguous",
             MappingStatus::MetadataOnly => "metadata_only",
         };
-        let count = |m| r.counts.get(&m).copied().unwrap_or(0).to_string();
+        let count = |m| r.counts.get(&m).copied().unwrap_or(0);
         let duplicates = r
             .counts
             .iter()
@@ -2231,14 +2238,12 @@ fn write_mapping_audit_delimited(
             .map(|(m, n)| format!("{}x{}", m.display_name(), n))
             .collect::<Vec<_>>()
             .join("; ");
-        writer.write_record([
-            r.sample_id.clone(),
-            status.to_string(),
-            r.metadata_row
-                .map(|idx| (idx + 2).to_string())
-                .unwrap_or_default(),
-            r.phenotype.clone(),
-            r.hyp.clone(),
+        writer.serialize((
+            &r.sample_id,
+            status,
+            r.metadata_row.map(|idx| idx + 2),
+            &r.phenotype,
+            &r.hyp,
             count(CohortModality::GeneExpression),
             count(CohortModality::TranscriptExpression),
             count(CohortModality::Bcr),
@@ -2246,8 +2251,8 @@ fn write_mapping_audit_delimited(
             count(CohortModality::TcrAlpha),
             count(CohortModality::TcrBeta),
             count(CohortModality::ImmuneInfiltrate),
-            duplicates,
-        ])?;
+            &duplicates,
+        ))?;
     }
     writer.flush()?;
     Ok(())

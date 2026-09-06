@@ -1330,13 +1330,77 @@ fn build_longitudinal_qc(sample_qc: &[PbmcSampleQcRow]) -> Vec<LongitudinalQcRow
     out
 }
 
+#[derive(serde::Serialize)]
+struct PbmcSampleQcExportRow<'a> {
+    sample_id: &'a str,
+    comparison_group: &'a str,
+    phenotype: &'a str,
+    hyp: &'a str,
+    subject: &'a str,
+    batch: &'a str,
+    family: &'a str,
+    library_raw_count: f64,
+    detected_genes: usize,
+    genes_ge5: usize,
+    genes_ge10: usize,
+    pca1: f64,
+    pca2: f64,
+    transcriptome_outlier_score: f64,
+    immune_pc1: f64,
+    immune_pc2: f64,
+    immune_outlier_score: f64,
+    monocyte_lymphoid_signature: f64,
+    known_non_pbmc: bool,
+    suspect: bool,
+    auto_expression_outlier: bool,
+    auto_immune_outlier: bool,
+    sensitivity_excluded: bool,
+    flags: String,
+}
+
+#[derive(serde::Serialize)]
+struct CandidateRobustnessExportRow<'a> {
+    gene: &'a str,
+    gene_id: &'a str,
+    baseline_log2fc: f64,
+    baseline_q: f64,
+    regularized_log2fc: f64,
+    case_median_raw: f64,
+    control_median_raw: f64,
+    case_median_tpm: f64,
+    control_median_tpm: f64,
+    detected_case: f64,
+    detected_control: f64,
+    count_ge5_case: f64,
+    count_ge5_control: f64,
+    count_ge10_case: f64,
+    count_ge10_control: f64,
+    top2_contribution_case: f64,
+    top2_contribution_control: f64,
+    loo_log2fc_min: f64,
+    loo_log2fc_max: f64,
+    leave_level_log2fc_min: f64,
+    leave_level_log2fc_max: f64,
+    qc_restricted_log2fc: f64,
+    qc_restricted_q: f64,
+    immune_adjusted_log2fc: f64,
+    immune_adjusted_q: f64,
+    source_effect_log2fc: f64,
+    source_effect_q: f64,
+    classification: &'a str,
+    flags: String,
+}
+
 pub fn write_pbmc_diagnostics_tables(
     output_dir: &Path,
     result: &PbmcDiagnosticsResult,
 ) -> Result<PathBuf> {
     fs::create_dir_all(output_dir)?;
     {
-        let mut w = WriterBuilder::new().from_path(output_dir.join("pbmc_sample_qc.csv"))?;
+        let mut w = WriterBuilder::new()
+            .has_headers(false)
+            .buffer_capacity(1024 * 1024)
+            .from_path(output_dir.join("pbmc_sample_qc.csv"))?;
         w.write_record([
             "sample_id",
             "comparison_group",
@@ -1364,37 +1428,40 @@ pub fn write_pbmc_diagnostics_tables(
             "flags",
         ])?;
         for r in &result.sample_qc {
-            w.write_record([
-                r.sample_id.clone(),
-                r.comparison_group.clone(),
-                r.phenotype.clone(),
-                r.hyp.clone(),
-                r.subject.clone(),
-                r.batch.clone(),
-                r.family.clone(),
-                r.library_raw_count.to_string(),
-                r.detected_genes.to_string(),
-                r.genes_ge5.to_string(),
-                r.genes_ge10.to_string(),
-                r.pca1.to_string(),
-                r.pca2.to_string(),
-                r.transcriptome_outlier_score.to_string(),
-                r.immune_pc1.to_string(),
-                r.immune_pc2.to_string(),
-                r.immune_outlier_score.to_string(),
-                r.monocyte_lymphoid_signature.to_string(),
-                r.known_non_pbmc.to_string(),
-                r.suspect.to_string(),
-                r.auto_expression_outlier.to_string(),
-                r.auto_immune_outlier.to_string(),
-                r.sensitivity_excluded.to_string(),
-                r.flags.join("; "),
-            ])?;
+            w.serialize(PbmcSampleQcExportRow {
+                sample_id: &r.sample_id,
+                comparison_group: &r.comparison_group,
+                phenotype: &r.phenotype,
+                hyp: &r.hyp,
+                subject: &r.subject,
+                batch: &r.batch,
+                family: &r.family,
+                library_raw_count: r.library_raw_count,
+                detected_genes: r.detected_genes,
+                genes_ge5: r.genes_ge5,
+                genes_ge10: r.genes_ge10,
+                pca1: r.pca1,
+                pca2: r.pca2,
+                transcriptome_outlier_score: r.transcriptome_outlier_score,
+                immune_pc1: r.immune_pc1,
+                immune_pc2: r.immune_pc2,
+                immune_outlier_score: r.immune_outlier_score,
+                monocyte_lymphoid_signature: r.monocyte_lymphoid_signature,
+                known_non_pbmc: r.known_non_pbmc,
+                suspect: r.suspect,
+                auto_expression_outlier: r.auto_expression_outlier,
+                auto_immune_outlier: r.auto_immune_outlier,
+                sensitivity_excluded: r.sensitivity_excluded,
+                flags: r.flags.join("; "),
+            })?;
         }
         w.flush()?;
     }
     {
-        let mut w = WriterBuilder::new().from_path(output_dir.join("candidate_robustness.csv"))?;
+        let mut w = WriterBuilder::new()
+            .has_headers(false)
+            .buffer_capacity(1024 * 1024)
+            .from_path(output_dir.join("candidate_robustness.csv"))?;
         w.write_record([
             "gene",
             "gene_id",
@@ -1427,43 +1494,45 @@ pub fn write_pbmc_diagnostics_tables(
             "flags",
         ])?;
         for r in &result.candidate_stability {
-            w.write_record([
-                r.gene.clone(),
-                r.gene_id.clone(),
-                r.baseline_log2fc.to_string(),
-                r.baseline_q.to_string(),
-                r.regularized_log2fc.to_string(),
-                r.case_median_raw.to_string(),
-                r.control_median_raw.to_string(),
-                r.case_median_tpm.to_string(),
-                r.control_median_tpm.to_string(),
-                r.detected_case.to_string(),
-                r.detected_control.to_string(),
-                r.count_ge5_case.to_string(),
-                r.count_ge5_control.to_string(),
-                r.count_ge10_case.to_string(),
-                r.count_ge10_control.to_string(),
-                r.top2_contribution_case.to_string(),
-                r.top2_contribution_control.to_string(),
-                r.loo_log2fc_min.to_string(),
-                r.loo_log2fc_max.to_string(),
-                r.leave_level_log2fc_min.to_string(),
-                r.leave_level_log2fc_max.to_string(),
-                r.qc_restricted_log2fc.to_string(),
-                r.qc_restricted_q.to_string(),
-                r.immune_adjusted_log2fc.to_string(),
-                r.immune_adjusted_q.to_string(),
-                r.source_effect_log2fc.to_string(),
-                r.source_effect_q.to_string(),
-                r.classification.clone(),
-                r.flags.join("; "),
-            ])?;
+            w.serialize(CandidateRobustnessExportRow {
+                gene: &r.gene,
+                gene_id: &r.gene_id,
+                baseline_log2fc: r.baseline_log2fc,
+                baseline_q: r.baseline_q,
+                regularized_log2fc: r.regularized_log2fc,
+                case_median_raw: r.case_median_raw,
+                control_median_raw: r.control_median_raw,
+                case_median_tpm: r.case_median_tpm,
+                control_median_tpm: r.control_median_tpm,
+                detected_case: r.detected_case,
+                detected_control: r.detected_control,
+                count_ge5_case: r.count_ge5_case,
+                count_ge5_control: r.count_ge5_control,
+                count_ge10_case: r.count_ge10_case,
+                count_ge10_control: r.count_ge10_control,
+                top2_contribution_case: r.top2_contribution_case,
+                top2_contribution_control: r.top2_contribution_control,
+                loo_log2fc_min: r.loo_log2fc_min,
+                loo_log2fc_max: r.loo_log2fc_max,
+                leave_level_log2fc_min: r.leave_level_log2fc_min,
+                leave_level_log2fc_max: r.leave_level_log2fc_max,
+                qc_restricted_log2fc: r.qc_restricted_log2fc,
+                qc_restricted_q: r.qc_restricted_q,
+                immune_adjusted_log2fc: r.immune_adjusted_log2fc,
+                immune_adjusted_q: r.immune_adjusted_q,
+                source_effect_log2fc: r.source_effect_log2fc,
+                source_effect_q: r.source_effect_q,
+                classification: &r.classification,
+                flags: r.flags.join("; "),
+            })?;
         }
         w.flush()?;
     }
     {
-        let mut w =
-            WriterBuilder::new().from_path(output_dir.join("candidate_sample_values.csv"))?;
+        let mut w = WriterBuilder::new()
+            .has_headers(false)
+            .buffer_capacity(1024 * 1024)
+            .from_path(output_dir.join("candidate_sample_values.csv"))?;
         w.write_record([
             "gene",
             "sample_id",
@@ -1479,25 +1548,28 @@ pub fn write_pbmc_diagnostics_tables(
         ])?;
         for r in &result.candidate_stability {
             for p in &r.sample_points {
-                w.write_record([
-                    r.gene.clone(),
-                    p.sample_id.clone(),
-                    p.group.clone(),
-                    p.raw_count.to_string(),
-                    p.tpm.to_string(),
-                    p.suspect.to_string(),
-                    p.sensitivity_excluded.to_string(),
-                    p.subject.clone(),
-                    p.batch.clone(),
-                    p.family.clone(),
-                    p.sensitivity_level.clone(),
-                ])?;
+                w.serialize((
+                    &r.gene,
+                    &p.sample_id,
+                    &p.group,
+                    p.raw_count,
+                    p.tpm,
+                    p.suspect,
+                    p.sensitivity_excluded,
+                    &p.subject,
+                    &p.batch,
+                    &p.family,
+                    &p.sensitivity_level,
+                ))?;
             }
         }
         w.flush()?;
     }
     {
-        let mut w = WriterBuilder::new().from_path(output_dir.join("longitudinal_qc.csv"))?;
+        let mut w = WriterBuilder::new()
+            .has_headers(false)
+            .buffer_capacity(1024 * 1024)
+            .from_path(output_dir.join("longitudinal_qc.csv"))?;
         w.write_record([
             "subject",
             "n_samples",
@@ -1507,40 +1579,58 @@ pub fn write_pbmc_diagnostics_tables(
             "flagged_samples",
         ])?;
         for r in &result.longitudinal_qc {
-            w.write_record([
-                r.subject.clone(),
-                r.n_samples.to_string(),
-                r.max_pca_distance.to_string(),
-                r.samples.clone(),
-                r.batches.clone(),
-                r.flagged_samples.clone(),
-            ])?;
+            w.serialize((
+                &r.subject,
+                r.n_samples,
+                r.max_pca_distance,
+                &r.samples,
+                &r.batches,
+                &r.flagged_samples,
+            ))?;
         }
         w.flush()?;
     }
     if let Some(pca) = &result.pca {
         write_ordination(&output_dir.join("pbmc_whole_transcriptome_pca.tsv"), pca)?;
     }
-    if let Some(r) = &result.source_effect {
-        write_feature_tests(
-            &output_dir.join("suspect_vs_ordinary_expression.tsv"),
-            &r.tests,
-        )?;
-    }
-    if let Some(r) = &result.baseline_gene {
-        write_adjusted_tests(
-            &output_dir.join("baseline_corrected_gene_tests.tsv"),
-            &r.tests,
-        )?;
-    }
-    if let Some(r) = &result.qc_restricted_gene {
-        write_adjusted_tests(&output_dir.join("qc_restricted_gene_tests.tsv"), &r.tests)?;
-    }
-    if let Some(r) = &result.immune_adjusted_gene {
-        write_adjusted_tests(
-            &output_dir.join("immune_pc_adjusted_gene_tests.tsv"),
-            &r.tests,
-        )?;
+    let source_effect_path = output_dir.join("suspect_vs_ordinary_expression.tsv");
+    let baseline_path = output_dir.join("baseline_corrected_gene_tests.tsv");
+    let restricted_path = output_dir.join("qc_restricted_gene_tests.tsv");
+    let immune_adjusted_path = output_dir.join("immune_pc_adjusted_gene_tests.tsv");
+    let (source_export, baseline_export, restricted_export, immune_export) =
+        std::thread::scope(|scope| {
+            let source_export = result
+                .source_effect
+                .as_ref()
+                .map(|r| scope.spawn(|| write_feature_tests(&source_effect_path, &r.tests)));
+            let baseline_export = result
+                .baseline_gene
+                .as_ref()
+                .map(|r| scope.spawn(|| write_adjusted_tests(&baseline_path, &r.tests)));
+            let restricted_export = result
+                .qc_restricted_gene
+                .as_ref()
+                .map(|r| scope.spawn(|| write_adjusted_tests(&restricted_path, &r.tests)));
+            let immune_export = result
+                .immune_adjusted_gene
+                .as_ref()
+                .map(|r| scope.spawn(|| write_adjusted_tests(&immune_adjusted_path, &r.tests)));
+            (
+                source_export.map(|worker| worker.join()),
+                baseline_export.map(|worker| worker.join()),
+                restricted_export.map(|worker| worker.join()),
+                immune_export.map(|worker| worker.join()),
+            )
+        });
+    for (label, export) in [
+        ("PBMC source-effect", source_export),
+        ("PBMC baseline gene", baseline_export),
+        ("PBMC QC-restricted gene", restricted_export),
+        ("PBMC immune-adjusted gene", immune_export),
+    ] {
+        if let Some(export) = export {
+            export.map_err(|_| anyhow::anyhow!("{label} export worker panicked"))??;
+        }
     }
     fs::write(
         output_dir.join("sensitivity_excluded_samples.txt"),

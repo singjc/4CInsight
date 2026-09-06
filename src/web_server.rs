@@ -10,8 +10,8 @@
 use crate::{
     analysis::{
         CohortAnalysisSettingsSnapshot, CohortDefinitionSnapshot, CohortModalitySelection,
-        UnifiedCohortAnalysisRun, run_unified_cohort_analysis,
-        write_unified_analysis_tables_with_progress,
+        TECHNICAL_EXPORT_MANIFEST_NAME, TechnicalExportManifest, UnifiedCohortAnalysisRun,
+        run_unified_cohort_analysis, write_unified_analysis_tables_with_progress,
     },
     cohort::{
         CohortComparison, CohortComparisonDefinition, CohortModality, DetectedCohortFile,
@@ -3999,19 +3999,23 @@ where
         progress(scaled, 1000, message);
     }) {
         Ok(table_root) => {
+            let precomputed_hashes = match load_technical_export_hashes(&table_root) {
+                Ok(hashes) => hashes,
+                Err(error) => {
+                    warnings.push(format!(
+                        "Could not load precomputed technical-export hashes; artifact retention will fall back to checksum reads: {error:#}"
+                    ));
+                    BTreeMap::new()
+                }
+            };
             let mut files = Vec::new();
             collect_regular_files(&table_root, &mut files)?;
             files.sort();
             let mut pending = Vec::new();
             for path in files {
                 let relative = path.strip_prefix(&table_root).unwrap_or(&path);
-                let artifact_name = format!(
-                    "tables__{}",
-                    relative
-                        .to_string_lossy()
-                        .replace('/', "__")
-                        .replace('\\', "__")
-                );
+                let relative_key = relative.to_string_lossy().replace('\\', "/");
+                let artifact_name = format!("tables__{}", relative_key.replace('/', "__"));
                 let metadata = std::fs::metadata(&path)?;
                 if metadata.len() > MAX_JOB_ARTIFACT_BYTES || metadata.len() > *artifact_budget {
                     warnings.push(format!(
@@ -4020,22 +4024,37 @@ where
                     ));
                     continue;
                 }
+                let precomputed_sha256 = precomputed_hashes.get(&relative_key).and_then(|entry| {
+                    if entry.byte_size == metadata.len()
+                        && entry.sha256.len() == 64
+                        && hex::decode(&entry.sha256).is_ok()
+                    {
+                        Some(entry.sha256.clone())
+                    } else {
+                        None
+                    }
+                });
                 *artifact_budget = artifact_budget.saturating_sub(metadata.len());
                 pending.push(PendingArtifactFile {
                     source_path: path.clone(),
                     name: artifact_name,
                     media_type: artifact_media_type(&path).to_string(),
                     byte_size: metadata.len(),
+                    precomputed_sha256,
                 });
             }
 
             let retained_count = pending.len();
             let retained_bytes = pending.iter().map(|item| item.byte_size).sum::<u64>();
+            let prehashed_count = pending
+                .iter()
+                .filter(|item| item.precomputed_sha256.is_some())
+                .count();
             progress(
                 880,
                 1000,
                 &format!(
-                    "Retaining {retained_count} native technical table artifact(s) ({})",
+                    "Retaining {retained_count} native technical table artifact(s) ({}) · {prehashed_count}/{retained_count} already SHA-256 hashed during serialization",
                     format_binary_bytes(retained_bytes)
                 ),
             );
@@ -4063,6 +4082,30 @@ where
     }
     progress(1000, 1000, "Unified reports and technical tables retained");
     Ok(())
+}
+
+fn load_technical_export_hashes(
+    table_root: &FsPath,
+) -> Result<BTreeMap<String, crate::analysis::TechnicalExportManifestEntry>> {
+    let manifest_path = table_root.join(TECHNICAL_EXPORT_MANIFEST_NAME);
+    if !manifest_path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let bytes = std::fs::read(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest: TechnicalExportManifest = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    if manifest.schema_version != 1 {
+        bail!(
+            "unsupported technical-export manifest schema {}",
+            manifest.schema_version
+        );
+    }
+    Ok(manifest
+        .files
+        .into_iter()
+        .map(|entry| (entry.relative_path.clone(), entry))
+        .collect())
 }
 
 fn collect_regular_files(root: &FsPath, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -4170,6 +4213,7 @@ struct PendingArtifactFile {
     name: String,
     media_type: String,
     byte_size: u64,
+    precomputed_sha256: Option<String>,
 }
 
 #[derive(Debug)]
@@ -4180,6 +4224,7 @@ struct MovedArtifactFile {
     name: String,
     media_type: String,
     byte_size: u64,
+    precomputed_sha256: Option<String>,
 }
 
 #[derive(Debug)]
@@ -4241,6 +4286,7 @@ where
             name: item.name,
             media_type: item.media_type,
             byte_size: item.byte_size,
+            precomputed_sha256: item.precomputed_sha256,
         });
     }
 
@@ -4301,9 +4347,14 @@ where
                         completed,
                         total,
                         &format!(
-                            "checksumming {} file(s), including {}",
+                            "finalizing {} file(s), including {}{}",
                             active.len(),
-                            moved[index].name
+                            moved[index].name,
+                            if moved[index].precomputed_sha256.is_some() {
+                                " (prehashed during serialization)"
+                            } else {
+                                " (checksumming)"
+                            }
                         ),
                         active_bytes,
                     );
@@ -4335,7 +4386,11 @@ where
 }
 
 fn finalize_moved_artifact(item: &MovedArtifactFile) -> Result<JobArtifactSummary> {
-    let sha256 = sha256_file_sync(&item.data_path)?;
+    let sha256 = if let Some(precomputed) = item.precomputed_sha256.as_ref() {
+        precomputed.clone()
+    } else {
+        sha256_file_sync(&item.data_path)?
+    };
     let record = StoredJobArtifactRecord {
         schema_version: 1,
         artifact_id: item.artifact_id,
@@ -5481,12 +5536,14 @@ mod tests {
                 .map(|offset| ((offset + index * 31) % 251) as u8)
                 .collect::<Vec<_>>();
             std::fs::write(&path, &bytes).unwrap();
+            let precomputed_sha256 = (index % 2 == 0).then(|| hex::encode(Sha256::digest(&bytes)));
             expected.push((name.clone(), bytes));
             pending.push(PendingArtifactFile {
                 source_path: path,
                 name,
                 media_type: "text/tab-separated-values; charset=utf-8".to_string(),
                 byte_size: size as u64,
+                precomputed_sha256,
             });
         }
 

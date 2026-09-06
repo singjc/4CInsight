@@ -3560,7 +3560,11 @@ pub fn write_adjusted_tests(path: &Path, tests: &[AdjustedFeatureResult]) -> Res
 }
 
 pub fn write_pathway_ora(path: &Path, result: &CorrectedPathwayResult) -> Result<()> {
-    let mut w = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    let mut w = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     w.write_record([
         "pathway",
         "description",
@@ -3572,16 +3576,16 @@ pub fn write_pathway_ora(path: &Path, result: &CorrectedPathwayResult) -> Result
         "overlap_genes",
     ])?;
     for r in &result.tests {
-        w.write_record([
-            r.pathway.clone(),
-            r.description.clone(),
-            r.measured_set_size.to_string(),
-            r.overlap.to_string(),
-            r.odds_ratio.to_string(),
-            r.p_value.to_string(),
-            r.q_value.to_string(),
-            r.overlap_genes.clone(),
-        ])?;
+        w.serialize((
+            &r.pathway,
+            &r.description,
+            r.measured_set_size,
+            r.overlap,
+            r.odds_ratio,
+            r.p_value,
+            r.q_value,
+            &r.overlap_genes,
+        ))?;
     }
     w.flush()?;
     Ok(())
@@ -3615,23 +3619,25 @@ pub fn write_dtu_gene_tests(path: &Path, tests: &[DtuGeneResult]) -> Result<()> 
 }
 
 pub fn write_ordination(path: &Path, ord: &OrdinationResult) -> Result<()> {
-    let mut w = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    let mut w = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     w.write_record(["sample_id", "group", "subject", "axis1", "axis2"])?;
     for p in &ord.points {
-        w.write_record(vec![
-            p.sample_id.clone(),
-            p.group.clone(),
-            p.subject.clone(),
-            p.x.to_string(),
-            p.y.to_string(),
-        ])?;
+        w.serialize((&p.sample_id, &p.group, &p.subject, p.x, p.y))?;
     }
     w.flush()?;
     Ok(())
 }
 
 pub fn write_dendrogram(path: &Path, tree: &DendrogramResult) -> Result<()> {
-    let mut w = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    let mut w = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     w.write_record([
         "leaf_order",
         "sample_id",
@@ -3641,14 +3647,14 @@ pub fn write_dendrogram(path: &Path, tree: &DendrogramResult) -> Result<()> {
         "distance_label",
     ])?;
     for (i, leaf) in tree.leaves.iter().enumerate() {
-        w.write_record([
-            (i + 1).to_string(),
-            leaf.sample_id.clone(),
-            leaf.group.clone(),
-            leaf.subject.clone(),
-            tree.linkage.clone(),
-            tree.distance_label.clone(),
-        ])?;
+        w.serialize((
+            i + 1,
+            &leaf.sample_id,
+            &leaf.group,
+            &leaf.subject,
+            &tree.linkage,
+            &tree.distance_label,
+        ))?;
     }
     w.flush()?;
     Ok(())
@@ -3658,7 +3664,11 @@ pub fn write_corrected_repertoire_samples(
     path: &Path,
     rows: &[CorrectedRepertoireSample],
 ) -> Result<()> {
-    let mut w = csv::WriterBuilder::new().delimiter(b'\t').from_path(path)?;
+    let mut w = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(path)?;
     w.write_record([
         "sample_id",
         "group",
@@ -3677,23 +3687,23 @@ pub fn write_corrected_repertoire_samples(
         "convergent_read_fraction",
     ])?;
     for r in rows {
-        w.write_record(vec![
-            r.sample_id.clone(),
-            r.group.clone(),
-            r.subject.clone(),
-            r.total_clone_count.to_string(),
-            r.observed_richness.to_string(),
-            r.shannon.to_string(),
-            r.clonality.to_string(),
-            r.rarefied_richness.to_string(),
-            r.rarefied_shannon.to_string(),
-            r.top_clone_fraction.to_string(),
-            r.weighted_mean_cdr3_aa_length.to_string(),
-            r.private_fraction.to_string(),
-            r.longitudinal_shared_fraction.to_string(),
-            r.public_fraction.to_string(),
-            r.convergent_read_fraction.to_string(),
-        ])?;
+        w.serialize((
+            &r.sample_id,
+            &r.group,
+            &r.subject,
+            r.total_clone_count,
+            r.observed_richness,
+            r.shannon,
+            r.clonality,
+            r.rarefied_richness,
+            r.rarefied_shannon,
+            r.top_clone_fraction,
+            r.weighted_mean_cdr3_aa_length,
+            r.private_fraction,
+            r.longitudinal_shared_fraction,
+            r.public_fraction,
+            r.convergent_read_fraction,
+        ))?;
     }
     w.flush()?;
     Ok(())

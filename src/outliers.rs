@@ -199,6 +199,7 @@ pub fn write_outlier_filter_snapshot_csv(
         .cloned()
         .collect::<HashSet<_>>();
     let mut writer = csv::WriterBuilder::new()
+        .buffer_capacity(1024 * 1024)
         .from_path(path)
         .with_context(|| format!("Could not create {}", path.display()))?;
     let mut header = vec![
@@ -276,6 +277,8 @@ pub fn write_outlier_filter_modalities_tsv(
         .collect::<HashSet<_>>();
     let mut writer = csv::WriterBuilder::new()
         .delimiter(b'\t')
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
         .from_path(path)
         .with_context(|| format!("Could not create {}", path.display()))?;
     writer.write_record([
@@ -292,17 +295,17 @@ pub fn write_outlier_filter_modalities_tsv(
     for modality in &snapshot.audit.modalities {
         for point in &modality.points {
             let sample_id = normalize_sample_id(&point.sample_id);
-            writer.write_record([
-                modality.modality.clone(),
-                modality.representation.clone(),
-                sample_id.clone(),
-                point.group.clone(),
-                point.x.to_string(),
-                point.y.to_string(),
-                point.robust_distance.to_string(),
-                point.flagged.to_string(),
-                excluded.contains(&sample_id).to_string(),
-            ])?;
+            writer.serialize((
+                &modality.modality,
+                &modality.representation,
+                &sample_id,
+                &point.group,
+                point.x,
+                point.y,
+                point.robust_distance,
+                point.flagged,
+                excluded.contains(&sample_id),
+            ))?;
         }
     }
     writer.flush()?;
@@ -410,6 +413,7 @@ pub fn write_outlier_filter_summary(path: &Path, snapshot: &OutlierFilterSnapsho
 
 pub fn write_outlier_audit_csv(path: &Path, result: &CrossModalOutlierResult) -> Result<()> {
     let mut writer = csv::WriterBuilder::new()
+        .buffer_capacity(1024 * 1024)
         .from_path(path)
         .with_context(|| format!("Could not create {}", path.display()))?;
     let mut header = vec![

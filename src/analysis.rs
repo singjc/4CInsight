@@ -571,8 +571,185 @@ use crate::outliers::{
     write_outlier_filter_summary,
 };
 use anyhow::{Context, anyhow};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
+use std::sync::{Arc, Mutex, mpsc};
+
+pub const TECHNICAL_EXPORT_MANIFEST_NAME: &str = "technical_export_manifest.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TechnicalExportManifestEntry {
+    pub relative_path: String,
+    pub byte_size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TechnicalExportManifest {
+    pub schema_version: u32,
+    pub files: Vec<TechnicalExportManifestEntry>,
+}
+
+#[derive(Debug)]
+struct TechnicalExportHashResult {
+    path: PathBuf,
+    byte_size: u64,
+    sha256: String,
+}
+
+/// Hash completed technical exports while later table families are still being
+/// serialized. This removes the previous second full read of every table from
+/// the synchronous artifact-retention tail while preserving independent SHA-256
+/// integrity metadata for every opaque artifact.
+struct TechnicalExportHashPool {
+    root: PathBuf,
+    seen: HashSet<PathBuf>,
+    task_tx: Option<mpsc::Sender<PathBuf>>,
+    result_rx: mpsc::Receiver<anyhow::Result<TechnicalExportHashResult>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    submitted: usize,
+}
+
+impl TechnicalExportHashPool {
+    fn new(root: &Path) -> Self {
+        let (task_tx, task_rx) = mpsc::channel::<PathBuf>();
+        let task_rx = Arc::new(Mutex::new(task_rx));
+        let (result_tx, result_rx) = mpsc::channel();
+        let available = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1);
+        let worker_count = available.min(4).max(1);
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let task_rx = Arc::clone(&task_rx);
+            let result_tx = result_tx.clone();
+            workers.push(std::thread::spawn(move || {
+                loop {
+                    let path = {
+                        let receiver = match task_rx.lock() {
+                            Ok(receiver) => receiver,
+                            Err(_) => break,
+                        };
+                        match receiver.recv() {
+                            Ok(path) => path,
+                            Err(_) => break,
+                        }
+                    };
+                    let result = hash_completed_export(&path);
+                    if result_tx.send(result).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(result_tx);
+        Self {
+            root: root.to_path_buf(),
+            seen: HashSet::new(),
+            task_tx: Some(task_tx),
+            result_rx,
+            workers,
+            submitted: 0,
+        }
+    }
+
+    fn discover(&mut self) -> Result<()> {
+        let mut files = Vec::new();
+        collect_export_files_for_hashing(&self.root, &mut files)?;
+        files.sort();
+        for path in files {
+            if path.file_name().and_then(|value| value.to_str())
+                == Some(TECHNICAL_EXPORT_MANIFEST_NAME)
+            {
+                continue;
+            }
+            if self.seen.insert(path.clone()) {
+                if let Some(tx) = self.task_tx.as_ref() {
+                    tx.send(path).map_err(|_| {
+                        anyhow!("technical export hash workers stopped unexpectedly")
+                    })?;
+                    self.submitted += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<TechnicalExportManifest> {
+        self.discover()?;
+        self.task_tx.take();
+        let mut files = Vec::with_capacity(self.submitted);
+        for _ in 0..self.submitted {
+            files.push(
+                self.result_rx
+                    .recv()
+                    .context("technical export hash worker stopped unexpectedly")??,
+            );
+        }
+        for worker in self.workers.drain(..) {
+            worker
+                .join()
+                .map_err(|_| anyhow!("technical export hash worker panicked"))?;
+        }
+        let root = self.root;
+        let mut entries = files
+            .into_iter()
+            .map(|result| {
+                let relative = result.path.strip_prefix(&root).unwrap_or(&result.path);
+                TechnicalExportManifestEntry {
+                    relative_path: relative.to_string_lossy().replace('\\', "/"),
+                    byte_size: result.byte_size,
+                    sha256: result.sha256,
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        Ok(TechnicalExportManifest {
+            schema_version: 1,
+            files: entries,
+        })
+    }
+}
+
+fn collect_export_files_for_hashing(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_export_files_for_hashing(&path, out)?;
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn hash_completed_export(path: &Path) -> Result<TechnicalExportHashResult> {
+    let mut file = fs::File::open(path).with_context(|| {
+        format!(
+            "Could not open completed export {} for hashing",
+            path.display()
+        )
+    })?;
+    let byte_size = file.metadata()?.len();
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 8 * 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(TechnicalExportHashResult {
+        path: path.to_path_buf(),
+        byte_size,
+        sha256: hex::encode(hasher.finalize()),
+    })
+}
 
 /// Export the complete technical table set from a frozen unified run.
 pub fn write_unified_analysis_tables(
@@ -610,6 +787,7 @@ where
     }
     fs::create_dir_all(&outdir)
         .with_context(|| format!("Could not create {}", outdir.display()))?;
+    let mut hash_pool = TechnicalExportHashPool::new(&outdir);
 
     write_mapping_audit(
         &outdir.join("sample_mapping_audit.tsv"),
@@ -620,6 +798,7 @@ where
         &run.cohort.mapping,
     )?;
     progress(1, STAGES, "Technical tables: sample mapping audit");
+    hash_pool.discover()?;
 
     if let Some(result) = run.primary.gene.as_ref() {
         progress(
@@ -643,6 +822,7 @@ where
         STAGES,
         "Technical tables: corrected gene expression complete",
     );
+    hash_pool.discover()?;
     if let Some(result) = run.primary.transcript.as_ref() {
         let abundance_path = outdir.join("transcript_adjusted_tests.tsv");
         if let Some(dtu) = result.dtu.as_ref() {
@@ -708,6 +888,7 @@ where
         STAGES,
         "Technical tables: corrected transcript expression and DTU complete",
     );
+    hash_pool.discover()?;
 
     for (stage, prefix, label, result) in [
         (4, "bcr", "BCR repertoire", run.primary.bcr.as_ref()),
@@ -790,6 +971,7 @@ where
             }
         }
         progress(stage, STAGES, &format!("Technical tables: {label}"));
+        hash_pool.discover()?;
     }
 
     if let Some(result) = run.primary.bcr_isotype.as_ref() {
@@ -811,6 +993,7 @@ where
         }
     }
     progress(7, STAGES, "Technical tables: BCR isotype composition");
+    hash_pool.discover()?;
     progress(
         7,
         STAGES,
@@ -839,6 +1022,7 @@ where
         STAGES,
         "Technical tables: immune and pathway results complete",
     );
+    hash_pool.discover()?;
 
     let supporting_gene = run.exploratory_support.gene.as_ref();
     let supporting_transcript = run.exploratory_support.transcript.as_ref();
@@ -877,6 +1061,7 @@ where
         STAGES,
         "Technical tables: supporting expression direction checks complete",
     );
+    hash_pool.discover()?;
 
     if let Some(qc) = run.qc_snapshot.as_ref() {
         progress(9, STAGES, "Technical tables: writing QC provenance");
@@ -885,10 +1070,12 @@ where
         write_outlier_filter_summary(&outdir.join("sample_outlier_qc_summary.txt"), qc)?;
     }
     progress(10, STAGES, "Technical tables: QC provenance complete");
+    hash_pool.discover()?;
 
     let candidate_dir = outdir.join("key_findings");
     write_key_findings_tables(&candidate_dir, &run.candidates)?;
     progress(11, STAGES, "Technical tables: candidate prioritization");
+    hash_pool.discover()?;
 
     if let Some(diagnostics) = run.diagnostics.as_ref() {
         progress(
@@ -903,6 +1090,7 @@ where
         STAGES,
         "Technical tables: PBMC/confounding diagnostics complete",
     );
+    hash_pool.discover()?;
 
     let comparison_definition = match &run.cohort.comparison_definition {
         CohortComparisonDefinition::Preset(preset) => {
@@ -969,6 +1157,21 @@ where
     }
     fs::write(outdir.join("analysis_summary.txt"), summary)?;
     progress(13, STAGES, "Technical tables: analysis summary written");
-    progress(STAGES, STAGES, "Technical table materialization complete");
+    hash_pool.discover()?;
+    progress(
+        13,
+        STAGES,
+        "Technical tables: finalizing precomputed integrity manifest",
+    );
+    let manifest = hash_pool.finish()?;
+    fs::write(
+        outdir.join(TECHNICAL_EXPORT_MANIFEST_NAME),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    progress(
+        STAGES,
+        STAGES,
+        "Technical table materialization complete (all table SHA-256 values precomputed)",
+    );
     Ok(outdir)
 }

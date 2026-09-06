@@ -452,7 +452,10 @@ pub fn write_focused_candidate_tables(
     fs::create_dir_all(folder).with_context(|| format!("Could not create {}", folder.display()))?;
 
     let gene_path = folder.join("focused_candidate_genes.csv");
-    let mut w = WriterBuilder::new().from_path(&gene_path)?;
+    let mut w = WriterBuilder::new()
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(&gene_path)?;
     w.write_record([
         "rank",
         "gene",
@@ -472,33 +475,33 @@ pub fn write_focused_candidate_tables(
         "robustness_flags",
     ])?;
     for r in &summary.genes {
-        w.write_record([
-            r.rank.to_string(),
-            r.gene.clone(),
-            r.gene_id.clone(),
-            r.adjusted_log2fc.to_string(),
-            r.p_value.to_string(),
-            r.q_value.to_string(),
-            r.case_mean.to_string(),
-            r.control_mean.to_string(),
-            r.exploratory_log2fc
-                .map(|x| x.to_string())
-                .unwrap_or_default(),
-            r.exploratory_q.map(|x| x.to_string()).unwrap_or_default(),
-            r.direction_concordant
-                .map(|x| x.to_string())
-                .unwrap_or_default(),
-            r.pathway_support_count.to_string(),
-            r.pathway_support.clone(),
-            r.evidence.clone(),
-            r.robustness.clone().unwrap_or_default(),
-            r.robustness_flags.join("; "),
-        ])?;
+        let robustness_flags = r.robustness_flags.join("; ");
+        w.serialize((
+            r.rank,
+            &r.gene,
+            &r.gene_id,
+            r.adjusted_log2fc,
+            r.p_value,
+            r.q_value,
+            r.case_mean,
+            r.control_mean,
+            r.exploratory_log2fc,
+            r.exploratory_q,
+            r.direction_concordant,
+            r.pathway_support_count,
+            &r.pathway_support,
+            &r.evidence,
+            r.robustness.as_deref(),
+            &robustness_flags,
+        ))?;
     }
     w.flush()?;
 
     let pathway_path = folder.join("focused_candidate_pathways.csv");
-    let mut w = WriterBuilder::new().from_path(&pathway_path)?;
+    let mut w = WriterBuilder::new()
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(&pathway_path)?;
     w.write_record([
         "rank",
         "pathway",
@@ -512,23 +515,26 @@ pub fn write_focused_candidate_tables(
         "evidence",
     ])?;
     for r in &summary.pathways {
-        w.write_record([
-            r.rank.to_string(),
-            r.pathway.clone(),
-            r.description.clone(),
-            r.odds_ratio.to_string(),
-            r.overlap.to_string(),
-            r.measured_set_size.to_string(),
-            r.p_value.to_string(),
-            r.q_value.to_string(),
-            r.overlap_genes.clone(),
-            r.evidence.clone(),
-        ])?;
+        w.serialize((
+            r.rank,
+            &r.pathway,
+            &r.description,
+            r.odds_ratio,
+            r.overlap,
+            r.measured_set_size,
+            r.p_value,
+            r.q_value,
+            &r.overlap_genes,
+            &r.evidence,
+        ))?;
     }
     w.flush()?;
 
     let other_path = folder.join("focused_candidate_other_signals.csv");
-    let mut w = WriterBuilder::new().from_path(&other_path)?;
+    let mut w = WriterBuilder::new()
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(&other_path)?;
     w.write_record([
         "rank",
         "modality",
@@ -543,24 +549,27 @@ pub fn write_focused_candidate_tables(
         "evidence",
     ])?;
     for r in &summary.other {
-        w.write_record([
-            r.rank.to_string(),
-            r.modality.clone(),
-            r.family.clone(),
-            r.feature.clone(),
-            r.secondary_id.clone(),
-            r.effect.to_string(),
-            r.p_value.to_string(),
-            r.q_value.to_string(),
-            r.case_mean.to_string(),
-            r.control_mean.to_string(),
-            r.evidence.clone(),
-        ])?;
+        w.serialize((
+            r.rank,
+            &r.modality,
+            &r.family,
+            &r.feature,
+            &r.secondary_id,
+            r.effect,
+            r.p_value,
+            r.q_value,
+            r.case_mean,
+            r.control_mean,
+            &r.evidence,
+        ))?;
     }
     w.flush()?;
 
     let transcript_path = folder.join("focused_candidate_transcripts.csv");
-    let mut w = WriterBuilder::new().from_path(&transcript_path)?;
+    let mut w = WriterBuilder::new()
+        .has_headers(false)
+        .buffer_capacity(1024 * 1024)
+        .from_path(&transcript_path)?;
     w.write_record([
         "rank",
         "transcript",
@@ -576,24 +585,20 @@ pub fn write_focused_candidate_tables(
         "evidence",
     ])?;
     for r in &summary.transcripts {
-        w.write_record([
-            r.rank.to_string(),
-            r.gene.clone(),
-            r.gene_id.clone(),
-            r.adjusted_log2fc.to_string(),
-            r.p_value.to_string(),
-            r.q_value.to_string(),
-            r.case_mean.to_string(),
-            r.control_mean.to_string(),
-            r.exploratory_log2fc
-                .map(|x| x.to_string())
-                .unwrap_or_default(),
-            r.exploratory_q.map(|x| x.to_string()).unwrap_or_default(),
-            r.direction_concordant
-                .map(|x| x.to_string())
-                .unwrap_or_default(),
-            r.evidence.clone(),
-        ])?;
+        w.serialize((
+            r.rank,
+            &r.gene,
+            &r.gene_id,
+            r.adjusted_log2fc,
+            r.p_value,
+            r.q_value,
+            r.case_mean,
+            r.control_mean,
+            r.exploratory_log2fc,
+            r.exploratory_q,
+            r.direction_concordant,
+            &r.evidence,
+        ))?;
     }
     w.flush()?;
 
