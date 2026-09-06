@@ -22,13 +22,115 @@ use plotly::common::{HoverInfo, Mode, Title};
 use plotly::layout::Axis;
 use plotly::{Layout, Plot, Scatter};
 use report_builder::plots::plot_boxplot;
-use report_builder::{Report, ReportSection};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::OnceLock;
 
 const REPORT_MAX_SCATTER_POINTS: usize = 4_000;
+
+enum ReportBlock {
+    Html(String),
+    Plot(Plot),
+}
+
+struct ReportSection {
+    title: String,
+    blocks: Vec<ReportBlock>,
+}
+
+impl ReportSection {
+    fn new(title: &str) -> Self {
+        Self {
+            title: title.to_string(),
+            blocks: Vec::new(),
+        }
+    }
+
+    fn add_content(&mut self, content: Markup) {
+        self.blocks.push(ReportBlock::Html(content.into_string()));
+    }
+
+    fn add_plot(&mut self, plot: Plot) {
+        self.blocks.push(ReportBlock::Plot(plot));
+    }
+}
+
+struct Report {
+    software: String,
+    version: String,
+    title: String,
+    sections: Vec<ReportSection>,
+}
+
+impl Report {
+    fn new(software: &str, version: &str, _logo: Option<&str>, title: &str) -> Self {
+        Self {
+            software: software.to_string(),
+            version: version.to_string(),
+            title: title.to_string(),
+            sections: Vec::new(),
+        }
+    }
+
+    fn add_section(&mut self, section: ReportSection) {
+        self.sections.push(section);
+    }
+
+    fn save_to_file(&self, filename: &str) -> std::io::Result<()> {
+        let file = std::fs::File::create(filename)?;
+        let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+        let plotly = embedded_plotly_script()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))?;
+        let title = html! { (self.title.as_str()) }.into_string();
+        let software = html! { (self.software.as_str()) }.into_string();
+        let version = html! { (self.version.as_str()) }.into_string();
+
+        writer.write_all(b"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")?;
+        write!(writer, "<title>{title}</title>")?;
+        writer.write_all(b"<style>
+:root{color-scheme:light;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}*{box-sizing:border-box}body{margin:0;background:#f6f8fb;color:#172033;line-height:1.45}header{background:#172033;color:#fff;padding:22px 28px}header h1{margin:0 0 5px;font-size:1.45rem}header p{margin:0;color:#c9d2e3}.report-shell{display:grid;grid-template-columns:minmax(210px,280px) minmax(0,1fr);gap:22px;max-width:1600px;margin:0 auto;padding:22px}.report-toc{position:sticky;top:16px;align-self:start;max-height:calc(100vh - 32px);overflow:auto;background:#fff;border:1px solid #dfe4ee;border-radius:10px;padding:14px}.report-toc h2{font-size:.95rem;margin:0 0 10px}.report-toc a{display:block;color:#315fa8;text-decoration:none;padding:5px 0;font-size:.88rem}.report-toc a:hover{text-decoration:underline}.report-main{min-width:0}.report-section{background:#fff;border:1px solid #dfe4ee;border-radius:10px;padding:20px 22px;margin:0 0 20px;box-shadow:0 1px 2px rgba(0,0,0,.03)}.report-section>h2{margin-top:0;border-bottom:1px solid #e6eaf1;padding-bottom:8px}.plot-wrapper{width:100%;overflow:auto;margin:14px 0}.plot-container{width:100%;min-height:420px}.table-container{overflow:auto;max-width:100%}table{border-collapse:collapse;width:100%;font-size:.88rem}th,td{border:1px solid #dfe4ee;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f0f3f8;position:sticky;top:0}code{white-space:pre-wrap;overflow-wrap:anywhere}details{margin:8px 0}@media(max-width:900px){.report-shell{display:block}.report-toc{position:static;max-height:none;margin-bottom:18px}}@media print{body{background:#fff}.report-shell{display:block;max-width:none;padding:0}.report-toc{display:none}.report-section{box-shadow:none;border:0;page-break-inside:avoid}}
+</style>")?;
+        writer.write_all(plotly.as_bytes())?;
+        writer.write_all(b"</head><body>")?;
+        write!(
+            writer,
+            "<header><h1>{title}</h1><p>{software} · version {version}</p></header>"
+        )?;
+        writer.write_all(
+            b"<div class=\"report-shell\"><nav class=\"report-toc\"><h2>Report contents</h2>",
+        )?;
+        for (index, section) in self.sections.iter().enumerate() {
+            let section_title = html! { (section.title.as_str()) }.into_string();
+            write!(writer, "<a href=\"#section-{index}\">{section_title}</a>")?;
+        }
+        writer.write_all(b"</nav><main class=\"report-main\">")?;
+
+        for (section_index, section) in self.sections.iter().enumerate() {
+            let section_title = html! { (section.title.as_str()) }.into_string();
+            write!(
+                writer,
+                "<section class=\"report-section\" id=\"section-{section_index}\"><h2>{section_title}</h2>"
+            )?;
+            for (block_index, block) in section.blocks.iter().enumerate() {
+                match block {
+                    ReportBlock::Html(markup) => writer.write_all(markup.as_bytes())?,
+                    ReportBlock::Plot(plot) => {
+                        let plot_id = format!("cfs-report-plot-{section_index}-{block_index}");
+                        writer.write_all(b"<div class=\"plot-wrapper\">")?;
+                        let fragment = plot.to_inline_html(Some(&plot_id));
+                        writer.write_all(fragment.as_bytes())?;
+                        writer.write_all(b"</div>")?;
+                    }
+                }
+            }
+            writer.write_all(b"</section>")?;
+        }
+        writer.write_all(b"</main></div></body></html>")?;
+        writer.flush()?;
+        Ok(())
+    }
+}
 
 pub struct CohortReportInputs<'a> {
     pub comparison: &'a CohortComparison,
@@ -105,7 +207,6 @@ pub fn generate_cohort_html_report(path: &Path, inputs: CohortReportInputs<'_>) 
     report
         .save_to_file(&output)
         .with_context(|| format!("Could not write HTML report to {}", path.display()))?;
-    make_report_self_contained(path)?;
     Ok(())
 }
 
@@ -362,103 +463,30 @@ fn embedded_plotly_script() -> Result<&'static str> {
     static EMBEDDED_PLOTLY: OnceLock<Result<String, String>> = OnceLock::new();
     let cached = EMBEDDED_PLOTLY.get_or_init(|| {
         let plot_shell = plotly::Plot::new().to_html();
-        let script_start = plot_shell
-            .find("<script")
-            .ok_or_else(|| "Could not locate embedded Plotly JavaScript".to_string())?;
         let plot_div = plot_shell
             .find(r#"<div id="plotly-html-element""#)
             .ok_or_else(|| "Could not locate Plotly placeholder in standalone HTML".to_string())?;
-        if script_start >= plot_div {
-            return Err("Unexpected Plotly standalone HTML layout".to_string());
+        let mut search_from = 0usize;
+        let mut scripts = String::new();
+        while let Some(start_rel) = plot_shell[search_from..plot_div].find("<script") {
+            let start = search_from + start_rel;
+            let Some(close_rel) = plot_shell[start..plot_div].find("</script>") else {
+                return Err("Could not locate the end of embedded Plotly JavaScript".to_string());
+            };
+            let end = start + close_rel + "</script>".len();
+            scripts.push_str(&plot_shell[start..end]);
+            scripts.push('\n');
+            search_from = end;
         }
-        Ok(plot_shell[script_start..plot_div].to_string())
+        if scripts.is_empty() {
+            return Err("Could not locate embedded Plotly JavaScript".to_string());
+        }
+        Ok(scripts)
     });
     match cached {
         Ok(script) => Ok(script.as_str()),
         Err(error) => anyhow::bail!("{error}"),
     }
-}
-
-fn make_report_self_contained(path: &Path) -> Result<()> {
-    let mut rendered = fs::read_to_string(path)
-        .with_context(|| format!("Could not reopen generated HTML report {}", path.display()))?;
-
-    // report-builder 0.1.1 embeds Plotly figures as inline fragments but currently
-    // references Plotly and table-helper libraries from public CDNs. Cache Plotly's
-    // bundled JavaScript once per process rather than rebuilding the multi-megabyte
-    // bundle for both simplified and detailed reports.
-    let embedded_plotly = embedded_plotly_script()?;
-    const REPORT_BUILDER_PLOTLY_CDN: &str =
-        r#"<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>"#;
-    if let Some(marker_pos) = rendered.find(REPORT_BUILDER_PLOTLY_CDN) {
-        rendered.replace_range(
-            marker_pos..marker_pos + REPORT_BUILDER_PLOTLY_CDN.len(),
-            embedded_plotly,
-        );
-    } else {
-        anyhow::bail!(
-            "report-builder Plotly CDN marker was not found; its template may have changed"
-        );
-    }
-
-    // Our report uses ordinary HTML tables, so DataTables/FileSaver are optional.
-    // Strip their remote assets and the jQuery-dependent initializer so the final
-    // file has no network dependencies and can be opened offline.
-    for marker in [
-        "https://cdnjs.cloudflare.com/ajax/libs/jquery/",
-        "https://cdn.datatables.net/1.13.4/",
-        "https://cdn.datatables.net/colresize/",
-        "https://cdn.datatables.net/colResize/",
-        "https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/",
-    ] {
-        rendered = strip_html_tag_containing(rendered, marker);
-    }
-    rendered = strip_script_block_containing(rendered, "$(document).ready(function()");
-
-    fs::write(path, rendered).with_context(|| {
-        format!(
-            "Could not finalize standalone HTML report {}",
-            path.display()
-        )
-    })?;
-    Ok(())
-}
-
-fn strip_html_tag_containing(mut html: String, marker: &str) -> String {
-    while let Some(marker_pos) = html.find(marker) {
-        let Some(tag_start) = html[..marker_pos].rfind('<') else {
-            break;
-        };
-        let Some(open_end_rel) = html[marker_pos..].find('>') else {
-            break;
-        };
-        let open_end = marker_pos + open_end_rel + 1;
-        if html[tag_start..].starts_with("<script") {
-            if let Some(close_rel) = html[open_end..].find("</script>") {
-                let close_end = open_end + close_rel + "</script>".len();
-                html.replace_range(tag_start..close_end, "");
-            } else {
-                html.replace_range(tag_start..open_end, "");
-            }
-        } else {
-            html.replace_range(tag_start..open_end, "");
-        }
-    }
-    html
-}
-
-fn strip_script_block_containing(mut html: String, marker: &str) -> String {
-    while let Some(marker_pos) = html.find(marker) {
-        let Some(script_start) = html[..marker_pos].rfind("<script") else {
-            break;
-        };
-        let Some(close_rel) = html[marker_pos..].find("</script>") else {
-            break;
-        };
-        let close_end = marker_pos + close_rel + "</script>".len();
-        html.replace_range(script_start..close_end, "");
-    }
-    html
 }
 
 fn build_overview_section(inputs: &CohortReportInputs<'_>) -> ReportSection {
@@ -619,15 +647,16 @@ fn build_expression_section(
         p { "Mann–Whitney U is applied to log2(value + 1). Effect is log2((mean case + 0.5)/(mean control + 0.5)); BH adjustment is across tested features." }
     });
 
+    let sampled_tests = sampled_feature_tests_for_report(&result.tests);
     if let Some(plot) = expression_volcano_plot(
-        result,
+        &sampled_tests,
         &format!("{section_name} discovery screen"),
         feature_name,
     ) {
         section.add_plot(plot);
     }
     if let Some(plot) = expression_detection_plot(
-        result,
+        &sampled_tests,
         &format!("{section_name} detection shift"),
         feature_name,
     ) {
@@ -1010,108 +1039,125 @@ fn feature_hover(r: &FeatureTestResult, feature_label: &str) -> String {
     )
 }
 
+fn sampled_indices_for_report<T, IsValid, Compare>(
+    rows: &[T],
+    is_valid: IsValid,
+    compare_signal: Compare,
+) -> Vec<usize>
+where
+    IsValid: Fn(&T) -> bool,
+    Compare: Fn(&T, &T) -> std::cmp::Ordering,
+{
+    let valid_count = rows.iter().filter(|row| is_valid(row)).count();
+    if valid_count <= REPORT_MAX_SCATTER_POINTS {
+        return rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| is_valid(row).then_some(index))
+            .collect();
+    }
+
+    let signal_budget = REPORT_MAX_SCATTER_POINTS / 2;
+    let mut valid_indices = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| is_valid(row).then_some(index))
+        .collect::<Vec<_>>();
+
+    // We only need the strongest `signal_budget` rows, not a complete ordering of
+    // every transcript/gene. `select_nth_unstable_by` avoids the O(n log n) full
+    // sort that made large report plots expensive while keeping the same signal
+    // ordering criterion.
+    let nth = signal_budget.saturating_sub(1);
+    valid_indices.select_nth_unstable_by(nth, |left, right| {
+        compare_signal(&rows[*left], &rows[*right])
+    });
+
+    let mut selected = BTreeSet::new();
+    for index in valid_indices.iter().take(signal_budget) {
+        selected.insert(*index);
+    }
+
+    // Fill the remaining visual budget with a deterministic, evenly-spaced
+    // background sample without allocating/sorting the complete background set.
+    let background_count = valid_count.saturating_sub(selected.len());
+    let background_take = REPORT_MAX_SCATTER_POINTS
+        .saturating_sub(selected.len())
+        .min(background_count);
+    if background_take > 0 {
+        let target_positions = (0..background_take)
+            .map(|sample_index| sample_index * background_count / background_take)
+            .collect::<Vec<_>>();
+        let mut next_target = 0usize;
+        let mut background_position = 0usize;
+        for (index, row) in rows.iter().enumerate() {
+            if !is_valid(row) || selected.contains(&index) {
+                continue;
+            }
+            if next_target < target_positions.len()
+                && background_position == target_positions[next_target]
+            {
+                selected.insert(index);
+                next_target += 1;
+                if next_target == target_positions.len() {
+                    break;
+                }
+            }
+            background_position += 1;
+        }
+    }
+
+    selected.into_iter().collect()
+}
+
 fn sampled_feature_tests_for_report<'a>(
     tests: &'a [FeatureTestResult],
 ) -> Vec<&'a FeatureTestResult> {
-    let valid = tests
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| {
+    sampled_indices_for_report(
+        tests,
+        |row| {
             row.effect.is_finite()
                 && row.p_value.is_finite()
                 && row.q_value.is_finite()
                 && row.q_value > 0.0
-        })
-        .collect::<Vec<_>>();
-    if valid.len() <= REPORT_MAX_SCATTER_POINTS {
-        return valid.into_iter().map(|(_, row)| row).collect();
-    }
-
-    let mut ranked = valid.clone();
-    ranked.sort_by(|(_, a), (_, b)| {
-        a.q_value
-            .total_cmp(&b.q_value)
-            .then_with(|| a.p_value.total_cmp(&b.p_value))
-            .then_with(|| b.effect.abs().total_cmp(&a.effect.abs()))
-    });
-
-    let signal_budget = REPORT_MAX_SCATTER_POINTS / 2;
-    let mut selected = BTreeSet::new();
-    for (idx, _) in ranked.iter().take(signal_budget) {
-        selected.insert(*idx);
-    }
-    let remaining = REPORT_MAX_SCATTER_POINTS.saturating_sub(selected.len());
-    if remaining > 0 {
-        let background = valid
-            .iter()
-            .map(|(idx, _)| *idx)
-            .filter(|idx| !selected.contains(idx))
-            .collect::<Vec<_>>();
-        let take = remaining.min(background.len());
-        for sample_idx in 0..take {
-            let position = sample_idx * background.len() / take;
-            selected.insert(background[position]);
-        }
-    }
-
-    selected
-        .into_iter()
-        .filter_map(|idx| tests.get(idx))
-        .collect()
+        },
+        |a, b| {
+            a.q_value
+                .total_cmp(&b.q_value)
+                .then_with(|| a.p_value.total_cmp(&b.p_value))
+                .then_with(|| b.effect.abs().total_cmp(&a.effect.abs()))
+        },
+    )
+    .into_iter()
+    .filter_map(|index| tests.get(index))
+    .collect()
 }
 
 fn sampled_adjusted_tests_for_report<'a>(
     tests: &'a [AdjustedFeatureResult],
 ) -> Vec<&'a AdjustedFeatureResult> {
-    let valid = tests
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| {
+    sampled_indices_for_report(
+        tests,
+        |row| {
             row.beta_group.is_finite()
                 && row.p_value.is_finite()
                 && row.q_value.is_finite()
                 && row.q_value > 0.0
-        })
-        .collect::<Vec<_>>();
-    if valid.len() <= REPORT_MAX_SCATTER_POINTS {
-        return valid.into_iter().map(|(_, row)| row).collect();
-    }
-
-    let mut ranked = valid.clone();
-    ranked.sort_by(|(_, a), (_, b)| {
-        a.q_value
-            .total_cmp(&b.q_value)
-            .then_with(|| a.p_value.total_cmp(&b.p_value))
-            .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
-    });
-
-    let signal_budget = REPORT_MAX_SCATTER_POINTS / 2;
-    let mut selected = BTreeSet::new();
-    for (idx, _) in ranked.iter().take(signal_budget) {
-        selected.insert(*idx);
-    }
-    let remaining = REPORT_MAX_SCATTER_POINTS.saturating_sub(selected.len());
-    if remaining > 0 {
-        let background = valid
-            .iter()
-            .map(|(idx, _)| *idx)
-            .filter(|idx| !selected.contains(idx))
-            .collect::<Vec<_>>();
-        let take = remaining.min(background.len());
-        for sample_idx in 0..take {
-            let position = sample_idx * background.len() / take;
-            selected.insert(background[position]);
-        }
-    }
-
-    selected
-        .into_iter()
-        .filter_map(|idx| tests.get(idx))
-        .collect()
+        },
+        |a, b| {
+            a.q_value
+                .total_cmp(&b.q_value)
+                .then_with(|| a.p_value.total_cmp(&b.p_value))
+                .then_with(|| b.beta_group.abs().total_cmp(&a.beta_group.abs()))
+        },
+    )
+    .into_iter()
+    .filter_map(|index| tests.get(index))
+    .collect()
 }
 
 fn expression_volcano_plot(
-    result: &GeneComparisonResult,
+    sampled_tests: &[&FeatureTestResult],
     title: &str,
     feature_label: &str,
 ) -> Option<Plot> {
@@ -1121,7 +1167,7 @@ fn expression_volcano_plot(
     let mut x_sig = Vec::new();
     let mut y_sig = Vec::new();
     let mut h_sig = Vec::new();
-    for r in sampled_feature_tests_for_report(&result.tests) {
+    for &r in sampled_tests {
         let y = -r.q_value.max(1e-300).log10();
         let hover = feature_hover(r, feature_label);
         if r.q_value <= 0.05 {
@@ -1158,14 +1204,14 @@ fn expression_volcano_plot(
 }
 
 fn expression_detection_plot(
-    result: &GeneComparisonResult,
+    sampled_tests: &[&FeatureTestResult],
     title: &str,
     feature_label: &str,
 ) -> Option<Plot> {
     let mut x = Vec::new();
     let mut y = Vec::new();
     let mut hover = Vec::new();
-    for r in sampled_feature_tests_for_report(&result.tests) {
+    for &r in sampled_tests {
         let (Some(case), Some(ctrl)) = (r.detection_case, r.detection_control) else {
             continue;
         };
@@ -1592,7 +1638,6 @@ pub fn generate_corrected_html_report(
             path.display()
         )
     })?;
-    make_report_self_contained(path)?;
     Ok(())
 }
 
@@ -2052,7 +2097,6 @@ pub fn generate_focused_candidate_html_report(
     report
         .save_to_file(&output)
         .with_context(|| format!("Could not write focused HTML report to {}", path.display()))?;
-    make_report_self_contained(path)?;
     Ok(())
 }
 
@@ -2126,6 +2170,20 @@ pub fn generate_unified_detailed_html_report(
     path: &Path,
     run: &UnifiedCohortAnalysisRun,
 ) -> Result<()> {
+    generate_unified_detailed_html_report_with_progress(path, run, |_, _, _| {})
+}
+
+/// Render the detailed report while exposing coarse report-construction progress.
+/// Progress is presentation/export-only and never changes the frozen analysis.
+pub fn generate_unified_detailed_html_report_with_progress<F>(
+    path: &Path,
+    run: &UnifiedCohortAnalysisRun,
+    mut progress: F,
+) -> Result<()>
+where
+    F: FnMut(usize, usize, &str),
+{
+    progress(0, 100, "Assembling report provenance and configuration");
     let title = format!(
         "4C cohort analysis — {} — full report",
         run.primary.comparison.name
@@ -2229,6 +2287,7 @@ pub fn generate_unified_detailed_html_report(
     });
     report.add_section(configuration);
 
+    progress(8, 100, "Rendering mapping and reviewed QC provenance");
     report.add_section(build_mapping_section(&run.cohort.mapping));
     if let Some(qc) = run.qc_snapshot.as_ref() {
         report.add_section(build_outlier_qc_section(
@@ -2237,12 +2296,18 @@ pub fn generate_unified_detailed_html_report(
         ));
     }
 
+    progress(15, 100, "Rendering corrected gene-expression results");
     let primary = &run.primary;
     if let Some(result) = primary.gene.as_ref() {
         report.add_section(build_corrected_expression_section("Gene counts", result));
     } else if let Some(error) = primary.gene_error.as_deref() {
         report.add_section(corrected_error_section("Gene counts", error));
     }
+    progress(
+        28,
+        100,
+        "Rendering corrected transcript-expression and DTU results",
+    );
     if let Some(result) = primary.transcript.as_ref() {
         report.add_section(build_corrected_expression_section(
             "Transcript counts",
@@ -2251,6 +2316,7 @@ pub fn generate_unified_detailed_html_report(
     } else if let Some(error) = primary.transcript_error.as_deref() {
         report.add_section(corrected_error_section("Transcript counts", error));
     }
+    progress(42, 100, "Rendering BCR/TCR repertoire and isotype results");
     if let Some(result) = primary.bcr.as_ref() {
         report.add_section(build_corrected_repertoire_section("BCR", result));
     } else if let Some(error) = primary.bcr_error.as_deref() {
@@ -2271,6 +2337,7 @@ pub fn generate_unified_detailed_html_report(
     } else if let Some(error) = primary.tcr_beta_error.as_deref() {
         report.add_section(corrected_error_section("TCR beta", error));
     }
+    progress(58, 100, "Rendering immune-infiltrate and pathway results");
     if let Some(result) = primary.immune.as_ref() {
         report.add_section(build_corrected_immune_section(result));
     } else if let Some(error) = primary.immune_error.as_deref() {
@@ -2282,6 +2349,7 @@ pub fn generate_unified_detailed_html_report(
         report.add_section(corrected_error_section("Pathways", error));
     }
 
+    progress(68, 100, "Rendering supporting expression direction checks");
     if run.settings.exploratory_direction_check {
         if run.exploratory_support.gene.is_some() || run.exploratory_support.gene_error.is_some() {
             report.add_section(build_expression_section(
@@ -2305,6 +2373,11 @@ pub fn generate_unified_detailed_html_report(
         }
     }
 
+    progress(
+        77,
+        100,
+        "Rendering PBMC/confounding sensitivity diagnostics",
+    );
     if let Some(diagnostics) = run.diagnostics.as_ref() {
         report.add_section(build_unified_diagnostics_overview(diagnostics));
         if let Some(result) = diagnostics.qc_restricted_gene.as_ref() {
@@ -2327,6 +2400,11 @@ pub fn generate_unified_detailed_html_report(
         ));
     }
 
+    progress(
+        84,
+        100,
+        "Rendering candidate prioritization and robustness summaries",
+    );
     let mut candidate = ReportSection::new("Candidate prioritization");
     candidate.add_content(html! {
         p { "This section is a presentation/prioritization layer derived from the corrected results above. It is not an independent analysis and does not add statistical evidence." }
@@ -2343,6 +2421,7 @@ pub fn generate_unified_detailed_html_report(
     });
     report.add_section(candidate);
 
+    progress(89, 100, "Rendering embedded analysis documentation");
     report.add_section(build_unified_analysis_documentation(run));
 
     let mut limitations = ReportSection::new("Warnings, assumptions, and limitations");
@@ -2358,6 +2437,7 @@ pub fn generate_unified_detailed_html_report(
     });
     report.add_section(limitations);
 
+    progress(94, 100, "Streaming plots and HTML directly to disk");
     let output = path.to_string_lossy().to_string();
     report.save_to_file(&output).with_context(|| {
         format!(
@@ -2365,7 +2445,7 @@ pub fn generate_unified_detailed_html_report(
             path.display()
         )
     })?;
-    make_report_self_contained(path)?;
+    progress(100, 100, "Full HTML report complete");
     Ok(())
 }
 
@@ -2473,7 +2553,6 @@ pub fn generate_unified_simplified_html_report(
             path.display()
         )
     })?;
-    make_report_self_contained(path)?;
     Ok(())
 }
 

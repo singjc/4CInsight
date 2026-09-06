@@ -31,7 +31,10 @@ use crate::{
         OutlierConfig, build_outlier_filter_snapshot, filter_comparison_excluding,
         run_cross_modal_outlier_qc,
     },
-    report::{generate_unified_detailed_html_report, generate_unified_simplified_html_report},
+    report::{
+        generate_unified_detailed_html_report_with_progress,
+        generate_unified_simplified_html_report,
+    },
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -3931,6 +3934,38 @@ fn unified_modality_summary(
     }
 }
 
+fn retain_generated_report(
+    job_dir: &FsPath,
+    name: &str,
+    path: &FsPath,
+    artifacts: &mut Vec<JobArtifactSummary>,
+    warnings: &mut Vec<String>,
+    artifact_budget: &mut u64,
+) -> Result<()> {
+    match std::fs::metadata(path) {
+        Ok(metadata)
+            if metadata.len() <= MAX_JOB_ARTIFACT_BYTES
+                && metadata.len() <= *artifact_budget =>
+        {
+            artifacts.push(persist_job_artifact_file_budgeted(
+                job_dir,
+                name,
+                "text/html; charset=utf-8",
+                path,
+                artifact_budget,
+            )?);
+        }
+        Ok(metadata) => warnings.push(format!(
+            "{name} was generated ({} bytes) but exceeds the available retained-artifact budget or per-artifact limit and was not retained",
+            metadata.len()
+        )),
+        Err(error) => warnings.push(format!(
+            "Could not inspect generated {name}: {error}"
+        )),
+    }
+    Ok(())
+}
+
 fn persist_unified_run_artifacts<F>(
     job_dir: &FsPath,
     run: &UnifiedCohortAnalysisRun,
@@ -3950,46 +3985,71 @@ where
         .context("failed to create temporary unified export directory")?;
 
     progress(0, 1000, "Preparing unified report exports");
-    for (report_index, (name, generator)) in [
-        (
-            "simplified_report.html",
-            generate_unified_simplified_html_report
-                as fn(&FsPath, &UnifiedCohortAnalysisRun) -> Result<()>,
-        ),
-        (
-            "full_report.html",
-            generate_unified_detailed_html_report
-                as fn(&FsPath, &UnifiedCohortAnalysisRun) -> Result<()>,
-        ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let report_start = if report_index == 0 { 100 } else { 400 };
-        progress(report_start, 1000, &format!("Generating {name}"));
-        let path = temp.path().join(name);
-        match generator(&path, run) {
-            Ok(()) => match std::fs::metadata(&path) {
-                Ok(metadata)
-                    if metadata.len() <= MAX_JOB_ARTIFACT_BYTES
-                        && metadata.len() <= *artifact_budget =>
-                {
-                    artifacts.push(persist_job_artifact_file_budgeted(
-                        job_dir,
-                        name,
-                        "text/html; charset=utf-8",
-                        &path,
-                        artifact_budget,
-                    )?);
-                }
-                Ok(metadata) => warnings.push(format!(
-                    "{name} was generated ({} bytes) but exceeds the available retained-artifact budget or per-artifact limit and was not retained",
-                    metadata.len()
-                )),
-                Err(error) => warnings.push(format!("Could not inspect generated {name}: {error}")),
-            },
-            Err(error) => warnings.push(format!("Could not generate {name}: {error:#}")),
+
+    let simplified_name = "simplified_report.html";
+    let simplified_path = temp.path().join(simplified_name);
+    progress(100, 1000, "Generating simplified_report.html");
+    match generate_unified_simplified_html_report(&simplified_path, run) {
+        Ok(()) => {
+            if let Ok(metadata) = std::fs::metadata(&simplified_path) {
+                progress(
+                    360,
+                    1000,
+                    &format!(
+                        "simplified_report.html complete ({})",
+                        format_binary_bytes(metadata.len())
+                    ),
+                );
+            }
+            retain_generated_report(
+                job_dir,
+                simplified_name,
+                &simplified_path,
+                artifacts,
+                warnings,
+                artifact_budget,
+            )?;
         }
+        Err(error) => warnings.push(format!("Could not generate {simplified_name}: {error:#}")),
+    }
+
+    let full_name = "full_report.html";
+    let full_path = temp.path().join(full_name);
+    progress(400, 1000, "Generating full_report.html");
+    match generate_unified_detailed_html_report_with_progress(
+        &full_path,
+        run,
+        |done, total, message| {
+            let denom = total.max(1);
+            let scaled = 400 + done.min(denom) * 280 / denom;
+            progress(
+                scaled.min(680),
+                1000,
+                &format!("full_report.html — {message}"),
+            );
+        },
+    ) {
+        Ok(()) => {
+            if let Ok(metadata) = std::fs::metadata(&full_path) {
+                progress(
+                    690,
+                    1000,
+                    &format!(
+                        "full_report.html complete ({})",
+                        format_binary_bytes(metadata.len())
+                    ),
+                );
+            }
+            retain_generated_report(
+                job_dir,
+                full_name,
+                &full_path,
+                artifacts,
+                warnings,
+                artifact_budget,
+            )?;
+        }
+        Err(error) => warnings.push(format!("Could not generate {full_name}: {error:#}")),
     }
 
     progress(700, 1000, "Generating native technical result tables");
