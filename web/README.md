@@ -2,7 +2,7 @@
 
 This directory contains the WASM/`eframe` browser client for 4C Cohort Explorer.
 
-## Current status: Phase 3E.5 primary-results checkpoint + bounded sensitivity refits (v0.16.13)
+## Current status: Phase 3E.6 runtime stabilization + encrypted project keys (v0.16.14)
 
 The browser now renders bounded interactive presentation views directly from the completed native unified result and can download every retained job artifact as one authenticated ZIP. No statistical calculation is duplicated in WASM; full-resolution tables and both HTML reports remain the authoritative persisted outputs.
 
@@ -136,6 +136,13 @@ The web crate has its own `Cargo.lock` once generated locally. Keep/stage the up
 
 See [`../docs/web_development.md`](../docs/web_development.md) for the complete API, storage, privacy, batch-upload, mapping, job, cancellation, and parity-validation notes.
 
+
+
+### Phase 3E.6 runtime + recovery ergonomics
+
+- Active jobs display start/current UTC time, total elapsed time, current-stage elapsed time, last-progress age, and persisted completed-stage timings.
+- Standard BCR/TCR corrected execution is optimized without changing the scientific definitions, including bounded deterministic rarefaction workers and concurrent independent ordination/composition tasks.
+- Project UUID + recovery token can be saved as an encrypted `.4ckey` file. Encryption is entirely client-side using PBKDF2-HMAC-SHA-256 + AES-256-GCM; the passphrase never goes to the server.
 
 ### Phase 3E.5 primary/result-ready behavior
 

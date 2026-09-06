@@ -1,4 +1,4 @@
-//! Same-origin Phase-3E.5 client for the local `cfs-server` API.
+//! Same-origin Phase-3E.6 client for the local `cfs-server` API.
 
 use gloo_net::http::{Request, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -203,10 +203,26 @@ pub struct SubmitJobRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct JobStageTiming {
+    pub stage: String,
+    pub started_unix_seconds: u64,
+    pub ended_unix_seconds: u64,
+    pub elapsed_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct JobSummaryResponse {
     pub job_id: String,
     pub created_unix_seconds: u64,
     pub updated_unix_seconds: u64,
+    #[serde(default)]
+    pub started_unix_seconds: Option<u64>,
+    #[serde(default)]
+    pub current_stage: Option<String>,
+    #[serde(default)]
+    pub current_stage_started_unix_seconds: Option<u64>,
+    #[serde(default)]
+    pub stage_timings: Vec<JobStageTiming>,
     pub status: String,
     pub progress_message: String,
     pub snapshot_sha256: String,

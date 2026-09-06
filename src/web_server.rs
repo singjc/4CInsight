@@ -1,6 +1,6 @@
 //! Local web server for the 4C Cohort Explorer browser client.
 //!
-//! Phase 3E.5 keeps authenticated metadata-backed comparison configuration and
+//! Phase 3E.6 keeps authenticated metadata-backed comparison configuration and
 //! adds presentation payloads plus on-demand bulk export for completed frozen
 //! unified native jobs. The server reconstructs metadata/scientific state and
 //! derives plot coordinates from native results; WASM does not recompute science.
@@ -682,6 +682,14 @@ struct StoredJobRecord {
     job_id: Uuid,
     created_unix_seconds: u64,
     updated_unix_seconds: u64,
+    #[serde(default)]
+    started_unix_seconds: Option<u64>,
+    #[serde(default)]
+    current_stage: Option<String>,
+    #[serde(default)]
+    current_stage_started_unix_seconds: Option<u64>,
+    #[serde(default)]
+    stage_timings: Vec<JobStageTiming>,
     status: JobStatus,
     progress_message: String,
     snapshot_sha256: String,
@@ -710,10 +718,22 @@ struct JobWorkerReady {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobStageTiming {
+    pub stage: String,
+    pub started_unix_seconds: u64,
+    pub ended_unix_seconds: u64,
+    pub elapsed_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSummaryResponse {
     pub job_id: String,
     pub created_unix_seconds: u64,
     pub updated_unix_seconds: u64,
+    pub started_unix_seconds: Option<u64>,
+    pub current_stage: Option<String>,
+    pub current_stage_started_unix_seconds: Option<u64>,
+    pub stage_timings: Vec<JobStageTiming>,
     pub status: JobStatus,
     pub progress_message: String,
     pub snapshot_sha256: String,
@@ -1951,6 +1971,10 @@ impl LocalProjectStore {
             job_id,
             created_unix_seconds: now,
             updated_unix_seconds: now,
+            started_unix_seconds: None,
+            current_stage: None,
+            current_stage_started_unix_seconds: None,
+            stage_timings: Vec::new(),
             status: JobStatus::Queued,
             progress_message: "Frozen input snapshot created; queued for local worker".to_string(),
             snapshot_sha256,
@@ -1972,6 +1996,95 @@ impl LocalProjectStore {
         })
     }
 
+    fn progress_stage_name(message: &str) -> String {
+        if message.starts_with("Technical tables:")
+            || message.starts_with("Technical table materialization")
+            || message.starts_with("Retaining native technical tables")
+        {
+            return "Technical table export".to_string();
+        }
+        if message.contains("report.html") || message.contains("report exports") {
+            return "HTML report generation".to_string();
+        }
+        if let Some((stage, detail)) = message.split_once(" — ") {
+            // Preserve a stable, low-cardinality substage for the expensive
+            // native modality internals. Sample IDs and batch counters remain
+            // in progress_message but do not create hundreds of timing rows.
+            let substage = if detail.contains(": parsing ") {
+                Some("parsing")
+            } else if detail.contains("computing clonotype sharing") {
+                Some("clonotype sharing")
+            } else if detail.contains("matched-depth diversity") {
+                Some("matched-depth diversity")
+            } else if detail.contains("adjusted diversity metrics") {
+                Some("adjusted diversity metrics")
+            } else if detail.contains("building Morisita-Horn + Jaccard") {
+                Some("distance matrices")
+            } else if detail.contains("composition + ordination/PERMANOVA") {
+                Some("composition + ordination/PERMANOVA")
+            } else if detail.contains("estimating count size factors")
+                || detail.contains("reusing precomputed count size factors")
+            {
+                Some("normalization")
+            } else if detail.contains("adjusted feature models") {
+                Some("feature models")
+            } else if detail.contains("differential transcript-usage screen") {
+                Some("DTU screen")
+            } else {
+                None
+            };
+            return match substage {
+                Some(substage) => format!("{} / {substage}", stage.trim()),
+                None => stage.trim().to_string(),
+            };
+        }
+        if message.contains("immune-composition-adjusted sensitivity")
+            || message.contains("PBMC / confounding")
+            || message.contains("PBMC/confounding")
+        {
+            return "PBMC/confounding sensitivity".to_string();
+        }
+        if message.contains("browser result summary")
+            || message.contains("visualization payload")
+            || message.contains("interactive plots")
+        {
+            return "Browser result preparation".to_string();
+        }
+        message.trim().to_string()
+    }
+
+    fn finish_current_job_stage(record: &mut StoredJobRecord, now: u64) {
+        let (Some(stage), Some(started)) = (
+            record.current_stage.take(),
+            record.current_stage_started_unix_seconds.take(),
+        ) else {
+            return;
+        };
+        let ended = now.max(started);
+        record.stage_timings.push(JobStageTiming {
+            stage,
+            started_unix_seconds: started,
+            ended_unix_seconds: ended,
+            elapsed_seconds: ended.saturating_sub(started),
+        });
+        // Persist enough history for a complete normal run while preventing a
+        // malformed/noisy progress producer from growing job.json without bound.
+        const MAX_STAGE_TIMINGS: usize = 64;
+        if record.stage_timings.len() > MAX_STAGE_TIMINGS {
+            let drop_count = record.stage_timings.len() - MAX_STAGE_TIMINGS;
+            record.stage_timings.drain(0..drop_count);
+        }
+    }
+
+    fn enter_job_stage(record: &mut StoredJobRecord, stage: String, now: u64) {
+        if stage.is_empty() || record.current_stage.as_deref() == Some(stage.as_str()) {
+            return;
+        }
+        Self::finish_current_job_stage(record, now);
+        record.current_stage = Some(stage);
+        record.current_stage_started_unix_seconds = Some(now);
+    }
+
     async fn update_job_state(
         &self,
         project_id: Uuid,
@@ -1986,9 +2099,30 @@ impl LocalProjectStore {
         if record.status == JobStatus::Cancelled {
             return Ok(record);
         }
+        let now = unix_seconds()?;
+        let progress_message = progress_message.into();
+        if matches!(
+            status,
+            JobStatus::Preparing
+                | JobStatus::Running
+                | JobStatus::PrimaryResultsReady
+                | JobStatus::ResultsReady
+        ) && record.started_unix_seconds.is_none()
+        {
+            record.started_unix_seconds = Some(now);
+        }
+        if status.is_terminal() {
+            Self::finish_current_job_stage(&mut record, now);
+        } else if status != JobStatus::Queued {
+            Self::enter_job_stage(
+                &mut record,
+                Self::progress_stage_name(&progress_message),
+                now,
+            );
+        }
         record.status = status;
-        record.progress_message = progress_message.into();
-        record.updated_unix_seconds = unix_seconds()?;
+        record.progress_message = progress_message;
+        record.updated_unix_seconds = now;
         if result.is_some() {
             record.result = result;
         }
@@ -2014,19 +2148,35 @@ impl LocalProjectStore {
         {
             return Ok(());
         }
+        let now = unix_seconds()?;
+        if record.started_unix_seconds.is_none() {
+            record.started_unix_seconds = Some(now);
+        }
+        let raw_message = progress.message;
+        let stage = Self::progress_stage_name(&raw_message);
+        let stage_changed = record.current_stage.as_deref() != Some(stage.as_str());
+        Self::enter_job_stage(&mut record, stage, now);
         let message = if progress.total > 0 {
             let percent = ((progress.done.min(progress.total) as f64 / progress.total as f64)
                 * 100.0)
                 .round() as usize;
-            format!("{percent}% — {}", progress.message)
+            format!("{percent}% — {raw_message}")
         } else {
-            progress.message
+            raw_message
         };
         if record.progress_message == message {
             return Ok(());
         }
+        // Large-cohort native callbacks can emit hundreds of sample/feature
+        // progress events per second. Persist at most one same-stage update per
+        // wall-clock second; stage transitions are always written immediately.
+        // This prevents job.json fsync/rename churn from becoming part of the
+        // scientific critical path while keeping the UI effectively live.
+        if !stage_changed && record.updated_unix_seconds == now {
+            return Ok(());
+        }
         record.progress_message = message;
-        record.updated_unix_seconds = unix_seconds()?;
+        record.updated_unix_seconds = now;
         write_json_atomic(&self.job_record_path(project_id, job_id), &record).await?;
         Ok(())
     }
@@ -2044,11 +2194,16 @@ impl LocalProjectStore {
         {
             return Ok(());
         }
+        let now = unix_seconds()?;
+        if record.started_unix_seconds.is_none() {
+            record.started_unix_seconds = Some(now);
+        }
         record.status = JobStatus::PrimaryResultsReady;
         record.progress_message =
             "Primary corrected results ready; PBMC/confounding sensitivity diagnostics are still running"
                 .to_string();
-        record.updated_unix_seconds = unix_seconds()?;
+        Self::enter_job_stage(&mut record, "PBMC/confounding sensitivity".to_string(), now);
+        record.updated_unix_seconds = now;
         record.result = Some(result);
         record.error = None;
         write_json_atomic(&self.job_record_path(project_id, job_id), &record).await?;
@@ -2068,11 +2223,16 @@ impl LocalProjectStore {
         {
             return Ok(());
         }
+        let now = unix_seconds()?;
+        if record.started_unix_seconds.is_none() {
+            record.started_unix_seconds = Some(now);
+        }
         record.status = JobStatus::ResultsReady;
         record.progress_message =
             "Scientific results ready; report and technical exports are continuing in the background"
                 .to_string();
-        record.updated_unix_seconds = unix_seconds()?;
+        Self::enter_job_stage(&mut record, "Export finalization".to_string(), now);
+        record.updated_unix_seconds = now;
         record.result = Some(result);
         record.error = None;
         write_json_atomic(&self.job_record_path(project_id, job_id), &record).await?;
@@ -3097,6 +3257,10 @@ fn job_summary_from_record(record: &StoredJobRecord) -> JobSummaryResponse {
         job_id: record.job_id.to_string(),
         created_unix_seconds: record.created_unix_seconds,
         updated_unix_seconds: record.updated_unix_seconds,
+        started_unix_seconds: record.started_unix_seconds,
+        current_stage: record.current_stage.clone(),
+        current_stage_started_unix_seconds: record.current_stage_started_unix_seconds,
+        stage_timings: record.stage_timings.clone(),
         status: record.status,
         progress_message: record.progress_message.clone(),
         snapshot_sha256: record.snapshot_sha256.clone(),
@@ -5125,7 +5289,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         app_version: env!("CARGO_PKG_VERSION"),
-        api_version: 11,
+        api_version: 12,
         default_ttl_hours: state.default_ttl_hours,
         max_ttl_hours: MAX_TTL_HOURS,
         upload_enabled: true,
@@ -6298,6 +6462,59 @@ mod tests {
             .unwrap();
         assert!(manifest.contains("report.html"));
         assert!(manifest.contains("table.tsv"));
+    }
+
+    #[test]
+    fn job_stage_names_group_high_frequency_progress_messages() {
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
+                "TCR beta corrected — TCR beta: matched-depth diversity 4C_99 (283/283; 8 workers)"
+            ),
+            "TCR beta corrected / matched-depth diversity"
+        );
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
+                "Immune-adjusted gene sensitivity — Gene: adjusted feature models (8 worker(s))"
+            ),
+            "Immune-adjusted gene sensitivity / feature models"
+        );
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
+                "Technical tables: corrected transcript expression and DTU complete"
+            ),
+            "Technical table export"
+        );
+    }
+
+    #[test]
+    fn job_stage_timing_records_elapsed_seconds() {
+        let project_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let mut record = StoredJobRecord {
+            schema_version: 1,
+            project_id,
+            job_id,
+            created_unix_seconds: 100,
+            updated_unix_seconds: 100,
+            started_unix_seconds: Some(100),
+            current_stage: None,
+            current_stage_started_unix_seconds: None,
+            stage_timings: Vec::new(),
+            status: JobStatus::Running,
+            progress_message: String::new(),
+            snapshot_sha256: "a".repeat(64),
+            cancel_requested: false,
+            result: None,
+            error: None,
+        };
+        LocalProjectStore::enter_job_stage(&mut record, "TCR beta corrected".to_string(), 120);
+        LocalProjectStore::enter_job_stage(&mut record, "Immune corrected".to_string(), 165);
+        assert_eq!(record.stage_timings.len(), 1);
+        assert_eq!(record.stage_timings[0].stage, "TCR beta corrected");
+        assert_eq!(record.stage_timings[0].elapsed_seconds, 45);
+        LocalProjectStore::finish_current_job_stage(&mut record, 180);
+        assert_eq!(record.stage_timings.len(), 2);
+        assert_eq!(record.stage_timings[1].elapsed_seconds, 15);
     }
 
     #[tokio::test]

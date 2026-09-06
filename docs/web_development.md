@@ -1,6 +1,6 @@
 # 4C Cohort Explorer web development
 
-## Current status: Phase 3E.5 primary-results checkpoint + bounded sensitivity refits (v0.16.13)
+## Current status: Phase 3E.6 runtime stabilization + encrypted project keys (v0.16.14)
 
 Phase 3D.2 has been exercised on a realistic private project with 2,140 uploaded objects / 4.21 GiB, Phase 3E.1 has produced full unified report/table artifacts, and Phase 3E.2 validated metadata-backed Case/Control configuration. Phase 3E.3 now presents the same completed native unified result interactively in the browser and adds a one-click authenticated ZIP of all retained job artifacts.
 
@@ -12,7 +12,7 @@ Desktop
         ↓
     existing Rust unified scientific analysis
 
-Browser (Phase 3E.5)
+Browser (Phase 3E.6)
     egui / eframe WebRunner (WASM)
         ↓ same-origin HTTP + bearer capability
     cfs-server (Axum, native Rust)
@@ -523,7 +523,7 @@ Expected capabilities include:
 ```json
 {
   "status": "ok",
-  "api_version": 11,
+  "api_version": 12,
   "upload_enabled": true,
   "mapping_enabled": true,
   "analysis_enabled": true,
@@ -707,3 +707,11 @@ The local job semaphore is deliberately retained until optional export finalizat
 A unified job transitions from `running` to `results_ready` immediately after the native unified scientific analysis and lightweight result summary are complete. The persisted result is readable while visualization/report/table finalization continues. When optional exports finish the job becomes `complete`. If the local server restarts while a job is `results_ready`, the scientific result is preserved and the job is recovered as complete with a warning that optional export finalization was interrupted.
 
 In v0.16.13 the local scientific worker semaphore remains held through that job's export finalization. `results_ready` still makes the scientific result immediately readable, but the default one-worker local profile avoids running a new CPU-heavy fit concurrently with a previous job's HTML/table export.
+
+## Phase 3E.6 runtime stabilization and encrypted project keys
+
+Phase 3E.6 responds to repeated realistic-cohort stalls by treating timing as persisted provenance rather than relying on percentage labels. Every job exposes its actual start time, current time/total elapsed in the browser, the current coarse stage and its elapsed time, time since the last native progress event, and a retained list of completed stage durations. This makes regressions comparable between runs and survives browser refresh/recovery.
+
+The corrected repertoire path was audited end to end. Large parsed clonotype maps are moved rather than cloned, deterministic matched-depth summaries are evaluated with bounded native workers, independent composition/ordination work is parallelized, Morisita-Horn distances are reused for PCoA + clustering, and PERMANOVA no longer recomputes invariant squared-distance totals on every permutation. The native statistical definitions and deterministic seeds remain unchanged.
+
+The browser can also export a local encrypted `.4ckey` recovery file. Encryption/decryption happens entirely in browser WebCrypto using PBKDF2-HMAC-SHA-256 + AES-256-GCM. The plaintext recovery token and key-file passphrase are not sent to the server. The encrypted payload is bound to the browser origin that created it so a credential file is not silently replayed against a different server origin. Users should keep the encrypted file and its passphrase separately; losing both the original recovery token and the encrypted key/passphrase still makes a private project unrecoverable by design.

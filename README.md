@@ -4,6 +4,13 @@ A Rust application for memory-bounded RNA expression merging plus metadata-drive
 
 The project contains a command-line interface, an `egui` desktop interface, and a browser/WASM client served by a local Rust `cfs-server`. The native Rust application remains the scientific reference implementation. The browser path is a thin same-origin client over authenticated opaque projects/objects/jobs and now drives the existing native frozen unified cohort-analysis workflow rather than maintaining a separate web statistics engine.
 
+## What v0.16.14 adds
+
+- Adds **Phase 3E.6 end-to-end runtime telemetry**. Persisted jobs now record job start time, current stage, current-stage start time, last progress update, and completed stage durations so a long calculation can be diagnosed from the browser without inferring timing from a percentage label.
+- Stabilizes corrected BCR/TCR execution for large cohorts: parsed repertoire payloads are moved into model order instead of cloned, matched-depth rarefaction/sample summaries use bounded deterministic native workers, independent composition/ordination tasks run concurrently, Morisita-Horn distance is reused instead of recomputed for clustering, and PERMANOVA reuses precomputed squared-distance pairs across permutations. Statistical definitions, deterministic seeds, BH/FDR, and final ordering are unchanged.
+- Adds an optional **encrypted `.4ckey` project-access file**. UUID + recovery token are encrypted entirely in the browser using PBKDF2-HMAC-SHA-256 (310,000 iterations) and AES-256-GCM; the passphrase is never sent to `cfs-server`. Loading a key restores the credential fields after decrypting locally and verifies the saved same-origin binding before the user authenticates.
+- Advances `/api/health` to API v12. Existing jobs remain readable; new timing fields are backward-compatible optional fields in stored job records.
+
 ## What v0.16.13 adds
 
 - Adds **Phase 3E.5: primary-results checkpoint before optional sensitivity refits**. Once corrected gene/transcript, repertoire/isotype, immune, pathway, supporting direction checks, reviewed QC, and the initial candidate ranking are complete, the browser receives a persisted `primary_results_ready` result immediately instead of waiting for PBMC/confounding sensitivity refits.

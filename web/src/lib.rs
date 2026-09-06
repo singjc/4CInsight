@@ -4,6 +4,7 @@
 mod analysis_docs;
 mod api;
 mod contract;
+mod credentials;
 #[path = "../../src/input_conventions.rs"]
 mod input_conventions;
 #[path = "../../src/ui_theme.rs"]
@@ -26,6 +27,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
+    time::Duration,
 };
 use wasm_bindgen::{JsCast, closure::Closure, prelude::*};
 
@@ -115,6 +117,9 @@ struct RemoteApiState {
     recovery_project_id: String,
     recovery_token: String,
     recovery_token_warning: String,
+    credential_passphrase: String,
+    credential_passphrase_confirm: String,
+    credential_file_status: String,
     confirm_delete: bool,
     objects: Vec<ObjectSummaryResponse>,
     assignment_roles: BTreeMap<String, String>,
@@ -160,6 +165,9 @@ impl Default for RemoteApiState {
             recovery_project_id: String::new(),
             recovery_token: String::new(),
             recovery_token_warning: String::new(),
+            credential_passphrase: String::new(),
+            credential_passphrase_confirm: String::new(),
+            credential_file_status: String::new(),
             confirm_delete: false,
             objects: Vec::new(),
             assignment_roles: BTreeMap::new(),
@@ -404,6 +412,199 @@ impl WebShellApp {
             drop(state);
             ctx.request_repaint();
         });
+    }
+
+    fn save_encrypted_project_key(&self, ctx: egui::Context) {
+        let remote = self.remote.clone();
+        let (project_id, token, display_name, passphrase) = {
+            let mut state = remote.borrow_mut();
+            if state.busy {
+                return;
+            }
+            let project_id = state.recovery_project_id.trim().to_string();
+            let token = state.recovery_token.trim().to_string();
+            let passphrase = state.credential_passphrase.clone();
+            if project_id.is_empty() || token.is_empty() {
+                state.last_error = Some(
+                    "Create or recover a project before exporting an encrypted project key."
+                        .to_string(),
+                );
+                return;
+            }
+            if passphrase.chars().count() < 12 {
+                state.last_error =
+                    Some("Use a project-key passphrase of at least 12 characters.".to_string());
+                return;
+            }
+            if passphrase != state.credential_passphrase_confirm {
+                state.last_error = Some("Project-key passphrases do not match.".to_string());
+                return;
+            }
+            state.busy = true;
+            state.last_error = None;
+            state.status_message = "Encrypting project access key locally…".to_string();
+            (
+                project_id,
+                token,
+                state.project.display_name.clone(),
+                passphrase,
+            )
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            let created_unix_seconds = (js_sys::Date::now() / 1000.0).floor().max(0.0) as u64;
+            let payload = credentials::ProjectCredentialPayload::new(
+                project_id.clone(),
+                token,
+                display_name,
+                credentials::current_origin(),
+                created_unix_seconds,
+            );
+            let encrypted = credentials::encrypt(&payload, &passphrase).await;
+            let mut state = remote.borrow_mut();
+            state.busy = false;
+            match encrypted {
+                Ok(bytes) => {
+                    let short = project_id.chars().take(8).collect::<String>();
+                    let filename = format!("4c-project-{short}.4ckey");
+                    match save_browser_download(&filename, &bytes) {
+                        Ok(()) => {
+                            state.credential_passphrase.clear();
+                            state.credential_passphrase_confirm.clear();
+                            state.credential_file_status = format!(
+                                "Saved encrypted key {filename}. Keep the file and its passphrase separate."
+                            );
+                            state.status_message = "Encrypted project key saved".to_string();
+                            state.last_error = None;
+                        }
+                        Err(error) => {
+                            state.status_message = "Project-key download failed".to_string();
+                            state.last_error = Some(error);
+                        }
+                    }
+                }
+                Err(error) => {
+                    state.status_message = "Project-key encryption failed".to_string();
+                    state.last_error = Some(error);
+                }
+            }
+            drop(state);
+            ctx.request_repaint();
+        });
+    }
+
+    fn choose_encrypted_project_key(&self, ctx: egui::Context) {
+        {
+            let mut state = self.remote.borrow_mut();
+            if state.busy {
+                return;
+            }
+            if state.credential_passphrase.is_empty() {
+                state.last_error = Some(
+                    "Enter the encrypted project-key passphrase before choosing the .4ckey file."
+                        .to_string(),
+                );
+                return;
+            }
+        }
+        let Some(window) = web_sys::window() else {
+            self.remote.borrow_mut().last_error = Some("Browser window is unavailable".to_string());
+            return;
+        };
+        let Some(document) = window.document() else {
+            self.remote.borrow_mut().last_error =
+                Some("Browser document is unavailable".to_string());
+            return;
+        };
+        let Ok(element) = document.create_element("input") else {
+            self.remote.borrow_mut().last_error =
+                Some("Unable to create project-key file selector".to_string());
+            return;
+        };
+        let Ok(input) = element.dyn_into::<web_sys::HtmlInputElement>() else {
+            self.remote.borrow_mut().last_error =
+                Some("Unable to initialize project-key file selector".to_string());
+            return;
+        };
+        input.set_type("file");
+        input.set_multiple(false);
+        input.set_accept(".4ckey,application/json");
+        let remote = self.remote.clone();
+        let input_for_change = input.clone();
+        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event| {
+            let Some(files) = input_for_change.files() else {
+                return;
+            };
+            let Some(file) = files.get(0) else {
+                return;
+            };
+            let remote = remote.clone();
+            let ctx = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let passphrase = {
+                    let mut state = remote.borrow_mut();
+                    state.busy = true;
+                    state.last_error = None;
+                    state.status_message = "Decrypting project access key locally…".to_string();
+                    state.credential_passphrase.clone()
+                };
+                let bytes_result = async {
+                    let buffer = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+                        .await
+                        .map_err(|_| {
+                            "browser could not read the encrypted project-key file".to_string()
+                        })?;
+                    let array = js_sys::Uint8Array::new(&buffer);
+                    let mut bytes = vec![0u8; array.length() as usize];
+                    array.copy_to(&mut bytes);
+                    Ok::<Vec<u8>, String>(bytes)
+                }
+                .await;
+                let decrypted = match bytes_result {
+                    Ok(bytes) => credentials::decrypt(&bytes, &passphrase).await,
+                    Err(error) => Err(error),
+                };
+                let mut state = remote.borrow_mut();
+                state.busy = false;
+                match decrypted {
+                    Ok(payload) => {
+                        let current_origin = credentials::current_origin();
+                        if !payload.origin.is_empty()
+                            && !current_origin.is_empty()
+                            && payload.origin != current_origin
+                        {
+                            state.status_message =
+                                "Encrypted project key was not loaded".to_string();
+                            state.last_error = Some(format!(
+                                "This key is bound to {} but the current app origin is {}. Open the same trusted 4C server origin before loading it.",
+                                payload.origin, current_origin
+                            ));
+                        } else {
+                            state.recovery_project_id = payload.project_id;
+                            state.recovery_token = payload.recovery_token;
+                            if !payload.display_name.trim().is_empty() {
+                                state.project_name = payload.display_name;
+                            }
+                            state.credential_passphrase.clear();
+                            state.credential_passphrase_confirm.clear();
+                            state.credential_file_status =
+                                "Encrypted project key loaded. Click Recover / refresh project to authenticate."
+                                    .to_string();
+                            state.status_message = "Encrypted project key loaded".to_string();
+                            state.last_error = None;
+                        }
+                    }
+                    Err(error) => {
+                        state.status_message = "Project-key decryption failed".to_string();
+                        state.last_error = Some(error);
+                    }
+                }
+                drop(state);
+                ctx.request_repaint();
+            });
+        });
+        input.set_onchange(Some(closure.as_ref().unchecked_ref()));
+        input.click();
+        closure.forget();
     }
 
     fn delete_remote_project(&self, ctx: egui::Context) {
@@ -1971,7 +2172,7 @@ impl WebShellApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.remote.borrow().clone();
         let connected = snapshot.health.is_some();
-        let phase_label = "Web · Phase 3E.5";
+        let phase_label = "Web · Phase 3E.6";
         let server_label = if connected {
             "Local server connected"
         } else {
@@ -2025,7 +2226,7 @@ impl WebShellApp {
     fn overview(&mut self, ui: &mut egui::Ui) {
         ui.heading("Browser client + local Rust server");
         ui.label(
-            "Phase 3E.5 publishes the primary corrected cohort result before optional PBMC/confounding sensitivity refits, then advances the same frozen job to the full scientific result before interactive/report/table finalization.",
+            "Phase 3E.6 adds persisted per-stage runtime telemetry, encrypted browser-side project-key files, and a stabilized/parallel corrected-repertoire path while preserving the Phase 3E.5 early primary-results checkpoint.",
         );
         ui.add_space(10.0);
 
@@ -2084,7 +2285,7 @@ impl WebShellApp {
             .inner_margin(12)
             .corner_radius(8)
             .show(ui, |ui| {
-            ui.label(egui::RichText::new("What works in Phase 3E.5").strong());
+            ui.label(egui::RichText::new("What works in Phase 3E.6").strong());
             for item in [
                 "One Rust cfs-server serves both web/dist and /api from 127.0.0.1:8080 by default.",
                 "A private temporary project can be created with an opaque UUID and independent recovery token.",
@@ -2223,7 +2424,7 @@ impl WebShellApp {
     fn cohort_shell(&mut self, ui: &mut egui::Ui) {
         ui.heading("Cohort Analysis — frozen native unified workflow");
         ui.label(
-            "Phase 3E.5 keeps the validated high-throughput ingest/mapping and frozen unified native analysis, publishes primary corrected results before optional PBMC/confounding refits finish, and then enriches the same frozen job with sensitivity diagnostics, interactive views, reports, and technical exports.",
+            "Phase 3E.6 keeps the validated high-throughput ingest/mapping and frozen unified native analysis, adds end-to-end stage timing/last-progress telemetry, stabilizes corrected repertoire execution, and supports encrypted local .4ckey recovery files without changing the server capability-token model.",
         );
         ui.add_space(8.0);
 
@@ -2325,6 +2526,34 @@ impl WebShellApp {
                             .strong(),
                     );
                 }
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Encrypted project key (optional): save the UUID + recovery token into a local .4ckey file encrypted entirely in this browser. The passphrase is never sent to cfs-server and is not stored by 4C.",
+                    )
+                    .small(),
+                );
+                egui::Grid::new("web_phase3e_encrypted_project_key_grid").show(ui, |ui| {
+                    ui.label("Key passphrase");
+                    ui.add_sized(
+                        [330.0, 24.0],
+                        egui::TextEdit::singleline(&mut state.credential_passphrase)
+                            .password(true)
+                            .hint_text("at least 12 characters"),
+                    );
+                    ui.end_row();
+                    ui.label("Confirm for save");
+                    ui.add_sized(
+                        [330.0, 24.0],
+                        egui::TextEdit::singleline(&mut state.credential_passphrase_confirm)
+                            .password(true)
+                            .hint_text("re-enter passphrase when exporting"),
+                    );
+                    ui.end_row();
+                });
+                if !state.credential_file_status.is_empty() {
+                    ui.label(egui::RichText::new(&state.credential_file_status).small());
+                }
             }
             ui.horizontal_wrapped(|ui| {
                 if ui
@@ -2333,11 +2562,31 @@ impl WebShellApp {
                 {
                     self.recover_remote_project(ui.ctx().clone());
                 }
+                if ui
+                    .add_enabled(
+                        !snapshot.busy
+                            && !snapshot.recovery_project_id.trim().is_empty()
+                            && !snapshot.recovery_token.trim().is_empty(),
+                        egui::Button::new("Save encrypted .4ckey"),
+                    )
+                    .clicked()
+                {
+                    self.save_encrypted_project_key(ui.ctx().clone());
+                }
+                if ui
+                    .add_enabled(!snapshot.busy, egui::Button::new("Load encrypted .4ckey…"))
+                    .clicked()
+                {
+                    self.choose_encrypted_project_key(ui.ctx().clone());
+                }
                 if ui.button("Clear credentials from this browser view").clicked() {
                     let mut state = self.remote.borrow_mut();
                     state.recovery_project_id.clear();
                     state.recovery_token.clear();
                     state.recovery_token_warning.clear();
+                    state.credential_passphrase.clear();
+                    state.credential_passphrase_confirm.clear();
+                    state.credential_file_status.clear();
                     state.project = RemoteProjectSummary::default();
                     state.objects.clear();
                     state.assignment_roles.clear();
@@ -3242,12 +3491,15 @@ impl WebShellApp {
                             .show(ui, |ui| {
                                 ui.label(egui::RichText::new("Job ID").strong());
                                 ui.label(egui::RichText::new("Status").strong());
+                                ui.label(egui::RichText::new("Elapsed").strong());
                                 ui.label(egui::RichText::new("Progress").strong());
                                 ui.label(egui::RichText::new("Actions").strong());
                                 ui.end_row();
+                                let now = browser_now_unix_seconds();
                                 for job in &snapshot.jobs {
                                     ui.monospace(&job.job_id);
                                     ui.label(&job.status);
+                                    ui.monospace(format_elapsed_duration(job_elapsed_seconds(job, now)));
                                     ui.label(&job.progress_message);
                                     ui.horizontal(|ui| {
                                         if ui.small_button("Open results").clicked() {
@@ -3293,12 +3545,46 @@ impl WebShellApp {
                     ui.add_space(10.0);
                     ui.separator();
                     ui.label(egui::RichText::new("Opened job results").heading());
+                    let now = browser_now_unix_seconds();
+                    if job_status_is_live(&job.summary.status) {
+                        ui.ctx().request_repaint_after(Duration::from_secs(1));
+                    }
+                    let started = job
+                        .summary
+                        .started_unix_seconds
+                        .unwrap_or(job.summary.created_unix_seconds);
+                    let stage_started = job
+                        .summary
+                        .current_stage_started_unix_seconds
+                        .unwrap_or(job.summary.updated_unix_seconds);
                     egui::Grid::new("web_phase3e_active_job")
                         .striped(true)
                         .show(ui, |ui| {
                             for (label, value) in [
                                 ("Job ID", job.summary.job_id.clone()),
                                 ("Status", job.summary.status.clone()),
+                                ("Started (UTC)", format_utc_timestamp(started)),
+                                ("Current time (UTC)", format_utc_timestamp(now)),
+                                ("Total elapsed", format_elapsed_duration(now.saturating_sub(started))),
+                                (
+                                    "Current stage",
+                                    job.summary
+                                        .current_stage
+                                        .clone()
+                                        .unwrap_or_else(|| "Waiting for first timed stage".to_string()),
+                                ),
+                                (
+                                    "Current stage elapsed",
+                                    format_elapsed_duration(now.saturating_sub(stage_started)),
+                                ),
+                                (
+                                    "Last progress update",
+                                    format_utc_timestamp(job.summary.updated_unix_seconds),
+                                ),
+                                (
+                                    "Since last progress",
+                                    format_elapsed_duration(now.saturating_sub(job.summary.updated_unix_seconds)),
+                                ),
                                 ("Progress", job.summary.progress_message.clone()),
                                 ("Snapshot SHA-256", job.summary.snapshot_sha256.clone()),
                             ] {
@@ -3311,6 +3597,29 @@ impl WebShellApp {
                                 ui.end_row();
                             }
                         });
+                    if !job.summary.stage_timings.is_empty() {
+                        egui::CollapsingHeader::new(format!(
+                            "Completed stage timings ({})",
+                            job.summary.stage_timings.len()
+                        ))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            egui::Grid::new("web_phase3e_stage_timings")
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new("Stage").strong());
+                                    ui.label(egui::RichText::new("Elapsed").strong());
+                                    ui.label(egui::RichText::new("Started UTC").strong());
+                                    ui.end_row();
+                                    for timing in &job.summary.stage_timings {
+                                        ui.label(&timing.stage);
+                                        ui.monospace(format_elapsed_duration(timing.elapsed_seconds));
+                                        ui.monospace(format_utc_timestamp(timing.started_unix_seconds));
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    }
                     if job.summary.status == "primary_results_ready" {
                         ui.add_space(6.0);
                         egui::Frame::group(ui.style())
@@ -4133,6 +4442,41 @@ fn selected_metadata_rows(
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+fn browser_now_unix_seconds() -> u64 {
+    (js_sys::Date::now() / 1000.0).floor().max(0.0) as u64
+}
+
+fn format_utc_timestamp(unix_seconds: u64) -> String {
+    let value = JsValue::from_f64(unix_seconds as f64 * 1000.0);
+    js_sys::Date::new(&value)
+        .to_iso_string()
+        .as_string()
+        .unwrap_or_else(|| unix_seconds.to_string())
+}
+
+fn format_elapsed_duration(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let secs = seconds % 60;
+    if days > 0 {
+        format!("{days}d {hours:02}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{secs:02}")
+    }
+}
+
+fn job_status_is_live(status: &str) -> bool {
+    matches!(
+        status,
+        "queued" | "preparing" | "running" | "primary_results_ready" | "results_ready"
+    )
+}
+
+fn job_elapsed_seconds(job: &api::JobSummaryResponse, now: u64) -> u64 {
+    now.saturating_sub(job.started_unix_seconds.unwrap_or(job.created_unix_seconds))
 }
 
 fn format_bytes(bytes: u64) -> String {

@@ -1357,6 +1357,14 @@ where
         )
     };
     let dtu = if feature_label.eq_ignore_ascii_case("Transcript") {
+        // DTU performs additional full transcript-matrix passes. Make that
+        // work visible as its own timed substage instead of leaving the last
+        // feature-model progress message on screen for the whole DTU runtime.
+        progress(
+            (total_rows * 2).saturating_sub(1),
+            (total_rows * 2).max(1),
+            "Transcript: differential transcript-usage screen",
+        );
         match run_dtu_screen(merged_tsv, &design_cols, &design, spec) {
             Ok(result) => Some(result),
             Err(_) => None,
@@ -1721,6 +1729,173 @@ struct ParsedRepertoire {
     weighted_mean_cdr3_aa_length: f64,
 }
 
+fn repertoire_sample_summary(
+    sample: &ParsedRepertoire,
+    subject: &str,
+    sharing: (f64, f64, f64),
+    matched_depth: usize,
+    rarefaction_reps: usize,
+) -> CorrectedRepertoireSample {
+    let (rr, rs) = rarefy_metrics(
+        &sample.counts,
+        matched_depth,
+        rarefaction_reps,
+        stable_seed(&sample.sample_id),
+    );
+    let total_count = sample.counts.iter().sum::<f64>();
+    let shannon = shannon_entropy(&sample.counts);
+    let clonality = if sample.counts.len() > 1 {
+        1.0 - shannon / (sample.counts.len() as f64).ln()
+    } else {
+        f64::NAN
+    };
+    let (private, longitudinal, public) = sharing;
+    let convergent_reads = sample
+        .aa_to_nt
+        .iter()
+        .filter(|(_, nts)| nts.len() > 1)
+        .map(|(aa, _)| sample.aa_read_counts.get(aa).copied().unwrap_or(0.0))
+        .sum::<f64>();
+    CorrectedRepertoireSample {
+        sample_id: sample.sample_id.clone(),
+        group: sample.group.clone(),
+        subject: subject.to_string(),
+        total_clone_count: total_count,
+        observed_richness: sample.counts.len() as f64,
+        shannon,
+        clonality,
+        rarefied_richness: rr,
+        rarefied_shannon: rs,
+        top_clone_fraction: sample.top_clone_fraction,
+        weighted_mean_cdr3_aa_length: sample.weighted_mean_cdr3_aa_length,
+        private_fraction: private,
+        longitudinal_shared_fraction: longitudinal,
+        public_fraction: public,
+        convergent_read_fraction: if total_count > 0.0 {
+            convergent_reads / total_count
+        } else {
+            f64::NAN
+        },
+    }
+}
+
+fn repertoire_summary_worker_count(sample_count: usize) -> usize {
+    if sample_count == 0 {
+        return 1;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        1
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::available_parallelism()
+            .map(|value| value.get().min(8).min(sample_count).max(1))
+            .unwrap_or(1)
+    }
+}
+
+fn build_repertoire_sample_summaries<F>(
+    samples: &[ParsedRepertoire],
+    subjects: &[String],
+    sharing: &[(f64, f64, f64)],
+    matched_depth: usize,
+    rarefaction_reps: usize,
+    label: &str,
+    progress: &mut F,
+) -> Result<Vec<CorrectedRepertoireSample>>
+where
+    F: FnMut(usize, usize, &str),
+{
+    if samples.len() != subjects.len() || samples.len() != sharing.len() {
+        bail!("internal repertoire sample/subject alignment mismatch");
+    }
+    let n = samples.len();
+    let workers = repertoire_summary_worker_count(n);
+    if workers == 1 || n < 8 {
+        let mut out = Vec::with_capacity(n);
+        for (i, sample) in samples.iter().enumerate() {
+            let summary = repertoire_sample_summary(
+                sample,
+                &subjects[i],
+                sharing[i],
+                matched_depth,
+                rarefaction_reps,
+            );
+            progress(
+                350 + ((i + 1) * 300 / n.max(1)),
+                1000,
+                &format!(
+                    "{label}: matched-depth diversity {} ({}/{n})",
+                    sample.sample_id,
+                    i + 1
+                ),
+            );
+            out.push(summary);
+        }
+        return Ok(out);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::sync::mpsc;
+        let chunk_size = n.div_ceil(workers);
+        let (tx, rx) = mpsc::channel::<(usize, CorrectedRepertoireSample)>();
+        return std::thread::scope(|scope| -> Result<Vec<CorrectedRepertoireSample>> {
+            for start in (0..n).step_by(chunk_size) {
+                let end = (start + chunk_size).min(n);
+                let tx = tx.clone();
+                let sample_chunk = &samples[start..end];
+                let subject_chunk = &subjects[start..end];
+                let sharing_chunk = &sharing[start..end];
+                scope.spawn(move || {
+                    for local in 0..sample_chunk.len() {
+                        let index = start + local;
+                        let summary = repertoire_sample_summary(
+                            &sample_chunk[local],
+                            &subject_chunk[local],
+                            sharing_chunk[local],
+                            matched_depth,
+                            rarefaction_reps,
+                        );
+                        if tx.send((index, summary)).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+            drop(tx);
+            let mut slots = std::iter::repeat_with(|| None)
+                .take(n)
+                .collect::<Vec<Option<CorrectedRepertoireSample>>>();
+            for completed in 0..n {
+                let (index, summary) = rx.recv().map_err(|_| {
+                    anyhow!("parallel repertoire summary worker stopped unexpectedly")
+                })?;
+                let sample_id = summary.sample_id.clone();
+                slots[index] = Some(summary);
+                progress(
+                    350 + ((completed + 1) * 300 / n.max(1)),
+                    1000,
+                    &format!(
+                        "{label}: matched-depth diversity {sample_id} ({}/{n}; {workers} workers)",
+                        completed + 1
+                    ),
+                );
+            }
+            slots
+                .into_iter()
+                .map(|value| {
+                    value.ok_or_else(|| anyhow!("missing parallel repertoire summary row"))
+                })
+                .collect()
+        });
+    }
+
+    #[allow(unreachable_code)]
+    Ok(Vec::new())
+}
+
 pub fn run_corrected_repertoire<F>(
     files: &[DetectedCohortFile],
     metadata: &MetadataTable,
@@ -1767,9 +1942,9 @@ where
             continue;
         };
         progress(
-            i + 1,
-            total.max(1),
-            &format!("{label}: parsing {}", file.sample_id),
+            ((i + 1) * 300 / total.max(1)).max(1),
+            1000,
+            &format!("{label}: parsing {} ({}/{total})", file.sample_id, i + 1),
         );
         match parse_repertoire_file(
             &file.path,
@@ -1794,14 +1969,17 @@ where
         .collect::<Vec<_>>();
     let design = build_design(metadata, comparison, &sample_ids, spec)?;
     // Keep only complete-case model samples, preserving design order.
-    let by_id = parsed
+    // Move the parsed repertoire payloads into model order rather than cloning
+    // their potentially very large clonotype/count maps.  This materially
+    // reduces peak memory and allocator pressure for 300+ sample cohorts.
+    let mut by_id = parsed
         .into_iter()
         .map(|p| (normalize_sample_id(&p.sample_id), p))
         .collect::<HashMap<_, _>>();
-    let mut model_samples = Vec::new();
+    let mut model_samples = Vec::with_capacity(design.sample_ids.len());
     for id in &design.sample_ids {
-        if let Some(p) = by_id.get(&normalize_sample_id(id)) {
-            model_samples.push(p.clone());
+        if let Some(p) = by_id.remove(&normalize_sample_id(id)) {
+            model_samples.push(p);
         }
     }
     if model_samples.len() != design.sample_ids.len() {
@@ -1815,60 +1993,33 @@ where
         .unwrap_or(1);
     let matched_depth = min_total.min(spec.rarefaction_cap.max(100));
     let subjects = design.subjects.clone();
+    progress(
+        320,
+        1000,
+        &format!(
+            "{label}: computing clonotype sharing across {} model sample(s)",
+            model_samples.len()
+        ),
+    );
     let sharing = sharing_fractions(&model_samples, &subjects, spec.subject_column.is_some());
-    let mut summaries = Vec::new();
-    for (i, p) in model_samples.iter().enumerate() {
-        progress(
-            i + 1,
-            model_samples.len(),
-            &format!("{label}: matched-depth diversity {}", p.sample_id),
-        );
-        let (rr, rs) = rarefy_metrics(
-            &p.counts,
-            matched_depth,
+    progress(
+        350,
+        1000,
+        &format!(
+            "{label}: matched-depth diversity at depth {matched_depth} ({} replicate(s); {} worker(s))",
             spec.rarefaction_reps,
-            stable_seed(&p.sample_id),
-        );
-        let total_count = p.counts.iter().sum::<f64>();
-        let shannon = shannon_entropy(&p.counts);
-        let clonality = if p.counts.len() > 1 {
-            1.0 - shannon / (p.counts.len() as f64).ln()
-        } else {
-            f64::NAN
-        };
-        let (private, longitudinal, public) =
-            sharing
-                .get(i)
-                .copied()
-                .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
-        let convergent_reads = p
-            .aa_to_nt
-            .iter()
-            .filter(|(_, nts)| nts.len() > 1)
-            .map(|(aa, _)| p.aa_read_counts.get(aa).copied().unwrap_or(0.0))
-            .sum::<f64>();
-        summaries.push(CorrectedRepertoireSample {
-            sample_id: p.sample_id.clone(),
-            group: p.group.clone(),
-            subject: subjects[i].clone(),
-            total_clone_count: total_count,
-            observed_richness: p.counts.len() as f64,
-            shannon,
-            clonality,
-            rarefied_richness: rr,
-            rarefied_shannon: rs,
-            top_clone_fraction: p.top_clone_fraction,
-            weighted_mean_cdr3_aa_length: p.weighted_mean_cdr3_aa_length,
-            private_fraction: private,
-            longitudinal_shared_fraction: longitudinal,
-            public_fraction: public,
-            convergent_read_fraction: if total_count > 0.0 {
-                convergent_reads / total_count
-            } else {
-                f64::NAN
-            },
-        });
-    }
+            repertoire_summary_worker_count(model_samples.len())
+        ),
+    );
+    let summaries = build_repertoire_sample_summaries(
+        &model_samples,
+        &subjects,
+        &sharing,
+        matched_depth,
+        spec.rarefaction_reps,
+        label,
+        &mut progress,
+    )?;
     let metric_specs: [(&str, fn(&CorrectedRepertoireSample) -> f64); 8] = [
         ("Matched-depth richness", |r| r.rarefied_richness),
         ("Matched-depth Shannon diversity", |r| r.rarefied_shannon),
@@ -1907,40 +2058,136 @@ where
     }
     apply_bh_adjusted(&mut metric_tests);
 
-    let mut compositions = Vec::new();
-    let families: Vec<&str> = match modality {
+    progress(
+        670,
+        1000,
+        &format!("{label}: adjusted diversity metrics complete"),
+    );
+
+    let families: Vec<&'static str> = match modality {
         CohortModality::Bcr => vec!["Isotype", "V gene", "D gene", "J gene"],
         _ => vec!["V gene", "J gene", "V-J pair"],
     };
-    for family in families {
-        if let Some(comp) = composition_analysis(family, &model_samples, &design, spec) {
-            compositions.push(comp);
-        }
-    }
+    progress(
+        700,
+        1000,
+        &format!(
+            "{label}: building Morisita-Horn + Jaccard distance matrices ({} samples)",
+            model_samples.len()
+        ),
+    );
+    // Build the shared clonotype inverted index once for both distance metrics.
+    // The older path rebuilt the same large index independently for Morisita
+    // and Jaccard, and recomputed Morisita once more for clustering.
+    let (morisita_dist, jaccard_dist) = repertoire_distance_matrices(&model_samples);
+    progress(
+        780,
+        1000,
+        &format!(
+            "{label}: composition + ordination/PERMANOVA tasks ({} permutation(s))",
+            spec.permutations
+        ),
+    );
 
-    let morisita = repertoire_ordination(
-        &model_samples,
-        &design,
-        SimilarityMetric::MorisitaHorn,
-        spec.permutations,
-        &format!("{label} Morisita-Horn PCoA"),
-    );
-    let jaccard = repertoire_ordination(
-        &model_samples,
-        &design,
-        SimilarityMetric::Jaccard,
-        spec.permutations,
-        &format!("{label} Jaccard PCoA"),
-    );
-    let dendrogram = {
-        let distances = repertoire_distance_matrix(&model_samples, SimilarityMetric::MorisitaHorn);
-        average_linkage_dendrogram(
-            &distances,
+    let mor_title = format!("{label} Morisita-Horn PCoA");
+    let jac_title = format!("{label} Jaccard PCoA");
+    let dendro_title = format!("{label} hierarchical clustering — Morisita-Horn distance");
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let (compositions, morisita, jaccard, dendrogram) = std::thread::scope(|scope| -> Result<_> {
+        let samples_ref = &model_samples;
+        let design_ref = &design;
+        let spec_ref = spec;
+        let mut composition_handles = Vec::with_capacity(families.len());
+        for &family in &families {
+            composition_handles
+                .push(scope.spawn(move || {
+                    composition_analysis(family, samples_ref, design_ref, spec_ref)
+                }));
+        }
+        let mor_handle = scope.spawn(|| {
+            pcoa_from_distance(
+                &morisita_dist,
+                &design,
+                &mor_title,
+                spec.permutations,
+                stable_seed(&mor_title),
+            )
+        });
+        let jac_handle = scope.spawn(|| {
+            pcoa_from_distance(
+                &jaccard_dist,
+                &design,
+                &jac_title,
+                spec.permutations,
+                stable_seed(&jac_title),
+            )
+        });
+        let dendro_handle = scope.spawn(|| {
+            average_linkage_dendrogram(
+                &morisita_dist,
+                &design,
+                &dendro_title,
+                "1 - Morisita-Horn similarity",
+            )
+        });
+
+        let mut compositions = Vec::new();
+        for handle in composition_handles {
+            if let Some(result) = handle
+                .join()
+                .map_err(|_| anyhow!("parallel repertoire composition worker panicked"))?
+            {
+                compositions.push(result);
+            }
+        }
+        let morisita = mor_handle
+            .join()
+            .map_err(|_| anyhow!("parallel Morisita-Horn ordination worker panicked"))?;
+        let jaccard = jac_handle
+            .join()
+            .map_err(|_| anyhow!("parallel Jaccard ordination worker panicked"))?;
+        let dendrogram = dendro_handle
+            .join()
+            .map_err(|_| anyhow!("parallel repertoire dendrogram worker panicked"))?;
+        Ok((compositions, morisita, jaccard, dendrogram))
+    })?;
+
+    #[cfg(target_arch = "wasm32")]
+    let (compositions, morisita, jaccard, dendrogram) = {
+        let mut compositions = Vec::new();
+        for family in families {
+            if let Some(comp) = composition_analysis(family, &model_samples, &design, spec) {
+                compositions.push(comp);
+            }
+        }
+        let morisita = pcoa_from_distance(
+            &morisita_dist,
             &design,
-            &format!("{label} hierarchical clustering — Morisita-Horn distance"),
+            &mor_title,
+            spec.permutations,
+            stable_seed(&mor_title),
+        );
+        let jaccard = pcoa_from_distance(
+            &jaccard_dist,
+            &design,
+            &jac_title,
+            spec.permutations,
+            stable_seed(&jac_title),
+        );
+        let dendrogram = average_linkage_dendrogram(
+            &morisita_dist,
+            &design,
+            &dendro_title,
             "1 - Morisita-Horn similarity",
-        )
+        );
+        (compositions, morisita, jaccard, dendrogram)
     };
+    progress(
+        1000,
+        1000,
+        &format!("{label}: corrected repertoire analysis complete"),
+    );
     if spec.subject_column.is_none() {
         warnings.push("No subject ID column was selected: public/private sharing is sample-based and PERMANOVA permutations are unrestricted. Select a patient/subject column for longitudinally aware results.".to_string());
     }
@@ -2181,19 +2428,27 @@ fn composition_analysis(
     design: &DesignMatrix,
     spec: &CorrectedModelSpec,
 ) -> Option<CorrectedCompositionResult> {
+    // Borrow the per-sample composition maps rather than cloning every V/D/J/
+    // isotype feature map for each analysis family. These maps can be sizeable
+    // across a few hundred samples, and the analysis only reads them.
     let maps = samples
         .iter()
-        .map(|p| p.feature_maps.get(family).cloned().unwrap_or_default())
+        .map(|p| p.feature_maps.get(family))
         .collect::<Vec<_>>();
     let all_features = maps
         .iter()
+        .filter_map(|m| *m)
         .flat_map(|m| m.keys().cloned())
         .collect::<BTreeSet<_>>();
     let mut retained = Vec::new();
     for feature in all_features {
         let vals = maps
             .iter()
-            .map(|m| *m.get(&feature).unwrap_or(&0.0))
+            .map(|m| {
+                (*m).and_then(|map| map.get(&feature))
+                    .copied()
+                    .unwrap_or(0.0)
+            })
             .collect::<Vec<_>>();
         let avg = mean(&vals);
         let prevalence =
@@ -2210,7 +2465,14 @@ fn composition_analysis(
     for (i, map) in maps.iter().enumerate() {
         let logs = retained
             .iter()
-            .map(|f| (map.get(f).copied().unwrap_or(0.0) + pseudo).ln())
+            .map(|f| {
+                ((*map)
+                    .and_then(|values| values.get(f))
+                    .copied()
+                    .unwrap_or(0.0)
+                    + pseudo)
+                    .ln()
+            })
             .collect::<Vec<_>>();
         let center = mean(&logs);
         for j in 0..retained.len() {
@@ -2222,7 +2484,11 @@ fn composition_analysis(
         let y = clr_by_sample.iter().map(|row| row[j]).collect::<Vec<_>>();
         let display = maps
             .iter()
-            .map(|m| *m.get(feature).unwrap_or(&0.0))
+            .map(|m| {
+                (*m).and_then(|map| map.get(feature))
+                    .copied()
+                    .unwrap_or(0.0)
+            })
             .collect::<Vec<_>>();
         if let Some(test) =
             make_adjusted_test(feature.clone(), family.to_string(), &y, &display, design)
@@ -2254,21 +2520,15 @@ fn composition_analysis(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SimilarityMetric {
-    MorisitaHorn,
-    Jaccard,
-}
-
-fn repertoire_distance_matrix(
-    samples: &[ParsedRepertoire],
-    metric: SimilarityMetric,
-) -> Vec<Vec<f64>> {
+fn repertoire_distance_matrices(samples: &[ParsedRepertoire]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
     let n = samples.len();
     if n == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    let mut inverted: HashMap<String, Vec<(usize, f64)>> = HashMap::new();
+    // Borrow clonotype identifiers from the parsed sample maps. The distance
+    // index is temporary, so allocating/cloning every CDR3/V/J key here only
+    // increases runtime and peak memory without changing the calculation.
+    let mut inverted: HashMap<&str, Vec<(usize, f64)>> = HashMap::new();
     let mut sums_sq = vec![0.0; n];
     let mut richness = vec![0usize; n];
     for (i, sample) in samples.iter().enumerate() {
@@ -2280,7 +2540,7 @@ fn repertoire_distance_matrix(
         for (clono, count) in &sample.clonotype_aa {
             let p = count / total;
             sums_sq[i] += p * p;
-            inverted.entry(clono.clone()).or_default().push((i, p));
+            inverted.entry(clono.as_str()).or_default().push((i, p));
         }
     }
     let mut dotm = vec![vec![0.0; n]; n];
@@ -2301,45 +2561,31 @@ fn repertoire_distance_matrix(
             }
         }
     }
-    let mut dist = vec![vec![0.0; n]; n];
+    let mut morisita = vec![vec![0.0; n]; n];
+    let mut jaccard = vec![vec![0.0; n]; n];
     for i in 0..n {
-        for j in 0..n {
-            let sim = match metric {
-                SimilarityMetric::MorisitaHorn => {
-                    let den = sums_sq[i] + sums_sq[j];
-                    if den > 0.0 {
-                        (2.0 * dotm[i][j] / den).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    }
-                }
-                SimilarityMetric::Jaccard => {
-                    let union = richness[i] + richness[j] - shared[i][j];
-                    if union > 0 {
-                        shared[i][j] as f64 / union as f64
-                    } else {
-                        0.0
-                    }
-                }
+        for j in i..n {
+            let den = sums_sq[i] + sums_sq[j];
+            let morisita_sim = if den > 0.0 {
+                (2.0 * dotm[i][j] / den).clamp(0.0, 1.0)
+            } else {
+                0.0
             };
-            dist[i][j] = (1.0 - sim).max(0.0);
+            let union = richness[i] + richness[j] - shared[i][j];
+            let jaccard_sim = if union > 0 {
+                shared[i][j] as f64 / union as f64
+            } else {
+                0.0
+            };
+            let m = (1.0 - morisita_sim).max(0.0);
+            let jv = (1.0 - jaccard_sim).max(0.0);
+            morisita[i][j] = m;
+            morisita[j][i] = m;
+            jaccard[i][j] = jv;
+            jaccard[j][i] = jv;
         }
     }
-    dist
-}
-
-fn repertoire_ordination(
-    samples: &[ParsedRepertoire],
-    design: &DesignMatrix,
-    metric: SimilarityMetric,
-    permutations: usize,
-    title: &str,
-) -> Option<OrdinationResult> {
-    let dist = repertoire_distance_matrix(samples, metric);
-    if dist.len() < 3 {
-        return None;
-    }
-    pcoa_from_distance(&dist, design, title, permutations, stable_seed(title))
+    (morisita, jaccard)
 }
 
 fn sharing_fractions(
@@ -2347,14 +2593,23 @@ fn sharing_fractions(
     subjects: &[String],
     subject_aware: bool,
 ) -> Vec<(f64, f64, f64)> {
-    let mut prevalence: HashMap<String, (HashSet<String>, usize)> = HashMap::new();
+    // A clonotype only needs three sharing facts: its first subject, whether
+    // it has crossed into a second subject, and the number of sample files in
+    // which it appears. Avoid allocating a HashSet (and cloning subject IDs)
+    // for every unique clonotype -- most repertoire clonotypes are private.
+    let mut prevalence: HashMap<&str, (&str, bool, usize)> = HashMap::new();
     for (i, sample) in samples.iter().enumerate() {
+        let subject = subjects[i].as_str();
         for clono in sample.clonotype_aa.keys() {
-            let entry = prevalence
-                .entry(clono.clone())
-                .or_insert_with(|| (HashSet::new(), 0));
-            entry.0.insert(subjects[i].clone());
-            entry.1 += 1;
+            prevalence
+                .entry(clono.as_str())
+                .and_modify(|(first_subject, multiple_subjects, n_samples)| {
+                    *n_samples += 1;
+                    if *first_subject != subject {
+                        *multiple_subjects = true;
+                    }
+                })
+                .or_insert((subject, false, 1));
         }
     }
     samples
@@ -2369,12 +2624,21 @@ fn sharing_fractions(
             let mut longitudinal = 0.0;
             let mut public = 0.0;
             for (clono, count) in &sample.clonotype_aa {
-                let (subj, n_samples) = prevalence.get(clono).cloned().unwrap_or_default();
-                if subj.len() >= 2 {
-                    public += count;
-                } else if subject_aware && n_samples >= 2 && subj.contains(&subjects[i]) {
-                    longitudinal += count;
+                if let Some((first_subject, multiple_subjects, n_samples)) =
+                    prevalence.get(clono.as_str())
+                {
+                    if *multiple_subjects {
+                        public += count;
+                    } else if subject_aware
+                        && *n_samples >= 2
+                        && *first_subject == subjects[i].as_str()
+                    {
+                        longitudinal += count;
+                    } else {
+                        private += count;
+                    }
                 } else {
+                    // Defensive parity with the previous default-value path.
                     private += count;
                 }
             }
@@ -2954,7 +3218,23 @@ fn permanova(
     if dist.len() != groups.len() || groups.len() < 4 {
         return (f64::NAN, f64::NAN);
     }
-    let observed = permanova_f(dist, groups);
+    // The distance matrix is invariant across permutations.  Precompute the
+    // squared upper triangle and the group-independent total once rather than
+    // recomputing both for every shuffled label vector.  This preserves the
+    // exact permutation sequence and pair iteration order while removing a
+    // large amount of redundant work for repertoire-scale cohorts.
+    let n = groups.len();
+    let mut pairs = Vec::with_capacity(n.saturating_mul(n.saturating_sub(1)) / 2);
+    let mut total_sum = 0.0;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let d2 = dist[i][j] * dist[i][j];
+            total_sum += d2;
+            pairs.push((i, j, d2));
+        }
+    }
+    let total = total_sum / n as f64;
+    let observed = permanova_f_from_pairs(&pairs, groups, total);
     if !observed.is_finite() || permutations == 0 {
         return (observed, f64::NAN);
     }
@@ -2977,7 +3257,7 @@ fn permanova(
                 perm[i] = labels[b];
             }
         }
-        let f = permanova_f(dist, &perm);
+        let f = permanova_f_from_pairs(&pairs, &perm, total);
         if f.is_finite() && f >= observed - 1e-12 {
             extreme += 1;
         }
@@ -2988,30 +3268,21 @@ fn permanova(
     )
 }
 
-fn permanova_f(dist: &[Vec<f64>], groups: &[bool]) -> f64 {
+fn permanova_f_from_pairs(pairs: &[(usize, usize, f64)], groups: &[bool], total: f64) -> f64 {
     let n = groups.len();
     let n_case = groups.iter().filter(|x| **x).count();
     let n_ctrl = n - n_case;
     if n_case < 2 || n_ctrl < 2 {
         return f64::NAN;
     }
-    let mut total = 0.0;
-    for i in 0..n {
-        for j in (i + 1)..n {
-            total += dist[i][j].powi(2);
-        }
-    }
-    total /= n as f64;
     let mut within_case = 0.0;
     let mut within_ctrl = 0.0;
-    for i in 0..n {
-        for j in (i + 1)..n {
-            if groups[i] == groups[j] {
-                if groups[i] {
-                    within_case += dist[i][j].powi(2)
-                } else {
-                    within_ctrl += dist[i][j].powi(2)
-                }
+    for &(i, j, d2) in pairs {
+        if groups[i] == groups[j] {
+            if groups[i] {
+                within_case += d2;
+            } else {
+                within_ctrl += d2;
             }
         }
     }
@@ -3021,6 +3292,23 @@ fn permanova_f(dist: &[Vec<f64>], groups: &[bool]) -> f64 {
         return f64::INFINITY;
     }
     (between / 1.0) / (within / (n as f64 - 2.0))
+}
+
+fn permanova_f(dist: &[Vec<f64>], groups: &[bool]) -> f64 {
+    if dist.len() != groups.len() || groups.is_empty() {
+        return f64::NAN;
+    }
+    let n = groups.len();
+    let mut pairs = Vec::with_capacity(n.saturating_mul(n.saturating_sub(1)) / 2);
+    let mut total_sum = 0.0;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let d2 = dist[i][j] * dist[i][j];
+            total_sum += d2;
+            pairs.push((i, j, d2));
+        }
+    }
+    permanova_f_from_pairs(&pairs, groups, total_sum / n as f64)
 }
 
 fn euclidean_distance_from_rows(feature_rows: &[Vec<f64>]) -> Vec<Vec<f64>> {
@@ -3702,6 +3990,43 @@ mod tests {
     }
 
     #[test]
+    fn permanova_pair_precomputation_matches_naive_f_statistic() {
+        let dist = vec![
+            vec![0.0, 1.0, 2.0, 2.5],
+            vec![1.0, 0.0, 1.5, 2.0],
+            vec![2.0, 1.5, 0.0, 0.8],
+            vec![2.5, 2.0, 0.8, 0.0],
+        ];
+        let groups = vec![false, false, true, true];
+        let naive = {
+            let n = groups.len();
+            let n_case = groups.iter().filter(|value| **value).count();
+            let n_ctrl = n - n_case;
+            let mut total = 0.0;
+            let mut within_case = 0.0;
+            let mut within_ctrl = 0.0;
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let d2 = dist[i][j] * dist[i][j];
+                    total += d2;
+                    if groups[i] == groups[j] {
+                        if groups[i] {
+                            within_case += d2;
+                        } else {
+                            within_ctrl += d2;
+                        }
+                    }
+                }
+            }
+            total /= n as f64;
+            let within = within_case / n_case as f64 + within_ctrl / n_ctrl as f64;
+            ((total - within).max(0.0) / 1.0) / (within / (n as f64 - 2.0))
+        };
+        let optimized = permanova_f(&dist, &groups);
+        assert!((optimized - naive).abs() < 1e-12);
+    }
+
+    #[test]
     fn hypergeometric_tail_is_bounded() {
         let p = hypergeom_upper_tail(100, 10, 20, 5);
         assert!(p > 0.0 && p < 1.0);
@@ -3714,6 +4039,70 @@ mod tests {
         let (rich, sh) = rarefy_metrics(&counts, 50, 3, 1);
         assert!(rich >= 1.0 && rich <= 4.0);
         assert!(sh >= 0.0);
+    }
+
+    #[test]
+    fn parallel_repertoire_summary_matches_direct_sample_calculation() {
+        let mut samples = Vec::new();
+        let mut subjects = Vec::new();
+        for i in 0..16 {
+            let mut clonotype_aa = HashMap::new();
+            clonotype_aa.insert(format!("CASS{i}A"), 100.0);
+            clonotype_aa.insert(format!("CASS{i}B"), 50.0);
+            let mut aa_to_nt = HashMap::new();
+            aa_to_nt.insert(
+                format!("CASS{i}A"),
+                [format!("NT{i}A1"), format!("NT{i}A2")]
+                    .into_iter()
+                    .collect(),
+            );
+            aa_to_nt.insert(
+                format!("CASS{i}B"),
+                [format!("NT{i}B1")].into_iter().collect(),
+            );
+            let aa_read_counts = clonotype_aa.clone();
+            samples.push(ParsedRepertoire {
+                sample_id: format!("S{i}"),
+                group: if i >= 8 {
+                    "Case".into()
+                } else {
+                    "Control".into()
+                },
+                counts: vec![100.0, 50.0, 25.0, 10.0],
+                clonotype_aa,
+                aa_to_nt,
+                aa_read_counts,
+                feature_maps: BTreeMap::new(),
+                top_clone_fraction: 100.0 / 185.0,
+                weighted_mean_cdr3_aa_length: 12.0,
+            });
+            subjects.push(format!("P{i}"));
+        }
+        let sharing = sharing_fractions(&samples, &subjects, true);
+        let expected = samples
+            .iter()
+            .enumerate()
+            .map(|(i, sample)| repertoire_sample_summary(sample, &subjects[i], sharing[i], 50, 3))
+            .collect::<Vec<_>>();
+        let mut progress_calls = 0usize;
+        let actual = build_repertoire_sample_summaries(
+            &samples,
+            &subjects,
+            &sharing,
+            50,
+            3,
+            "TCR beta",
+            &mut |_, _, _| progress_calls += 1,
+        )
+        .unwrap();
+        assert_eq!(actual.len(), expected.len());
+        assert_eq!(progress_calls, samples.len());
+        for (left, right) in actual.iter().zip(expected.iter()) {
+            assert_eq!(left.sample_id, right.sample_id);
+            assert!((left.rarefied_richness - right.rarefied_richness).abs() < 1e-12);
+            assert!((left.rarefied_shannon - right.rarefied_shannon).abs() < 1e-12);
+            assert!((left.convergent_read_fraction - right.convergent_read_fraction).abs() < 1e-12);
+        }
     }
 
     #[test]
