@@ -3403,16 +3403,15 @@ where
         native_process_memory_summary()
     ));
 
-    // No subsequent scientific operation needs the XLSX ZIP/shared-string
-    // container after worksheet_range() has returned its owned Range<Data>.
-    // Release it before allocating clonotype arenas so server-side frozen jobs
-    // do not retain both workbook internals and the growing parsed repertoire.
-    let workbook_drop_started = Instant::now();
-    drop(workbook);
-    audit(&format!(
-        "workbook container released in {:.3}s; scanning worksheet rows",
-        workbook_drop_started.elapsed().as_secs_f64()
-    ));
+    // Keep the Calamine workbook container alive while its materialized
+    // Range<Data> is being consumed. Before v0.16.19 Rust's ordinary reverse
+    // local-drop order released `range` before `workbook`; v0.16.19 explicitly
+    // reversed that order in an attempt to lower peak memory. Real-cohort
+    // telemetry localized multi-minute stalls exactly inside that early
+    // `drop(workbook)` even with ~44 GiB MemAvailable and zero VmSwap. Preserve
+    // the historically fast/native destruction order instead: scan first, drop
+    // the worksheet cells, then drop the workbook/shared-string container.
+    audit("workbook retained until worksheet cells are released; scanning worksheet rows");
 
     let headers = header.iter().map(cell_text).collect::<Vec<_>>();
     let columns = header_map(&headers);
@@ -3538,8 +3537,16 @@ where
     let range_drop_started = Instant::now();
     drop(range);
     audit(&format!(
-        "worksheet cells released in {:.3}s; memory {}",
+        "worksheet cells released in {:.3}s; memory {}; releasing workbook container next",
         range_drop_started.elapsed().as_secs_f64(),
+        native_process_memory_summary()
+    ));
+
+    let workbook_drop_started = Instant::now();
+    drop(workbook);
+    audit(&format!(
+        "workbook container released after worksheet cells in {:.3}s; memory {}",
+        workbook_drop_started.elapsed().as_secs_f64(),
         native_process_memory_summary()
     ));
 
@@ -3649,7 +3656,8 @@ pub(crate) fn parse_repertoire_qc_metrics(
         .cloned()
         .ok_or_else(|| anyhow!("Workbook has no worksheets"))?;
     let range = workbook.worksheet_range(&sheet)?;
-    drop(workbook);
+    // Match the full/native parser lifetime ordering: worksheet cells are
+    // released before the Calamine workbook/shared-string container.
     let mut rows = range.rows();
     let header = rows.next().ok_or_else(|| anyhow!("Worksheet is empty"))?;
     let row_capacity = rows.size_hint().0;
@@ -3682,6 +3690,7 @@ pub(crate) fn parse_repertoire_qc_metrics(
     }
     drop(rows);
     drop(range);
+    drop(workbook);
     if total <= 0.0 {
         bail!("No positive clone counts");
     }
