@@ -1829,24 +1829,33 @@ impl ByteSpan {
     }
 }
 
+const UNRESOLVED_CLONOTYPE_ID: u32 = u32::MAX;
+
 #[derive(Debug)]
 struct ParsedClonotype {
-    key: ByteSpan,
     count: f64,
+    /// Stable FNV-1a acceleration hash for the exact `V|J|CDR3` bytes.
+    ///
+    /// This is never scientific identity by itself. During the one-time
+    /// identity compaction pass, equal hashes are resolved by exact byte
+    /// comparison before a dense numeric clonotype ID is assigned.
+    hash: u64,
+    key: ByteSpan,
+    clonotype_id: u32,
     convergent: bool,
 }
 
 #[derive(Debug, Default)]
 struct ParsedClonotypeStore {
     /// Exact `V|J|CDR3` identities are packed back-to-back in one byte arena
-    /// per sample. Entries only retain offsets into this arena, so millions of
-    /// clonotypes no longer imply millions of independently owned/freed
-    /// `String` allocations at the end of TCR-beta analysis.
+    /// per sample while files are parsed. After all model samples are aligned,
+    /// a one-time exact interning pass assigns dense numeric clonotype IDs and
+    /// releases these arenas before sharing/distance calculations begin.
     key_bytes: Vec<u8>,
     entries: Vec<ParsedClonotype>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ClonotypeKeyRef<'a>(&'a [u8]);
 
 impl ParsedClonotypeStore {
@@ -1865,6 +1874,7 @@ impl ParsedClonotypeStore {
 struct BuildingClonotype {
     key: ByteSpan,
     count: f64,
+    hash: u64,
     first_nt: Option<ByteSpan>,
     convergent: bool,
     next_same_hash: Option<u32>,
@@ -1971,6 +1981,7 @@ impl ParsedClonotypeBuilder {
         self.entries.push(BuildingClonotype {
             key,
             count,
+            hash,
             first_nt,
             convergent: false,
             next_same_hash: previous,
@@ -1985,8 +1996,10 @@ impl ParsedClonotypeBuilder {
                 .entries
                 .into_iter()
                 .map(|entry| ParsedClonotype {
-                    key: entry.key,
                     count: entry.count,
+                    hash: entry.hash,
+                    key: entry.key,
+                    clonotype_id: UNRESOLVED_CLONOTYPE_ID,
                     convergent: entry.convergent,
                 })
                 .collect(),
@@ -2047,6 +2060,104 @@ struct ParsedRepertoire {
     feature_maps: BTreeMap<String, HashMap<String, f64>>,
     top_clone_fraction: f64,
     weighted_mean_cdr3_aa_length: f64,
+}
+
+/// Collapse exact clonotype identities across model samples into dense numeric IDs.
+///
+/// v0.16.17 used `HashMap<ClonotypeKeyRef, ...>` for sharing and distance
+/// calculations. At TCR-beta scale that re-hashed millions of full variable-
+/// length byte strings and retained a second multi-million-entry hash table,
+/// moving the performance regression from teardown into clonotype sharing.
+///
+/// This pass instead hashes only the precomputed u64 acceleration hash. Equal
+/// hashes are resolved against the original arena bytes with exact comparison,
+/// so hash collisions can never define scientific identity. Once every local
+/// entry has a dense ID, all per-sample identity arenas are released and every
+/// downstream sharing/distance operation uses integer indexing only.
+fn assign_exact_clonotype_ids(samples: &mut [ParsedRepertoire]) -> Result<usize> {
+    #[derive(Clone, Copy)]
+    struct IdentityNode {
+        sample_idx: u32,
+        entry_idx: u32,
+        next_same_hash: u32,
+    }
+
+    const NO_NODE: u32 = u32::MAX;
+
+    let total_entries = samples
+        .iter()
+        .map(|sample| sample.clonotypes.entries.len())
+        .sum::<usize>();
+    if total_entries >= NO_NODE as usize {
+        bail!("repertoire contains too many clonotype entries for compact u32 identity IDs");
+    }
+
+    let mut hash_heads: HashMap<u64, u32> = HashMap::with_capacity(total_entries);
+    let mut identities = Vec::<IdentityNode>::with_capacity(total_entries);
+    let mut ids_by_sample = Vec::<Vec<u32>>::with_capacity(samples.len());
+
+    for sample_idx in 0..samples.len() {
+        let sample_idx_u32 = u32::try_from(sample_idx)
+            .map_err(|_| anyhow!("repertoire contains more than 4 billion samples"))?;
+        let store = &samples[sample_idx].clonotypes;
+        let mut sample_ids = Vec::with_capacity(store.entries.len());
+
+        for entry_idx in 0..store.entries.len() {
+            let entry = &store.entries[entry_idx];
+            let key = entry.key.slice(&store.key_bytes);
+            let mut cursor = hash_heads.get(&entry.hash).copied().unwrap_or(NO_NODE);
+            let mut matched = None;
+
+            while cursor != NO_NODE {
+                let node = identities[cursor as usize];
+                let representative_store = &samples[node.sample_idx as usize].clonotypes;
+                let representative_entry = &representative_store.entries[node.entry_idx as usize];
+                if representative_entry
+                    .key
+                    .slice(&representative_store.key_bytes)
+                    == key
+                {
+                    matched = Some(cursor);
+                    break;
+                }
+                cursor = node.next_same_hash;
+            }
+
+            let clonotype_id = if let Some(id) = matched {
+                id
+            } else {
+                let id = u32::try_from(identities.len()).map_err(|_| {
+                    anyhow!("repertoire contains more than 4 billion exact clonotypes")
+                })?;
+                let entry_idx_u32 = u32::try_from(entry_idx)
+                    .map_err(|_| anyhow!("sample contains more than 4 billion clonotypes"))?;
+                let previous = hash_heads.insert(entry.hash, id).unwrap_or(NO_NODE);
+                identities.push(IdentityNode {
+                    sample_idx: sample_idx_u32,
+                    entry_idx: entry_idx_u32,
+                    next_same_hash: previous,
+                });
+                id
+            };
+            sample_ids.push(clonotype_id);
+        }
+        ids_by_sample.push(sample_ids);
+    }
+
+    for (sample, sample_ids) in samples.iter_mut().zip(ids_by_sample) {
+        for (entry, clonotype_id) in sample.clonotypes.entries.iter_mut().zip(sample_ids) {
+            entry.clonotype_id = clonotype_id;
+        }
+    }
+
+    // Numeric IDs now encode equivalence classes that were established using
+    // exact bytes. The original identity arenas are no longer needed by any
+    // scientific consumer and are released before sharing/distance work.
+    for sample in samples.iter_mut() {
+        drop(std::mem::take(&mut sample.clonotypes.key_bytes));
+    }
+
+    Ok(identities.len())
 }
 
 fn repertoire_sample_summary(
@@ -2118,11 +2229,12 @@ fn repertoire_summary_worker_count(sample_count: usize) -> usize {
 
 /// Release the parsed repertoire after all science consumers have finished.
 ///
-/// Clonotype identities are bulk-owned by one byte arena plus one contiguous
-/// entry vector per sample, so serial destruction now releases O(samples)
-/// large buffers instead of millions of small String allocations. Keeping
-/// cleanup serial also avoids the allocator contention observed with the
-/// v0.16.16 eight-way destruction experiment.
+/// Exact identity byte arenas are already released by the numeric-ID
+/// compaction pass. The remaining clonotype state is a contiguous entry vector
+/// per sample plus small composition maps, so serial destruction releases
+/// O(samples) large buffers instead of millions of independently owned
+/// Strings. Keeping cleanup serial also avoids the allocator contention seen
+/// with the v0.16.16 eight-way destruction experiment.
 fn release_repertoire_working_set(samples: Vec<ParsedRepertoire>) {
     drop(samples);
 }
@@ -2375,6 +2487,33 @@ where
     if model_samples.len() != design.sample_ids.len() {
         bail!("Could not align repertoire samples to adjusted metadata design");
     }
+    // Any parsed samples excluded from the complete-case model are no longer
+    // needed. Release them before constructing the global numeric identity
+    // space so they do not contribute to peak repertoire memory.
+    drop(by_id);
+    drop(sample_ids);
+
+    let total_model_clonotypes = model_samples
+        .iter()
+        .map(|sample| sample.clonotypes.len())
+        .sum::<usize>();
+    progress(
+        305,
+        1000,
+        &format!(
+            "{label}: assigning exact clonotype IDs across {total_model_clonotypes} model entries (memory {})",
+            native_process_memory_summary()
+        ),
+    );
+    let exact_clonotype_count = assign_exact_clonotype_ids(&mut model_samples)?;
+    progress(
+        320,
+        1000,
+        &format!(
+            "{label}: exact clonotype IDs ready ({exact_clonotype_count} unique exact identities; local identity arenas released; memory {})",
+            native_process_memory_summary()
+        ),
+    );
 
     let min_total = model_samples
         .iter()
@@ -2384,14 +2523,19 @@ where
     let matched_depth = min_total.min(spec.rarefaction_cap.max(100));
     let subjects = design.subjects.clone();
     progress(
-        320,
+        330,
         1000,
         &format!(
-            "{label}: computing clonotype sharing across {} model sample(s)",
+            "{label}: computing clonotype sharing across {} model sample(s) using dense numeric IDs",
             model_samples.len()
         ),
     );
-    let sharing = sharing_fractions(&model_samples, &subjects, spec.subject_column.is_some());
+    let sharing = sharing_fractions(
+        &model_samples,
+        &subjects,
+        spec.subject_column.is_some(),
+        exact_clonotype_count,
+    );
     progress(
         350,
         1000,
@@ -2469,7 +2613,8 @@ where
     // Build the shared clonotype inverted index once for both distance metrics.
     // The older path rebuilt the same large index independently for Morisita
     // and Jaccard, and recomputed Morisita once more for clustering.
-    let (morisita_dist, jaccard_dist) = repertoire_distance_matrices(&model_samples);
+    let (morisita_dist, jaccard_dist) =
+        repertoire_distance_matrices(&model_samples, exact_clonotype_count);
     progress(
         780,
         1000,
@@ -2609,7 +2754,7 @@ where
         960,
         1000,
         &format!(
-            "{label}: releasing parsed repertoire working set ({files_used} samples; {raw_clonotypes} clonotypes; {raw_feature_entries} composition entries; bulk arena storage; serial cleanup; memory {})",
+            "{label}: releasing parsed repertoire working set ({files_used} samples; {raw_clonotypes} clonotypes; {raw_feature_entries} composition entries; dense numeric IDs; identity arenas already released; serial cleanup; memory {})",
             native_process_memory_summary()
         ),
     );
@@ -2941,7 +3086,10 @@ fn composition_analysis(
     })
 }
 
-fn repertoire_distance_matrices(samples: &[ParsedRepertoire]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+fn repertoire_distance_matrices(
+    samples: &[ParsedRepertoire],
+    clonotype_universe: usize,
+) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
     let n = samples.len();
     if n == 0 {
         return (Vec::new(), Vec::new());
@@ -2956,7 +3104,10 @@ fn repertoire_distance_matrices(samples: &[ParsedRepertoire]) -> (Vec<Vec<f64>>,
     const NO_NODE: u32 = u32::MAX;
 
     let total_clonotypes = samples.iter().map(|sample| sample.clonotypes.len()).sum();
-    let mut heads: HashMap<ClonotypeKeyRef<'_>, u32> = HashMap::with_capacity(total_clonotypes);
+    // Dense numeric IDs let the distance pass use one contiguous head array.
+    // This avoids hashing millions of variable-length clonotype byte slices a
+    // second time after exact identity has already been established.
+    let mut heads = vec![NO_NODE; clonotype_universe];
     let mut occurrences = Vec::<OccurrenceNode>::with_capacity(total_clonotypes);
     let mut sums_sq = vec![0.0; n];
     let mut richness = vec![0usize; n];
@@ -2974,13 +3125,19 @@ fn repertoire_distance_matrices(samples: &[ParsedRepertoire]) -> (Vec<Vec<f64>>,
             continue;
         }
         richness[i] = sample.clonotypes.len();
-        for (key, clonotype) in sample.clonotypes.iter() {
+        for clonotype in &sample.clonotypes.entries {
+            let clonotype_id = clonotype.clonotype_id as usize;
+            assert!(
+                clonotype.clonotype_id != UNRESOLVED_CLONOTYPE_ID
+                    && clonotype_id < clonotype_universe,
+                "repertoire distance matrix received an unresolved clonotype ID"
+            );
             let p = clonotype.count / total;
             sums_sq[i] += p * p;
             dotm[i][i] += p * p;
             shared[i][i] += 1;
 
-            let mut cursor = heads.get(&key).copied().unwrap_or(NO_NODE);
+            let mut cursor = heads[clonotype_id];
             while cursor != NO_NODE {
                 let node = occurrences[cursor as usize];
                 let j = node.sample_idx as usize;
@@ -2994,9 +3151,10 @@ fn repertoire_distance_matrices(samples: &[ParsedRepertoire]) -> (Vec<Vec<f64>>,
 
             let index =
                 u32::try_from(occurrences.len()).expect("repertoire occurrence index exceeds u32");
-            let previous = heads.insert(key, index).unwrap_or(NO_NODE);
+            let previous = heads[clonotype_id];
+            heads[clonotype_id] = index;
             occurrences.push(OccurrenceNode {
-                sample_idx: i as u32,
+                sample_idx: u32::try_from(i).expect("repertoire sample index exceeds u32"),
                 next: previous,
                 p,
             });
@@ -3034,32 +3192,47 @@ fn sharing_fractions(
     samples: &[ParsedRepertoire],
     subjects: &[String],
     subject_aware: bool,
+    clonotype_universe: usize,
 ) -> Vec<(f64, f64, f64)> {
     #[derive(Clone, Copy)]
     struct Prevalence {
-        first_subject: usize,
+        first_sample: u32,
+        n_samples: u32,
         multiple_subjects: bool,
-        n_samples: usize,
     }
 
-    let total_clonotypes = samples.iter().map(|sample| sample.clonotypes.len()).sum();
-    let mut prevalence: HashMap<ClonotypeKeyRef<'_>, Prevalence> =
-        HashMap::with_capacity(total_clonotypes);
+    const NO_SAMPLE: u32 = u32::MAX;
+    let mut prevalence = vec![
+        Prevalence {
+            first_sample: NO_SAMPLE,
+            n_samples: 0,
+            multiple_subjects: false,
+        };
+        clonotype_universe
+    ];
+
+    // Exact equality was already resolved once in assign_exact_clonotype_ids.
+    // Sharing is therefore a pair of linear integer-indexed scans with no
+    // string hashing, string allocation, or multi-million-entry HashMap.
     for (i, sample) in samples.iter().enumerate() {
-        for (key, _) in sample.clonotypes.iter() {
-            prevalence
-                .entry(key)
-                .and_modify(|entry| {
-                    entry.n_samples += 1;
-                    if subjects[entry.first_subject] != subjects[i] {
-                        entry.multiple_subjects = true;
-                    }
-                })
-                .or_insert(Prevalence {
-                    first_subject: i,
-                    multiple_subjects: false,
-                    n_samples: 1,
-                });
+        for clonotype in &sample.clonotypes.entries {
+            let clonotype_id = clonotype.clonotype_id as usize;
+            assert!(
+                clonotype.clonotype_id != UNRESOLVED_CLONOTYPE_ID
+                    && clonotype_id < clonotype_universe,
+                "repertoire sharing received an unresolved clonotype ID"
+            );
+            let entry = &mut prevalence[clonotype_id];
+            if entry.n_samples == 0 {
+                entry.first_sample = u32::try_from(i).expect("repertoire sample index exceeds u32");
+                entry.n_samples = 1;
+            } else {
+                entry.n_samples += 1;
+                let first_sample = entry.first_sample as usize;
+                if subjects[first_sample] != subjects[i] {
+                    entry.multiple_subjects = true;
+                }
+            }
         }
     }
 
@@ -3079,19 +3252,16 @@ fn sharing_fractions(
             let mut private = 0.0;
             let mut longitudinal = 0.0;
             let mut public = 0.0;
-            for (key, clonotype) in sample.clonotypes.iter() {
+            for clonotype in &sample.clonotypes.entries {
                 let count = clonotype.count;
-                if let Some(entry) = prevalence.get(&key) {
-                    if entry.multiple_subjects {
-                        public += count;
-                    } else if subject_aware
-                        && entry.n_samples >= 2
-                        && subjects[entry.first_subject] == subjects[i]
-                    {
-                        longitudinal += count;
-                    } else {
-                        private += count;
-                    }
+                let entry = &prevalence[clonotype.clonotype_id as usize];
+                if entry.multiple_subjects {
+                    public += count;
+                } else if subject_aware
+                    && entry.n_samples >= 2
+                    && subjects[entry.first_sample as usize] == subjects[i]
+                {
+                    longitudinal += count;
                 } else {
                     private += count;
                 }
@@ -4580,8 +4750,65 @@ mod tests {
     }
 
     #[test]
+    fn exact_numeric_ids_survive_forced_hash_collisions() {
+        let mut left_builder = ParsedClonotypeBuilder::default();
+        left_builder
+            .record_hashed(7, "TRBV1", "TRBJ1", "CASSA", 10.0, Some("AAA"))
+            .unwrap();
+        left_builder
+            .record_hashed(7, "TRBV2", "TRBJ2", "CASSB", 20.0, Some("BBB"))
+            .unwrap();
+
+        let mut right_builder = ParsedClonotypeBuilder::default();
+        right_builder
+            .record_hashed(7, "TRBV1", "TRBJ1", "CASSA", 30.0, Some("CCC"))
+            .unwrap();
+        right_builder
+            .record_hashed(7, "TRBV3", "TRBJ3", "CASSC", 40.0, Some("DDD"))
+            .unwrap();
+
+        let mut samples = vec![
+            ParsedRepertoire {
+                sample_id: "S1".into(),
+                group: "Control".into(),
+                counts: vec![10.0, 20.0],
+                clonotypes: left_builder.finish(),
+                feature_maps: BTreeMap::new(),
+                top_clone_fraction: 2.0 / 3.0,
+                weighted_mean_cdr3_aa_length: 5.0,
+            },
+            ParsedRepertoire {
+                sample_id: "S2".into(),
+                group: "Case".into(),
+                counts: vec![30.0, 40.0],
+                clonotypes: right_builder.finish(),
+                feature_maps: BTreeMap::new(),
+                top_clone_fraction: 4.0 / 7.0,
+                weighted_mean_cdr3_aa_length: 5.0,
+            },
+        ];
+
+        let universe = assign_exact_clonotype_ids(&mut samples).unwrap();
+        assert_eq!(universe, 3);
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.clonotypes.key_bytes.is_empty())
+        );
+
+        let left_a = samples[0].clonotypes.entries[0].clonotype_id;
+        let left_b = samples[0].clonotypes.entries[1].clonotype_id;
+        let right_a = samples[1].clonotypes.entries[0].clonotype_id;
+        let right_c = samples[1].clonotypes.entries[1].clonotype_id;
+        assert_eq!(left_a, right_a);
+        assert_ne!(left_a, left_b);
+        assert_ne!(left_a, right_c);
+        assert_ne!(left_b, right_c);
+    }
+
+    #[test]
     fn sharing_fractions_preserve_private_longitudinal_and_public_semantics() {
-        let samples = vec![
+        let mut samples = vec![
             compact_sample(
                 "S1",
                 "Control",
@@ -4613,7 +4840,8 @@ mod tests {
             ),
         ];
         let subjects = vec!["P1".to_string(), "P1".to_string(), "P2".to_string()];
-        let sharing = sharing_fractions(&samples, &subjects, true);
+        let clonotype_universe = assign_exact_clonotype_ids(&mut samples).unwrap();
+        let sharing = sharing_fractions(&samples, &subjects, true, clonotype_universe);
         let expected = [(0.20, 0.20, 0.60), (0.20, 0.30, 0.50), (0.75, 0.0, 0.25)];
         for (actual, expected) in sharing.iter().zip(expected) {
             assert!((actual.0 - expected.0).abs() < 1e-12);
@@ -4621,7 +4849,7 @@ mod tests {
             assert!((actual.2 - expected.2).abs() < 1e-12);
         }
 
-        let sample_based = sharing_fractions(&samples, &subjects, false);
+        let sample_based = sharing_fractions(&samples, &subjects, false, clonotype_universe);
         assert!((sample_based[0].0 - 0.40).abs() < 1e-12);
         assert_eq!(sample_based[0].1, 0.0);
         assert!((sample_based[0].2 - 0.60).abs() < 1e-12);
@@ -4629,7 +4857,7 @@ mod tests {
 
     #[test]
     fn compact_distance_matrices_match_legacy_morisita_and_jaccard_values() {
-        let samples = vec![
+        let mut samples = vec![
             compact_sample(
                 "S1",
                 "Control",
@@ -4649,7 +4877,8 @@ mod tests {
                 ],
             ),
         ];
-        let (morisita, jaccard) = repertoire_distance_matrices(&samples);
+        let clonotype_universe = assign_exact_clonotype_ids(&mut samples).unwrap();
+        let (morisita, jaccard) = repertoire_distance_matrices(&samples, clonotype_universe);
         assert!(morisita[0][0].abs() < 1e-12);
         assert!(morisita[1][1].abs() < 1e-12);
         assert!((morisita[0][1] - 7.0 / 19.0).abs() < 1e-12);
@@ -4744,7 +4973,8 @@ mod tests {
             });
             subjects.push(format!("P{i}"));
         }
-        let sharing = sharing_fractions(&samples, &subjects, true);
+        let clonotype_universe = assign_exact_clonotype_ids(&mut samples).unwrap();
+        let sharing = sharing_fractions(&samples, &subjects, true, clonotype_universe);
         let expected = samples
             .iter()
             .enumerate()

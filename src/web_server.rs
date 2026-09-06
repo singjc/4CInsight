@@ -2012,6 +2012,10 @@ impl LocalProjectStore {
             // in progress_message but do not create hundreds of timing rows.
             let substage = if detail.contains(": parsing ") {
                 Some("parsing")
+            } else if detail.contains("exact clonotype ID")
+                || detail.contains("assigning exact clonotype IDs")
+            {
+                Some("identity compaction")
             } else if detail.contains("computing clonotype sharing") {
                 Some("clonotype sharing")
             } else if detail.contains("matched-depth diversity") {
@@ -6485,6 +6489,18 @@ mod tests {
     fn job_stage_names_group_high_frequency_progress_messages() {
         assert_eq!(
             LocalProjectStore::progress_stage_name(
+                "TCR beta corrected — TCR beta: assigning exact clonotype IDs across 4293752 model entries (memory RSS=2048.0 MiB VmSize=3072.0 MiB VmHWM=2500.0 MiB VmPeak=4096.0 MiB)"
+            ),
+            "TCR beta corrected / identity compaction"
+        );
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
+                "TCR beta corrected — TCR beta: exact clonotype IDs ready (4000000 unique exact identities; local identity arenas released; memory RSS=1800.0 MiB VmSize=2800.0 MiB VmHWM=2500.0 MiB VmPeak=4096.0 MiB)"
+            ),
+            "TCR beta corrected / identity compaction"
+        );
+        assert_eq!(
+            LocalProjectStore::progress_stage_name(
                 "TCR beta corrected — TCR beta: matched-depth diversity 4C_99 (283/283; 8 workers)"
             ),
             "TCR beta corrected / matched-depth diversity"
@@ -6497,7 +6513,7 @@ mod tests {
         );
         assert_eq!(
             LocalProjectStore::progress_stage_name(
-                "TCR beta corrected — TCR beta: releasing parsed repertoire working set (93 samples; 4293752 clonotypes; 69571 composition entries; bulk arena storage; serial cleanup; memory RSS=2048.0 MiB VmSize=3072.0 MiB VmHWM=2500.0 MiB VmPeak=4096.0 MiB)"
+                "TCR beta corrected — TCR beta: releasing parsed repertoire working set (93 samples; 4293752 clonotypes; 69571 composition entries; dense numeric IDs; identity arenas already released; serial cleanup; memory RSS=2048.0 MiB VmSize=3072.0 MiB VmHWM=2500.0 MiB VmPeak=4096.0 MiB)"
             ),
             "TCR beta corrected / working-set cleanup"
         );
