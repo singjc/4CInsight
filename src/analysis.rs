@@ -354,9 +354,7 @@ impl UnifiedCohortAnalysisRun {
     }
 }
 
-use crate::cohort::{
-    CohortModality, MetadataTable, ProjectScan, run_gene_comparison, run_transcript_comparison,
-};
+use crate::cohort::{CohortModality, ProjectScan, run_gene_comparison, run_transcript_comparison};
 use crate::corrected::{
     run_corrected_expression, run_corrected_immune, run_corrected_isotype,
     run_corrected_repertoire, run_pathway_ora,

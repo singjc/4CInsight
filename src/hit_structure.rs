@@ -1076,7 +1076,6 @@ where
                 }),
             );
         }
-        stage += 1;
     }
 
     if panels.is_empty() && errors.is_empty() {
