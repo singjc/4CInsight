@@ -139,6 +139,31 @@ If reviewed exclusions are applied to the analysis, the run freezes:
 
 Changing the live QC settings after the run does not rewrite this frozen provenance.
 
+### Metadata-defined sample exclusions (no outlier-QC run required)
+
+The unified analysis can also exclude samples directly from a collaborator/user-maintained metadata flag. This is independent of the automatic cross-modal outlier workflow and is useful when exclusion decisions have already been curated in a column such as `qc_review_status`, `manual_outlier`, `exclude_from_analysis`, or a similar project-specific field.
+
+Under **QC, sensitivity & candidate summary**, enable **Exclude samples using a metadata column/value rule**. Then:
+
+1. choose the metadata column from the dropdown;
+2. choose one or more observed values from the value dropdown;
+3. review the displayed number of metadata IDs and active Case/Control samples matched by the rule;
+4. run the analysis normally.
+
+The app does not require sample IDs or status strings to be typed manually. Selected values are matched case-insensitively after trimming whitespace. If reviewed cross-modal QC exclusions are also enabled, the primary Case/Control analysis uses the **union** of both exclusion sources.
+
+The completed run freezes the metadata exclusion provenance separately from outlier-QC provenance, including:
+
+- selected metadata field;
+- selected excluded value(s);
+- all metadata IDs matching the rule;
+- exact active-comparison sample IDs removed;
+- Case and Control counts before and after applying that metadata rule.
+
+The full HTML report contains a dedicated **User-defined metadata sample exclusions** section. Technical exports include `sample_metadata_exclusion.tsv` and `sample_metadata_exclusion_summary.txt`.
+
+This global metadata rule filters the primary Case/Control analysis and results derived from that filtered comparison. The separate longitudinal patient-signature analysis intentionally has its own QC/review dropdown because it operates on all eligible longitudinal observations rather than only the active Case/Control comparison.
+
 ## 3. Analysis settings
 
 ### Comparison

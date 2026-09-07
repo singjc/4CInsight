@@ -1,6 +1,7 @@
 use cfs_expression_merger::analysis::{
     CohortAnalysisSettingsSnapshot, CohortDefinitionSnapshot, CohortModalitySelection,
-    CorrectedAnalysisBundle, UnifiedCohortAnalysisRun, write_unified_analysis_tables,
+    CorrectedAnalysisBundle, UnifiedCohortAnalysisRun, build_metadata_sample_exclusion_snapshot,
+    filter_comparison_excluding_samples, metadata_exclusion_ids, write_unified_analysis_tables,
 };
 use cfs_expression_merger::analysis_docs::{
     AnalysisDocToyChart, AnalysisDocToyExample, analysis_doc_example_matches,
@@ -448,6 +449,9 @@ struct MergeApp {
     outlier_config: OutlierConfig,
     outlier_excluded_ids: HashSet<String>,
     outlier_apply_to_corrected: bool,
+    metadata_exclusion_enabled: bool,
+    metadata_exclusion_column: Option<String>,
+    metadata_exclusion_values: HashSet<String>,
     outlier_apply_to_focused: bool,
     outlier_plot_modality: usize,
     cohort_run_gene: bool,
@@ -814,6 +818,9 @@ impl MergeApp {
             outlier_config: OutlierConfig::default(),
             outlier_excluded_ids: HashSet::new(),
             outlier_apply_to_corrected: false,
+            metadata_exclusion_enabled: false,
+            metadata_exclusion_column: None,
+            metadata_exclusion_values: HashSet::new(),
             outlier_apply_to_focused: false,
             outlier_plot_modality: 0,
             cohort_run_gene: true,
@@ -3881,6 +3888,127 @@ impl MergeApp {
                 ));
             }
             ui.checkbox(
+                &mut this.metadata_exclusion_enabled,
+                "Exclude samples using a metadata column/value rule",
+            )
+            .on_hover_text("Independent of automatic outlier QC. Choose any metadata column and one or more observed values (for example manual_outlier = Yes or qc_review_status = Failed). Matching samples are excluded from the Case/Control analysis and all downstream results derived from that filtered comparison. This can be used alone or together with reviewed QC exclusions.");
+            if this.metadata_exclusion_enabled {
+                if let Some((metadata, _, _, _)) = active.as_ref() {
+                    if this
+                        .metadata_exclusion_column
+                        .as_ref()
+                        .is_some_and(|column| !metadata.columns.contains(column))
+                    {
+                        this.metadata_exclusion_column = None;
+                        this.metadata_exclusion_values.clear();
+                    }
+
+                    let mut selected_column = this.metadata_exclusion_column.clone();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Exclusion field:");
+                        egui::ComboBox::from_id_salt("metadata_sample_exclusion_column")
+                            .selected_text(
+                                selected_column
+                                    .clone()
+                                    .unwrap_or_else(|| "(choose metadata field)".to_string()),
+                            )
+                            .width(300.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut selected_column, None, "(none)");
+                                for column in &metadata.columns {
+                                    ui.selectable_value(
+                                        &mut selected_column,
+                                        Some(column.clone()),
+                                        column,
+                                    );
+                                }
+                            });
+                    });
+                    if selected_column != this.metadata_exclusion_column {
+                        this.metadata_exclusion_column = selected_column.clone();
+                        this.metadata_exclusion_values.clear();
+                    }
+
+                    if let Some(column) = selected_column.as_deref() {
+                        let values = distinct_metadata_values(metadata, column);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Exclude value(s):");
+                            egui::ComboBox::from_id_salt("metadata_sample_exclusion_values")
+                                .selected_text(native_selection_label(
+                                    &this.metadata_exclusion_values,
+                                ))
+                                .width(300.0)
+                                .show_ui(ui, |ui| {
+                                    for value in &values {
+                                        let mut selected =
+                                            this.metadata_exclusion_values.contains(value);
+                                        if ui.checkbox(&mut selected, value).changed() {
+                                            if selected {
+                                                this.metadata_exclusion_values
+                                                    .insert(value.clone());
+                                            } else {
+                                                this.metadata_exclusion_values.remove(value);
+                                            }
+                                        }
+                                    }
+                                });
+                        });
+
+                        let matched = metadata_exclusion_ids(
+                            metadata,
+                            column,
+                            &this.metadata_exclusion_values,
+                        );
+                        let comparison_matches = this
+                            .build_active_comparison(metadata)
+                            .ok()
+                            .map(|(_, comparison)| {
+                                let canonical = matched
+                                    .iter()
+                                    .map(|id| comparison.canonical_id(id))
+                                    .collect::<HashSet<_>>();
+                                comparison
+                                    .case_ids
+                                    .iter()
+                                    .chain(comparison.control_ids.iter())
+                                    .filter(|id| canonical.contains(*id))
+                                    .count()
+                            })
+                            .unwrap_or(0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Metadata rule currently matches {} row/sample ID(s); {} are in the active Case/Control comparison.",
+                                matched.len(), comparison_matches
+                            ))
+                            .small(),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Values are selected from the loaded metadata (no typing required) and are matched case-insensitively after trimming whitespace. The selected rule and excluded sample IDs are frozen into the completed run and exported for reproducibility.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        if this.metadata_exclusion_values.is_empty() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(225, 120, 110),
+                                "Select at least one metadata value to exclude.",
+                            );
+                        }
+                    } else {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(225, 120, 110),
+                            "Choose a metadata field for the sample-exclusion rule.",
+                        );
+                    }
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(225, 120, 110),
+                        "Load metadata before defining a metadata-based sample exclusion.",
+                    );
+                }
+            }
+            ui.checkbox(
                 &mut this.focused_run_exploratory_concordance,
                 "Add exploratory TPM direction-concordance support",
             )
@@ -4127,6 +4255,18 @@ impl MergeApp {
                         "Frozen QC audit attached; no reviewed exclusions were applied to the primary analysis."
                             .to_string()
                     },
+                );
+            }
+            if let Some(metadata_exclusion) = run.settings.metadata_sample_exclusion.as_ref() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 170, 80),
+                    format!(
+                        "Frozen metadata exclusion: {} active-comparison sample(s) removed using {} = {} ({} metadata ID(s) matched the rule).",
+                        metadata_exclusion.excluded_comparison_ids.len(),
+                        metadata_exclusion.column,
+                        metadata_exclusion.excluded_values.join(", "),
+                        metadata_exclusion.matching_metadata_ids.len()
+                    ),
                 );
             }
             ui.colored_label(
@@ -8878,38 +9018,76 @@ z score: {:.3}",
                 }
             };
 
-        let mut comparison = original_comparison.clone();
-        let mut qc_snapshot = None;
-        if let Some(audit) = self.outlier_results.as_ref() {
-            if audit.comparison_name == original_comparison.name {
-                if self.outlier_apply_to_corrected && !self.outlier_excluded_ids.is_empty() {
-                    comparison = filter_comparison_excluding(
-                        &original_comparison,
-                        &self.outlier_excluded_ids,
-                    );
-                    if comparison.case_ids.len() < 2 || comparison.control_ids.len() < 2 {
-                        self.cohort_status = "Reviewed QC exclusions leave fewer than two samples in one comparison group; revise the exclusion list before running the analysis.".to_string();
-                        return;
-                    }
-                    qc_snapshot = Some(build_outlier_filter_snapshot(
-                        audit,
-                        &self.outlier_excluded_ids,
-                        &original_comparison,
-                        &comparison,
-                        true,
-                    ));
-                } else {
-                    qc_snapshot = Some(build_outlier_filter_snapshot(
-                        audit,
-                        &HashSet::new(),
-                        &original_comparison,
-                        &original_comparison,
-                        false,
-                    ));
-                }
+        let metadata_exclusion_snapshot = if self.metadata_exclusion_enabled {
+            let Some(column) = self
+                .metadata_exclusion_column
+                .clone()
+                .filter(|column| metadata.columns.contains(column))
+            else {
+                self.cohort_status =
+                    "Choose a metadata field for the sample-exclusion rule before running the analysis."
+                        .to_string();
+                return;
+            };
+            if self.metadata_exclusion_values.is_empty() {
+                self.cohort_status =
+                    "Select at least one metadata value to exclude before running the analysis."
+                        .to_string();
+                return;
             }
-        } else if self.outlier_apply_to_corrected && !self.outlier_excluded_ids.is_empty() {
-            self.cohort_status = "Reviewed exclusions are selected but the cross-modal QC audit is unavailable. Rerun sample outlier QC so the exclusion provenance can be frozen into this analysis.".to_string();
+            Some(build_metadata_sample_exclusion_snapshot(
+                &metadata,
+                &column,
+                &self.metadata_exclusion_values,
+                &original_comparison,
+            ))
+        } else {
+            None
+        };
+
+        let mut qc_snapshot = None;
+        let mut combined_excluded_ids = HashSet::new();
+        if self.outlier_apply_to_corrected && !self.outlier_excluded_ids.is_empty() {
+            let Some(audit) = self.outlier_results.as_ref() else {
+                self.cohort_status = "Reviewed exclusions are selected but the cross-modal QC audit is unavailable. Rerun sample outlier QC so the exclusion provenance can be frozen into this analysis.".to_string();
+                return;
+            };
+            if audit.comparison_name != original_comparison.name {
+                self.cohort_status = format!(
+                    "The reviewed QC audit was generated for '{}', but the active comparison is '{}'. Rerun sample outlier QC before applying reviewed exclusions.",
+                    audit.comparison_name, original_comparison.name
+                );
+                return;
+            }
+            let qc_only_comparison =
+                filter_comparison_excluding(&original_comparison, &self.outlier_excluded_ids);
+            qc_snapshot = Some(build_outlier_filter_snapshot(
+                audit,
+                &self.outlier_excluded_ids,
+                &original_comparison,
+                &qc_only_comparison,
+                true,
+            ));
+            combined_excluded_ids.extend(self.outlier_excluded_ids.iter().cloned());
+        } else if let Some(audit) = self.outlier_results.as_ref() {
+            if audit.comparison_name == original_comparison.name {
+                qc_snapshot = Some(build_outlier_filter_snapshot(
+                    audit,
+                    &HashSet::new(),
+                    &original_comparison,
+                    &original_comparison,
+                    false,
+                ));
+            }
+        }
+
+        if let Some(snapshot) = metadata_exclusion_snapshot.as_ref() {
+            combined_excluded_ids.extend(snapshot.matching_metadata_ids.iter().cloned());
+        }
+        let comparison =
+            filter_comparison_excluding_samples(&original_comparison, &combined_excluded_ids);
+        if comparison.case_ids.len() < 2 || comparison.control_ids.len() < 2 {
+            self.cohort_status = "Combined sample exclusions leave fewer than two samples in one comparison group; revise the reviewed QC and/or metadata exclusion selections before running the analysis.".to_string();
             return;
         }
 
@@ -9056,6 +9234,7 @@ z score: {:.3}",
             exploratory_direction_check: self.focused_run_exploratory_concordance,
             candidate: self.focused_settings.clone(),
             pbmc_diagnostics: diagnostics,
+            metadata_sample_exclusion: metadata_exclusion_snapshot,
             longitudinal,
             significant_hit_structure,
         };

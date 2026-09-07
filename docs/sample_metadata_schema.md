@@ -1,6 +1,6 @@
 # Standard multi-omics sample metadata
 
-4C Cohort Explorer v0.15.1 defines a standard **one-row-per-biological-sample** metadata table. The table is intentionally a plain UTF-8 TSV so it can be edited in Excel/LibreOffice/R/Python or curated inside the desktop app's **Metadata Builder** tab.
+4C Cohort Explorer v0.16.27 defines a standard **one-row-per-biological-sample** metadata table. The table is intentionally a plain UTF-8 TSV so it can be edited in Excel/LibreOffice/R/Python or curated inside the desktop app's **Metadata Builder** tab.
 
 ## Core rules
 
@@ -11,6 +11,7 @@
 - `Phenotype` and `HYP` are retained for compatibility with the two historical 4C presets.
 - Rows may contain arbitrary additional metadata columns. They are preserved and can be selected as corrected-model covariates or plot-coloring fields.
 - Automatic outlier/QC decisions are **not** stored as final truth in this metadata table. `qc_review_status`, `known_wrong_source`, and related fields are curator provenance; run-specific outlier evidence/manual decisions remain frozen inside each completed analysis run.
+- A curator-authored metadata flag **can** be used as an explicit per-run sample exclusion rule. In the unified analysis UI, choose any metadata column and one or more observed values to exclude. This does not require running automatic outlier QC, and the selected rule plus exact excluded IDs are frozen into the completed run.
 
 ## Flexible column roles for imported longitudinal metadata
 

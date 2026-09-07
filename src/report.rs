@@ -1,4 +1,4 @@
-use crate::analysis::UnifiedCohortAnalysisRun;
+use crate::analysis::{MetadataSampleExclusionSnapshot, UnifiedCohortAnalysisRun};
 use crate::analysis_docs::{AnalysisDocToyChart, AnalysisDocToyExample, analysis_doc_sections};
 use crate::cohort::{
     BcrComparisonResult, BcrIsotypeComparisonResult, BcrSampleSummary, CohortComparison,
@@ -390,6 +390,48 @@ fn build_outlier_qc_section(snapshot: &OutlierFilterSnapshot, title: &str) -> Re
             section.add_plot(plot);
         }
     }
+    section
+}
+
+fn build_metadata_sample_exclusion_section(
+    snapshot: &MetadataSampleExclusionSnapshot,
+) -> ReportSection {
+    let mut section = ReportSection::new("User-defined metadata sample exclusions");
+    let preview = snapshot
+        .excluded_comparison_ids
+        .iter()
+        .take(50)
+        .cloned()
+        .collect::<Vec<_>>();
+    let values = if snapshot.excluded_values.is_empty() {
+        "none".to_string()
+    } else {
+        snapshot.excluded_values.join(", ")
+    };
+    section.add_content(html! {
+        p {
+            "This exclusion was defined directly from the sample metadata and is independent of the automatic cross-modal outlier-QC workflow. "
+            "Rows were excluded when the selected metadata field matched one of the configured values (case-insensitive after trimming whitespace)."
+        }
+        ul {
+            li { strong { "Metadata field: " } code { (snapshot.column) } }
+            li { strong { "Excluded value(s): " } (values) }
+            li { strong { "Metadata IDs matching rule: " } (snapshot.matching_metadata_ids.len()) }
+            li { strong { "Samples removed from active Case/Control comparison: " } (snapshot.excluded_comparison_ids.len()) }
+            li { strong { "Case samples: " } (snapshot.original_case_n) " → " (snapshot.filtered_case_n) }
+            li { strong { "Control samples: " } (snapshot.original_control_n) " → " (snapshot.filtered_control_n) }
+        }
+        @if !preview.is_empty() {
+            p { strong { "Excluded active-comparison IDs" } }
+            p { code { (preview.join(", ")) } }
+            @if snapshot.excluded_comparison_ids.len() > preview.len() {
+                p { "Only the first 50 IDs are shown here. The technical export contains the complete frozen exclusion list." }
+            }
+        }
+        p {
+            "If reviewed QC exclusions were also enabled, the primary analysis used the union of both exclusion sources. The two provenance records are retained separately so the reason for each filtering mechanism remains auditable."
+        }
+    });
     section
 }
 
@@ -2688,6 +2730,11 @@ where
         } @else {
             p { strong { "Reviewed QC exclusions: " } "none applied to this run." }
         }
+        @if let Some(metadata_exclusion)=run.settings.metadata_sample_exclusion.as_ref() {
+            p { strong { "Metadata-defined exclusions: " } (metadata_exclusion.excluded_comparison_ids.len()) " active-comparison sample(s) matched " code { (metadata_exclusion.column) } " = " (metadata_exclusion.excluded_values.join(", ")) "." }
+        } @else {
+            p { strong { "Metadata-defined exclusions: " } "none applied to this run." }
+        }
         p { "Corrected/standard results are the primary inferential evidence. Exploratory expression calculations, when enabled, are retained only as descriptive direction-concordance support. Candidate prioritization and both report styles are derived from this completed run." }
     });
     report.add_section(overview);
@@ -2723,6 +2770,10 @@ where
             li { strong { "BCR-isotype Undetermined sensitivity policy: " } (if run.settings.corrected.exclude_undetermined_isotype { "exclude and renormalize" } else { "retain" }) }
             li { strong { "Exploratory TPM direction support: " } (if run.settings.exploratory_direction_check { "enabled" } else { "disabled" }) }
             li { strong { "PBMC / confounding diagnostics: " } (if run.settings.pbmc_diagnostics.is_some() { "enabled" } else { "disabled" }) }
+            li { strong { "User-defined metadata sample exclusion: " } (if run.settings.metadata_sample_exclusion.is_some() { "enabled" } else { "disabled" }) }
+            @if let Some(metadata_exclusion)=run.settings.metadata_sample_exclusion.as_ref() {
+                li { strong { "Metadata exclusion rule: " } (metadata_exclusion.column) " ∈ {" (metadata_exclusion.excluded_values.join(", ")) "}; " (metadata_exclusion.excluded_comparison_ids.len()) " active-comparison sample(s) removed." }
+            }
             li { strong { "Longitudinal patient-signature clustering: " } (if run.settings.longitudinal.is_some() { "enabled" } else { "disabled" }) }
             li { strong { "Post-selection significant-hit structure: " } (if run.settings.significant_hit_structure.is_some() { "enabled" } else { "disabled" }) }
             @if let Some(hit)=run.settings.significant_hit_structure.as_ref() {
@@ -2746,6 +2797,9 @@ where
             qc,
             "Sample QC and reviewed exclusions",
         ));
+    }
+    if let Some(metadata_exclusion) = run.settings.metadata_sample_exclusion.as_ref() {
+        report.add_section(build_metadata_sample_exclusion_section(metadata_exclusion));
     }
 
     progress(15, 100, "Rendering corrected gene-expression results");
@@ -2949,6 +3003,9 @@ pub fn generate_unified_simplified_html_report(
         } @else {
             p { strong { "QC review: " } "no frozen cross-modal outlier audit was attached to this run, and no reviewed sample exclusions were applied." }
         }
+        @if let Some(metadata_exclusion)=run.settings.metadata_sample_exclusion.as_ref() {
+            p { strong { "Metadata-defined sample exclusion: " } (metadata_exclusion.excluded_comparison_ids.len()) " active-comparison sample(s) were removed using " code { (metadata_exclusion.column) } " = " (metadata_exclusion.excluded_values.join(", ")) "." }
+        }
         @if let Some(gene)=top_gene {
             p { strong { "Main takeaway: " } "The strongest ranked gene-level candidate is " (gene.gene) " (adjusted log2FC " (fmt(gene.adjusted_log2fc)) ", BH q " (fmt_sci(gene.q_value)) "). This is a preliminary candidate signal, not a validated biomarker." }
         } @else {
@@ -3033,6 +3090,9 @@ pub fn generate_unified_simplified_html_report(
         @if let Some(qc)=run.qc_snapshot.as_ref() {
             p { strong { "Reviewed exclusions used by this run: " } @if qc.excluded_ids.is_empty() { "none" } @else { (qc.excluded_ids.join(", ")) } }
         }
+        @if let Some(metadata_exclusion)=run.settings.metadata_sample_exclusion.as_ref() {
+            p { strong { "Metadata-defined exclusions used by this run: " } @if metadata_exclusion.excluded_comparison_ids.is_empty() { "none in the active comparison" } @else { (metadata_exclusion.excluded_comparison_ids.join(", ")) } }
+        }
         @if !run.warnings.is_empty() {
             p { strong { "Run note: " } (run.warnings.len()) " warning(s) were recorded. See the full detailed report for the complete technical audit." }
         }
@@ -3079,6 +3139,27 @@ fn build_unified_analysis_documentation(run: &UnifiedCohortAnalysisRun) -> Repor
             if qc.applied_to_analysis { "yes" } else { "no" }
         )
     });
+    let metadata_exclusion_description = run
+        .settings
+        .metadata_sample_exclusion
+        .as_ref()
+        .map(|snapshot| {
+            format!(
+                "column {}; excluded values {}; metadata IDs matching rule {}; active-comparison samples removed {}; case {} -> {}; control {} -> {}",
+                snapshot.column,
+                if snapshot.excluded_values.is_empty() {
+                    "none".to_string()
+                } else {
+                    snapshot.excluded_values.join(", ")
+                },
+                snapshot.matching_metadata_ids.len(),
+                snapshot.excluded_comparison_ids.len(),
+                snapshot.original_case_n,
+                snapshot.filtered_case_n,
+                snapshot.original_control_n,
+                snapshot.filtered_control_n,
+            )
+        });
     let diagnostics_description = run.settings.pbmc_diagnostics.as_ref().map(|cfg| {
         format!(
             "enabled; top variable PCA genes {}; robust outlier threshold {:.3}; low-count threshold {:.3}; minimum supported fraction {:.3}; top-two contribution warning threshold {:.3}; top candidates {}",
@@ -3122,6 +3203,11 @@ fn build_unified_analysis_documentation(run: &UnifiedCohortAnalysisRun) -> Repor
                 li { strong { "Cross-modal QC snapshot: " } (text) }
             } @else {
                 li { strong { "Cross-modal QC snapshot: " } "none attached to this completed run." }
+            }
+            @if let Some(text) = metadata_exclusion_description.as_ref() {
+                li { strong { "User-defined metadata sample exclusion: " } (text) }
+            } @else {
+                li { strong { "User-defined metadata sample exclusion: " } "disabled for this run." }
             }
             @if let Some(text) = diagnostics_description.as_ref() {
                 li { strong { "PBMC/source/composition diagnostics: " } (text) }

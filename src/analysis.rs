@@ -7,6 +7,7 @@
 
 use crate::cohort::{
     CohortComparison, CohortComparisonDefinition, CohortMapping, GeneComparisonResult,
+    MetadataTable, normalize_sample_id,
 };
 use crate::corrected::{
     CorrectedExpressionResult, CorrectedImmuneResult, CorrectedIsotypeResult, CorrectedModelSpec,
@@ -17,7 +18,161 @@ use crate::focused::{FocusedCandidateSettings, FocusedCandidateSummary};
 use crate::hit_structure::{SignificantHitStructureConfig, SignificantHitStructureResult};
 use crate::longitudinal::{LongitudinalAnalysisResult, LongitudinalClusteringConfig};
 use crate::outliers::OutlierFilterSnapshot;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
+
+/// Frozen provenance for a user-defined sample exclusion rule taken directly
+/// from the loaded sample metadata.  The UI exposes this independently of the
+/// cross-modal outlier-QC workflow so collaborators can mark samples using a
+/// column/value convention of their own (for example `manual_outlier=Yes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataSampleExclusionSnapshot {
+    /// Metadata column whose values were inspected.
+    pub column: String,
+    /// Exact observed values selected for exclusion (matching is
+    /// case-insensitive after trimming whitespace).
+    pub excluded_values: Vec<String>,
+    /// Metadata IDs of all rows matching the configured rule, including rows
+    /// that are outside the active Case/Control comparison.
+    pub matching_metadata_ids: Vec<String>,
+    /// Canonical IDs actually removed from the active Case/Control comparison.
+    pub excluded_comparison_ids: Vec<String>,
+    pub original_case_n: usize,
+    pub original_control_n: usize,
+    pub filtered_case_n: usize,
+    pub filtered_control_n: usize,
+}
+
+impl MetadataSampleExclusionSnapshot {
+    pub fn applied_count(&self) -> usize {
+        self.excluded_comparison_ids.len()
+    }
+}
+
+/// Return metadata IDs matching a selected column/value exclusion rule.
+/// Empty values are ignored; selected values are matched case-insensitively
+/// after trimming so the frozen rule remains robust to inconsequential
+/// capitalization or surrounding whitespace.
+pub fn metadata_exclusion_ids(
+    metadata: &MetadataTable,
+    column: &str,
+    excluded_values: &HashSet<String>,
+) -> Vec<String> {
+    let Some(column_idx) = metadata.column_index(column) else {
+        return Vec::new();
+    };
+    let normalized_values = excluded_values
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<HashSet<_>>();
+    if normalized_values.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ids = BTreeSet::new();
+    for (row_idx, row) in metadata.rows.iter().enumerate() {
+        let Some(value) = row.get(column_idx) else {
+            continue;
+        };
+        if !normalized_values.contains(&value.trim().to_ascii_lowercase()) {
+            continue;
+        }
+        if let Some(id) = metadata.id_value(row_idx) {
+            let id = id.trim();
+            if !id.is_empty() {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+    ids.into_iter().collect()
+}
+
+/// Filter an existing comparison by a set of sample IDs while retaining the
+/// same Case/Control labels.  This is deliberately generic rather than tied to
+/// the automatic outlier-QC terminology because the exclusion source may be a
+/// collaborator-authored metadata flag.
+pub fn filter_comparison_excluding_samples(
+    comparison: &CohortComparison,
+    excluded_ids: &HashSet<String>,
+) -> CohortComparison {
+    if excluded_ids.is_empty() {
+        return comparison.clone();
+    }
+    let canonical_excluded = excluded_ids
+        .iter()
+        .map(|id| comparison.canonical_id(id))
+        .collect::<HashSet<_>>();
+    let mut case_ids = comparison.case_ids.clone();
+    let mut control_ids = comparison.control_ids.clone();
+    case_ids.retain(|id| !canonical_excluded.contains(id));
+    control_ids.retain(|id| !canonical_excluded.contains(id));
+    if case_ids.len() == comparison.case_ids.len()
+        && control_ids.len() == comparison.control_ids.len()
+    {
+        return comparison.clone();
+    }
+    let mut id_to_canonical = comparison.id_to_canonical.clone();
+    id_to_canonical.retain(|_, canonical| !canonical_excluded.contains(canonical));
+    CohortComparison {
+        name: format!("{} — sample-filtered", comparison.name),
+        case_label: comparison.case_label.clone(),
+        control_label: comparison.control_label.clone(),
+        case_metadata_rows: case_ids.len(),
+        control_metadata_rows: control_ids.len(),
+        case_ids,
+        control_ids,
+        id_to_canonical,
+    }
+}
+
+pub fn build_metadata_sample_exclusion_snapshot(
+    metadata: &MetadataTable,
+    column: &str,
+    excluded_values: &HashSet<String>,
+    original: &CohortComparison,
+) -> MetadataSampleExclusionSnapshot {
+    let matching_metadata_ids = metadata_exclusion_ids(metadata, column, excluded_values);
+    let matching_set = matching_metadata_ids
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let filtered = filter_comparison_excluding_samples(original, &matching_set);
+    let filtered_ids = filtered
+        .case_ids
+        .iter()
+        .chain(filtered.control_ids.iter())
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut excluded_comparison_ids = matching_metadata_ids
+        .iter()
+        .map(|id| original.canonical_id(id))
+        .filter(|id| {
+            (original.case_ids.contains(id) || original.control_ids.contains(id))
+                && !filtered_ids.contains(id)
+        })
+        .collect::<Vec<_>>();
+    excluded_comparison_ids.sort();
+    excluded_comparison_ids.dedup();
+    let mut excluded_values = excluded_values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    excluded_values.sort_by_key(|value| value.to_ascii_lowercase());
+    excluded_values.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+
+    MetadataSampleExclusionSnapshot {
+        column: column.to_string(),
+        excluded_values,
+        matching_metadata_ids,
+        excluded_comparison_ids,
+        original_case_n: original.case_ids.len(),
+        original_control_n: original.control_ids.len(),
+        filtered_case_n: filtered.case_ids.len(),
+        filtered_control_n: filtered.control_ids.len(),
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct CohortModalitySelection {
@@ -65,6 +220,9 @@ pub struct CohortAnalysisSettingsSnapshot {
     pub exploratory_direction_check: bool,
     pub candidate: FocusedCandidateSettings,
     pub pbmc_diagnostics: Option<PbmcDiagnosticsConfig>,
+    /// Optional user-defined metadata rule used to exclude samples from the
+    /// primary Case/Control analysis independently of automatic outlier QC.
+    pub metadata_sample_exclusion: Option<MetadataSampleExclusionSnapshot>,
     /// Optional unsupervised all-eligible-sample analysis of longitudinal
     /// patient/person identity, independent of the Case/Control comparison.
     pub longitudinal: Option<LongitudinalClusteringConfig>,
@@ -790,13 +948,59 @@ use crate::outliers::{
 };
 use anyhow::{Context, anyhow};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 
 pub const TECHNICAL_EXPORT_MANIFEST_NAME: &str = "technical_export_manifest.json";
+
+fn write_metadata_sample_exclusion_tables(
+    outdir: &Path,
+    snapshot: &MetadataSampleExclusionSnapshot,
+) -> Result<()> {
+    let excluded = snapshot
+        .excluded_comparison_ids
+        .iter()
+        .map(|id| normalize_sample_id(id))
+        .collect::<HashSet<_>>();
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .from_path(outdir.join("sample_metadata_exclusion.tsv"))
+        .with_context(|| "Could not create sample_metadata_exclusion.tsv")?;
+    writer.write_record(["metadata_id", "excluded_from_active_comparison"])?;
+    for id in &snapshot.matching_metadata_ids {
+        writer.write_record([
+            id.as_str(),
+            if excluded.contains(&normalize_sample_id(id)) {
+                "true"
+            } else {
+                "false"
+            },
+        ])?;
+    }
+    writer.flush()?;
+
+    fs::write(
+        outdir.join("sample_metadata_exclusion_summary.txt"),
+        format!(
+            "Metadata sample exclusion\nColumn: {}\nExcluded values: {}\nMatching metadata IDs: {}\nExcluded active-comparison IDs: {}\nCase: {} -> {}\nControl: {} -> {}\nMatching is case-insensitive after trimming whitespace.\n",
+            snapshot.column,
+            if snapshot.excluded_values.is_empty() {
+                "none".to_string()
+            } else {
+                snapshot.excluded_values.join(", ")
+            },
+            snapshot.matching_metadata_ids.len(),
+            snapshot.excluded_comparison_ids.len(),
+            snapshot.original_case_n,
+            snapshot.filtered_case_n,
+            snapshot.original_control_n,
+            snapshot.filtered_control_n,
+        ),
+    )?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TechnicalExportManifestEntry {
@@ -1287,6 +1491,14 @@ where
         write_outlier_filter_modalities_tsv(&outdir.join("sample_outlier_qc_modalities.tsv"), qc)?;
         write_outlier_filter_summary(&outdir.join("sample_outlier_qc_summary.txt"), qc)?;
     }
+    if let Some(metadata_exclusion) = run.settings.metadata_sample_exclusion.as_ref() {
+        progress(
+            9,
+            STAGES,
+            "Technical tables: writing metadata sample-exclusion provenance",
+        );
+        write_metadata_sample_exclusion_tables(&outdir, metadata_exclusion)?;
+    }
     progress(10, STAGES, "Technical tables: QC provenance complete");
     hash_pool.discover()?;
 
@@ -1390,6 +1602,21 @@ where
     } else {
         summary.push_str("QC exclusions applied: 0\n");
     }
+    if let Some(metadata_exclusion) = run.settings.metadata_sample_exclusion.as_ref() {
+        summary.push_str(&format!(
+            "Metadata sample exclusion: enabled\nMetadata exclusion column: {}\nMetadata exclusion values: {}\nMetadata rows/IDs matching rule: {}\nActive-comparison samples excluded by metadata rule: {}\n",
+            metadata_exclusion.column,
+            if metadata_exclusion.excluded_values.is_empty() {
+                "none".to_string()
+            } else {
+                metadata_exclusion.excluded_values.join(", ")
+            },
+            metadata_exclusion.matching_metadata_ids.len(),
+            metadata_exclusion.excluded_comparison_ids.len(),
+        ));
+    } else {
+        summary.push_str("Metadata sample exclusion: disabled\n");
+    }
     if let Some(longitudinal) = run.longitudinal.as_ref() {
         summary.push_str(&format!(
             "Longitudinal clustering: enabled\nLongitudinal observation/sample column: {}\nLongitudinal patient/person column: {}\nLongitudinal time/date column: {}\nLongitudinal QC/review column: {}\nLongitudinal QC values excluded: {}\nLongitudinal modalities completed: {}\n",
@@ -1459,4 +1686,64 @@ where
         "Technical table materialization complete (all table SHA-256 values precomputed)",
     );
     Ok(outdir)
+}
+
+#[cfg(test)]
+mod metadata_exclusion_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+
+    fn test_metadata() -> MetadataTable {
+        MetadataTable {
+            path: PathBuf::from("metadata.tsv"),
+            columns: vec!["sample_id".to_string(), "qc_review_status".to_string()],
+            rows: vec![
+                vec!["S1".to_string(), "Pass".to_string()],
+                vec!["S2".to_string(), " Failed ".to_string()],
+                vec!["S3".to_string(), "FAILED".to_string()],
+                vec!["S4".to_string(), "Pass".to_string()],
+            ],
+            id_column: "sample_id".to_string(),
+        }
+    }
+
+    fn test_comparison() -> CohortComparison {
+        CohortComparison {
+            name: "Case vs Control".to_string(),
+            case_label: "Case".to_string(),
+            control_label: "Control".to_string(),
+            case_ids: ["S1".to_string(), "S2".to_string()].into_iter().collect(),
+            control_ids: ["S3".to_string(), "S4".to_string()].into_iter().collect(),
+            id_to_canonical: HashMap::new(),
+            case_metadata_rows: 2,
+            control_metadata_rows: 2,
+        }
+    }
+
+    #[test]
+    fn metadata_exclusion_matches_selected_values_case_insensitively() {
+        let selected = ["failed".to_string()].into_iter().collect::<HashSet<_>>();
+        let ids = metadata_exclusion_ids(&test_metadata(), "qc_review_status", &selected);
+        assert_eq!(ids, vec!["S2".to_string(), "S3".to_string()]);
+    }
+
+    #[test]
+    fn metadata_exclusion_snapshot_freezes_ids_and_group_counts() {
+        let selected = ["Failed".to_string()].into_iter().collect::<HashSet<_>>();
+        let snapshot = build_metadata_sample_exclusion_snapshot(
+            &test_metadata(),
+            "qc_review_status",
+            &selected,
+            &test_comparison(),
+        );
+        assert_eq!(
+            snapshot.excluded_comparison_ids,
+            vec!["S2".to_string(), "S3".to_string()]
+        );
+        assert_eq!(snapshot.original_case_n, 2);
+        assert_eq!(snapshot.original_control_n, 2);
+        assert_eq!(snapshot.filtered_case_n, 1);
+        assert_eq!(snapshot.filtered_control_n, 1);
+    }
 }

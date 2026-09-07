@@ -444,6 +444,21 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
                 ],
             },
             AnalysisDocSubsection {
+                title: "Metadata-defined sample exclusions without running outlier QC",
+                paragraphs: &[
+                    "The unified analysis settings also provide an independent metadata-based exclusion rule. This is useful when a collaborator has already reviewed samples and recorded a decision directly in the metadata, such as qc_review_status=Failed, manual_outlier=Yes, or include_in_analysis=No. Running the automatic cross-modal outlier analysis is not required to use this rule.",
+                    "Choose the metadata field from a dropdown and then select one or more observed values from a second dropdown. The app excludes metadata IDs whose selected field matches any chosen value, using case-insensitive matching after trimming whitespace. No sample IDs or status values need to be typed manually.",
+                    "If reviewed cross-modal QC exclusions are also enabled, the primary Case/Control analysis uses the union of the reviewed-QC IDs and the metadata-rule IDs. The two sources remain separate in the frozen run provenance so the report can distinguish an automatic-QC review decision from a collaborator-authored metadata decision.",
+                ],
+                bullets: &[
+                    "The full report records the metadata field, selected value(s), all active-comparison IDs removed by the rule, and before/after Case and Control counts.",
+                    "Technical exports include sample_metadata_exclusion.tsv and sample_metadata_exclusion_summary.txt.",
+                    "The rule applies to the primary Case/Control analysis and results derived from that filtered comparison, including significant-hit structure and candidate summaries.",
+                    "The independent longitudinal patient-signature analysis still uses its own longitudinal QC/review selector because that analysis intentionally operates on all eligible cohort observations rather than only the Case/Control comparison.",
+                    "A metadata label is only as trustworthy as its curation. Preserve the reason for exclusion in the metadata whenever possible rather than using an unexplained generic flag.",
+                ],
+            },
+            AnalysisDocSubsection {
                 title: "What an outlier does and does not mean",
                 paragraphs: &[
                     "A sample can be statistically unusual because of a technical problem, wrong tissue/source, contamination, unusual cell composition, batch history, a rare but real biological state, or simply small-sample geometry. The score alone cannot distinguish these explanations.",

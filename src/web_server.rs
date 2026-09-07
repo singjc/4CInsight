@@ -3767,6 +3767,7 @@ where
             exploratory_direction_check: snapshot.request.run_exploratory_direction_check,
             candidate: crate::focused::FocusedCandidateSettings::default(),
             pbmc_diagnostics,
+            metadata_sample_exclusion: None,
             longitudinal: None,
             significant_hit_structure: None,
         };
