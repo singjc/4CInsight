@@ -278,7 +278,26 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "Longitudinal patient-specific clustering",
         summary: "This optional unsupervised analysis asks whether repeated observations from the same person remain closer to one another than to the rest of the cohort, and which selected modality preserves patient identity most strongly.",
         default_open: false,
-        examples: &[],
+        examples: &[AnalysisDocToyExample {
+            title: "Repeated samples from the same patient stay closer than samples from different patients",
+            setup: "In this toy longitudinal cohort, each person has repeated observations collected at different times. The modality preserves patient identity when same-patient pairs remain systematically closer than pairs drawn from different patients.",
+            walkthrough: &[
+                "First compute the modality-appropriate distance between every eligible pair of observations without using patient identity to force the clustering.",
+                "Label each pair afterward as same patient or different patient using the selected Patient / person ID metadata role.",
+                "If same-patient distances are usually smaller, patient-coloured dendrogram branches should tend to stay together and the patient-identity AUC should rise above 0.5.",
+                "Compare modalities with rank-based identity AUC and nearest-neighbour patient accuracy rather than raw branch lengths, because RNA, repertoire, compositional, and immune distances are on different scales.",
+            ],
+            takeaway: "A stable longitudinal patient signature means repeated observations are closer to their own patient than to the rest of the cohort; the clustering visualization and quantitative identity scores should tell the same story.",
+            chart: AnalysisDocToyChart::Bars {
+                categories: &["Same patient", "Different patients"],
+                series: &[AnalysisDocToySeries {
+                    label: "Median toy distance",
+                    values: &[0.18, 0.72],
+                }],
+                y_label: "Toy sample distance (lower = more similar)",
+                stacked: false,
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "Flexible metadata roles",
@@ -312,7 +331,59 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         title: "Post-selection significant-hit PCA and clustering",
         summary: "This optional descriptive view restricts each modality to features that are already significant in the corrected Case/Control analysis and asks whether those hits form a coherent multivariate sample pattern. It complements, but does not replace, the unbiased all-feature PCA/dendrograms.",
         default_open: false,
-        examples: &[],
+        examples: &[AnalysisDocToyExample {
+            title: "A selected-hit PCA can show coherent Case/Control structure without being independent validation",
+            setup: "Suppose a corrected Case/Control analysis identifies a small set of FDR-supported features. Re-plotting the same samples using only those selected hits can reveal whether the discovered signal is broadly coherent across samples, but the phenotype labels already influenced which features were chosen.",
+            walkthrough: &[
+                "Select significant features using the corrected model and the configured q-value/effect thresholds.",
+                "Construct the PCA, dendrogram, and heatmap from those selected features using the modality-appropriate representation.",
+                "A clean Case/Control split suggests that the hit set carries a coherent multivariate pattern rather than being driven by one isolated feature or a few extreme samples.",
+                "Do not interpret the apparent separation as held-out prediction accuracy: feature selection and visualization used the same cohort labels. Independent replication or patient-grouped cross-validation is required to test generalization.",
+            ],
+            takeaway: "Selected-hit structure is a descriptive consistency check for discovered biology, not an independent test that the signature will classify new patients.",
+            chart: AnalysisDocToyChart::Scatter {
+                points: &[
+                    AnalysisDocToyPoint {
+                        x: -1.2,
+                        y: 0.3,
+                        group: "Case",
+                        label: "Case 1",
+                    },
+                    AnalysisDocToyPoint {
+                        x: -0.9,
+                        y: -0.2,
+                        group: "Case",
+                        label: "Case 2",
+                    },
+                    AnalysisDocToyPoint {
+                        x: -0.7,
+                        y: 0.1,
+                        group: "Case",
+                        label: "Case 3",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 0.7,
+                        y: -0.1,
+                        group: "Control",
+                        label: "Control 1",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 1.0,
+                        y: 0.25,
+                        group: "Control",
+                        label: "Control 2",
+                    },
+                    AnalysisDocToyPoint {
+                        x: 1.2,
+                        y: -0.25,
+                        group: "Control",
+                        label: "Control 3",
+                    },
+                ],
+                x_label: "Selected-hit PC1",
+                y_label: "Selected-hit PC2",
+            },
+        }],
         subsections: &[
             AnalysisDocSubsection {
                 title: "What question it answers",
