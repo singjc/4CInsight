@@ -275,6 +275,40 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         ],
     },
     AnalysisDocSection {
+        title: "Longitudinal patient-specific clustering",
+        summary: "This optional unsupervised analysis asks whether repeated observations from the same person remain closer to one another than to the rest of the cohort, and which selected modality preserves patient identity most strongly.",
+        default_open: false,
+        examples: &[],
+        subsections: &[
+            AnalysisDocSubsection {
+                title: "Flexible metadata roles",
+                paragraphs: &[
+                    "The longitudinal workflow does not assume that a particular header spelling means sample or patient. The user explicitly selects the observation/longitudinal-sample ID column, the stable patient/person ID column, an optional collection-date/timepoint column, and an optional QC/review column.",
+                    "For example, an imported collaborator sheet can use subject_id for the actual longitudinal specimen and sample_id for the person. Select subject_id as Observation / longitudinal sample ID and sample_id as Patient / person ID; the columns do not need to be renamed.",
+                    "If the chosen QC/review column contains Failed, that value is proposed for exclusion. The user can select any combination of distinct review values, and the completed run records the exact role mapping and exclusions used.",
+                ],
+                bullets: &[
+                    "The observation ID must match the expression-column or modality-file sample identifier, directly or through an unambiguous modality alias.",
+                    "The patient/person ID is used only to identify repeated observations; it is never used to make two specimens into one data row.",
+                    "The time/date field annotates leaves and pairwise exports; clustering itself does not use time to force samples together.",
+                ],
+            },
+            AnalysisDocSubsection {
+                title: "Dendrogram and patient-identity scores",
+                paragraphs: &[
+                    "Each selected modality is clustered independently with average linkage using that modality's established sample-distance definition. Gene and transcript/isoform expression use Euclidean distance on top-variable normalized log2 count features; BCR/TCR use 1 minus Morisita-Horn similarity; BCR isotype uses Aitchison distance; immune infiltration uses Euclidean distance on standardized signature scores.",
+                    "The patient-coloured dendrogram is the direct visual answer to whether longitudinal observations from one person form nearby branches. The quantitative summary then compares all same-patient pairs with all different-patient pairs.",
+                    "Patient-identity AUC is the probability that a randomly selected same-patient pair is closer than a randomly selected different-patient pair. AUC 0.5 indicates no rank separation and 1.0 indicates perfect separation. Nearest-neighbour patient accuracy asks whether each repeat-eligible observation's closest other observation belongs to the same person.",
+                ],
+                bullets: &[
+                    "Compare modalities primarily with patient-identity AUC and nearest-neighbour accuracy, not raw distances, because each modality uses a different distance scale.",
+                    "A high score supports a stable patient-specific molecular signature; it does not by itself prove that the signature is biologically desirable, disease-independent, or technically free of batch effects.",
+                    "The simplified report shows the cross-modality ranking and strongest dendrogram; the full report retains every successfully clustered modality and the technical export retains all pairwise distances.",
+                ],
+            },
+        ],
+    },
+    AnalysisDocSection {
         title: "Sample QC and cross-modal outlier analysis",
         summary: "Outlier QC asks whether a sample looks unusually far from other samples in one or more data types. It is deliberately a flag-for-review system, not an automatic sample-deletion system.",
         default_open: false,

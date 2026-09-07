@@ -18,6 +18,12 @@ The **corrected / standard analysis is the primary inferential engine**. Cross-m
 
 Both HTML report styles and the technical table export are generated from the **same frozen completed analysis run**. Exporting a different report does not rerun statistics or change sample inclusion.
 
+### Browser availability (v0.16.1 Phase 2)
+
+The repository now also contains a browser/WASM preview under `web/`. The browser build reuses this canonical analysis documentation, but it does **not** run the scientific analysis locally in WebAssembly. In Phase 2, Docs and browser interaction shells are available while native-data actions remain disabled. The production-capable analysis path is still the desktop `LocalBackend`.
+
+For exact browser build/run instructions and the Phase-3 local-server boundary, see `docs/web_development.md`.
+
 ### Searchable visual in-app and report documentation (v0.15.4)
 
 The desktop **Docs** workspace now contains a much more detailed method-and-interpretation reference intended for readers without a statistics background. The same canonical reference is embedded in both the simplified and full unified HTML reports. The report version also begins with the exact settings used for that completed run (expression support thresholds, covariates/subject handling, repertoire rarefaction and ambiguity policy, composition thresholds/pseudocount, PERMANOVA permutations, pathway thresholds, QC rule, and diagnostic thresholds).
@@ -359,6 +365,35 @@ The full report is the technical/audit record and can include:
 ### Technical tables
 
 The technical export writes the mapping/QC provenance and selected corrected/diagnostic/candidate tables from the same completed run. No export silently changes sample inclusion.
+
+## Longitudinal patient-signature clustering
+
+The unified analysis can optionally run a dedicated **all-QC-eligible-sample longitudinal clustering** analysis that is independent of the selected Case/Control comparison. This is intended for questions such as whether repeated samples from the same person retain a stable molecular signature over time and which available data type preserves that identity most strongly.
+
+The metadata roles are selected explicitly in the GUI and are **not inferred from fixed column names**:
+
+- **Observation / longitudinal sample ID** — the identifier that matches the expression matrix column or modality filename for each actual specimen/visit.
+- **Patient / person ID** — the stable identifier shared by repeated observations from one individual.
+- **Collection date / timepoint** — optional annotation used on dendrogram leaves.
+- **QC / review column** — optional field used to exclude selected values before clustering. Distinct values are selectable, and a value named `Failed` is automatically selected when present.
+
+This means an imported collaborator sheet can legitimately use, for example, `subject_id` as the longitudinal specimen identifier and `sample_id` as the stable patient identifier. The user can select those meanings directly without renaming the columns.
+
+For each selected modality the implementation builds the same scientifically appropriate sample-distance representation already used by the corrected analysis layer, but across all eligible observations rather than only the active Case/Control population:
+
+- **gene expression** — Euclidean distance on the top-variable normalized log2 raw-count features;
+- **transcript / isoform expression** — Euclidean distance on the top-variable normalized log2 total-read features;
+- **BCR / TCR** — `1 - Morisita-Horn` abundance-weighted clonotype similarity;
+- **BCR isotype** — Aitchison distance after CLR transformation;
+- **immune infiltration** — Euclidean distance on standardized immune-signature scores.
+
+Average-linkage hierarchical clustering is then rendered as a **patient-coloured dendrogram**. The analysis also quantifies whether same-patient pairs are closer than different-patient pairs:
+
+- **Patient-identity AUC** — the probability that a randomly selected same-patient pair has a smaller distance than a randomly selected different-patient pair. `0.5` indicates no rank separation; `1.0` indicates perfect pairwise identity separation.
+- **Nearest-neighbour patient accuracy** — among observations whose patient has at least one repeat, the fraction whose closest other observation belongs to the same patient.
+- **Median within-patient distance**, **median between-patient distance**, and their ratio are provided for within-modality interpretation. Raw distance magnitudes should not be compared directly between modalities because their distance definitions differ.
+
+The **simplified report** contains the cross-modality patient-identity ranking and the strongest patient-coloured dendrogram. The **full report** contains the ranking plus every successfully generated modality dendrogram. The technical-table export additionally contains the sample annotations, all pairwise distances, QC-excluded metadata rows, modality warnings/errors, and dendrogram leaf orders under `longitudinal_patient_signature/`.
 
 ## How to read the main plots
 

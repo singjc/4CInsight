@@ -15,6 +15,7 @@ use crate::diagnostics::PbmcDiagnosticsResult;
 use crate::focused::{
     FocusedCandidateSummary, FocusedGeneCandidate, FocusedOtherCandidate, FocusedPathwayCandidate,
 };
+use crate::longitudinal::{LongitudinalAnalysisResult, LongitudinalModalityResult};
 use crate::outliers::{OutlierConsensusRule, OutlierFilterSnapshot};
 use anyhow::{Context, Result};
 use maud::{Markup, PreEscaped, html};
@@ -1957,6 +1958,221 @@ fn corrected_dendrogram_plot(tree: &DendrogramResult) -> Option<Plot> {
     Some(plot)
 }
 
+fn longitudinal_metric(value: f64, digits: usize) -> String {
+    if value.is_finite() {
+        format!("{:.*}", digits, value)
+    } else {
+        "—".to_string()
+    }
+}
+
+fn longitudinal_summary_table(result: &LongitudinalAnalysisResult, limit: usize) -> Markup {
+    let mut rows = result.modalities.iter().collect::<Vec<_>>();
+    rows.sort_by(
+        |a, b| match (a.identity_auc.is_finite(), b.identity_auc.is_finite()) {
+            (true, true) => b.identity_auc.total_cmp(&a.identity_auc),
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => a.modality.cmp(&b.modality),
+        },
+    );
+    rows.truncate(limit.min(rows.len()));
+    html! {
+        div class="table-container" {
+            table {
+                thead { tr {
+                    th { "Modality" }
+                    th { "Samples" }
+                    th { "Patients" }
+                    th { "Longitudinal patients" }
+                    th { "Identity AUC" }
+                    th { "NN accuracy" }
+                    th { "Median within" }
+                    th { "Median between" }
+                    th { "Within/between" }
+                    th { "Distance" }
+                } }
+                tbody {
+                    @for row in rows {
+                        tr {
+                            td { (row.modality) }
+                            td { (row.samples) }
+                            td { (row.patients) }
+                            td { (row.longitudinal_patients) }
+                            td { (longitudinal_metric(row.identity_auc, 3)) }
+                            td { @if row.nearest_neighbor_accuracy.is_finite() { (format!("{:.1}%", 100.0 * row.nearest_neighbor_accuracy)) } @else { "—" } }
+                            td { (longitudinal_metric(row.median_within_patient_distance, 3)) }
+                            td { (longitudinal_metric(row.median_between_patient_distance, 3)) }
+                            td { (longitudinal_metric(row.within_between_ratio, 3)) }
+                            td { (row.distance_label) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn longitudinal_dendrogram_plot(modality: &LongitudinalModalityResult) -> Option<Plot> {
+    let tree = modality.dendrogram.as_ref()?;
+    if tree.leaves.is_empty() || tree.segments.is_empty() {
+        return None;
+    }
+    let annotations = modality
+        .annotations
+        .iter()
+        .map(|row| (row.sample_id.as_str(), row))
+        .collect::<BTreeMap<_, _>>();
+    let mut plot = Plot::new();
+    let mut xs: Vec<Option<f64>> = Vec::with_capacity(tree.segments.len() * 3);
+    let mut ys: Vec<Option<f64>> = Vec::with_capacity(tree.segments.len() * 3);
+    for seg in &tree.segments {
+        xs.push(Some(seg.x1));
+        ys.push(Some(seg.y1));
+        xs.push(Some(seg.x2));
+        ys.push(Some(seg.y2));
+        xs.push(None);
+        ys.push(None);
+    }
+    plot.add_trace(
+        Scatter::new(xs, ys)
+            .mode(Mode::Lines)
+            .name("Average-linkage tree")
+            .hover_info(HoverInfo::Skip),
+    );
+    let mut by_patient = BTreeMap::<String, Vec<_>>::new();
+    for leaf in &tree.leaves {
+        by_patient
+            .entry(leaf.subject.clone())
+            .or_default()
+            .push(leaf);
+    }
+    for (patient, leaves) in by_patient {
+        let x = vec![0.0; leaves.len()];
+        let y = leaves.iter().map(|leaf| leaf.position).collect::<Vec<_>>();
+        let hover = leaves
+            .iter()
+            .map(|leaf| {
+                let annotation = annotations.get(leaf.sample_id.as_str()).copied();
+                let observation = annotation
+                    .map(|row| row.observation_id.as_str())
+                    .unwrap_or(leaf.sample_id.as_str());
+                let time = annotation
+                    .map(|row| row.time_value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("not provided");
+                format!(
+                    "<b>{}</b><br>Observation: {}<br>Patient/person: {}<br>Time/date: {}<br>Cluster order: {}",
+                    escape_hover_text(&leaf.sample_id),
+                    escape_hover_text(observation),
+                    escape_hover_text(&patient),
+                    escape_hover_text(time),
+                    leaf.position as usize + 1,
+                )
+            })
+            .collect::<Vec<_>>();
+        plot.add_trace(
+            Scatter::new(x, y)
+                .mode(Mode::Markers)
+                .name(patient)
+                .hover_text_array(hover)
+                .hover_template("%{hovertext}<extra>%{fullData.name}</extra>"),
+        );
+    }
+    plot.set_layout(
+        Layout::new()
+            .title(Title::with_text(&tree.name))
+            .x_axis(Axis::new().title(Title::with_text(&tree.distance_label)))
+            .y_axis(Axis::new().title(Title::with_text("Cluster leaf order"))),
+    );
+    Some(plot)
+}
+
+fn build_longitudinal_report_section(
+    result: &LongitudinalAnalysisResult,
+    simplified: bool,
+) -> ReportSection {
+    let mut section = ReportSection::new("Longitudinal patient-specific signatures");
+    let excluded_values = if result.config.excluded_qc_values.is_empty() {
+        "none".to_string()
+    } else {
+        result
+            .config
+            .excluded_qc_values
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let best = result
+        .modalities
+        .iter()
+        .filter(|row| row.identity_auc.is_finite())
+        .max_by(|a, b| a.identity_auc.total_cmp(&b.identity_auc));
+    section.add_content(html! {
+        p {
+            "This unsupervised analysis uses the selected metadata roles rather than assuming fixed column names. "
+            "It clusters all QC-eligible observations independently of the Case/Control comparison and quantifies whether repeated observations from the same patient/person are closer than observations from different people."
+        }
+        ul {
+            li { strong { "Observation / longitudinal sample ID column: " } (result.config.observation_id_column) }
+            li { strong { "Patient / person ID column: " } (result.config.patient_id_column) }
+            li { strong { "Collection date / timepoint column: " } (result.config.time_column.as_deref().unwrap_or("none")) }
+            li { strong { "QC / review column: " } (result.config.qc_status_column.as_deref().unwrap_or("none")) }
+            li { strong { "Excluded QC values: " } (excluded_values) }
+            li { strong { "Metadata audit: " } (result.metadata_rows) " rows total; " (result.eligible_metadata_rows) " eligible; " (result.qc_excluded_rows) " QC-excluded; " (result.missing_identifier_rows) " missing required identifiers; " (result.ambiguous_observation_keys) " ambiguous observation/alias keys." }
+        }
+        p {
+            strong { "How to read the ranking: " }
+            "Patient-identity AUC is the probability that a randomly selected same-patient pair is closer than a randomly selected different-patient pair (0.5 = no rank separation; 1.0 = perfect separation). Nearest-neighbour accuracy asks whether a repeat-eligible sample's closest other sample comes from the same patient. Raw distances are modality-specific and should not be compared numerically across data types."
+        }
+        @if let Some(best)=best {
+            p { strong { "Strongest observed patient-identity signal: " } (best.modality) " (AUC " (longitudinal_metric(best.identity_auc, 3)) ", nearest-neighbour accuracy " @if best.nearest_neighbor_accuracy.is_finite() { (format!("{:.1}%", 100.0 * best.nearest_neighbor_accuracy)) } @else { "undefined" } ")." }
+        }
+        (longitudinal_summary_table(result, if simplified { 8 } else { usize::MAX }))
+        @if simplified {
+            p { em { "The simplified report shows the strongest patient-coloured dendrogram below. The full report and technical-table export retain every successfully clustered modality and all pairwise distances." } }
+        }
+    });
+    if simplified {
+        if let Some(best) = best {
+            if let Some(plot) = longitudinal_dendrogram_plot(best) {
+                section.add_plot(plot);
+            }
+        }
+    } else {
+        for modality in &result.modalities {
+            section.add_content(html! {
+                h3 { (modality.modality) }
+                p {
+                    (modality.samples) " samples from " (modality.patients) " patients; "
+                    (modality.longitudinal_patients) " patients have at least two eligible observations. "
+                    "Identity AUC " (longitudinal_metric(modality.identity_auc, 3)) "; nearest-neighbour accuracy "
+                    @if modality.nearest_neighbor_accuracy.is_finite() { (format!("{:.1}%", 100.0 * modality.nearest_neighbor_accuracy)) } @else { "undefined" }
+                    "; median within-patient distance " (longitudinal_metric(modality.median_within_patient_distance, 3))
+                    "; median between-patient distance " (longitudinal_metric(modality.median_between_patient_distance, 3)) "."
+                }
+                @if !modality.warnings.is_empty() {
+                    details {
+                        summary { "Modality warnings (" (modality.warnings.len()) ")" }
+                        ul { @for warning in &modality.warnings { li { (warning) } } }
+                    }
+                }
+            });
+            if let Some(plot) = longitudinal_dendrogram_plot(modality) {
+                section.add_plot(plot);
+            }
+        }
+        if !result.modality_errors.is_empty() {
+            section.add_content(html! {
+                h3 { "Modalities that could not be clustered" }
+                ul { @for error in &result.modality_errors { li { strong { (error.modality) ": " } (error.error) } } }
+            });
+        }
+    }
+    section
+}
+
 fn compact_hover_gene_list(value: &str, max_items: usize, max_chars: usize) -> String {
     let items = value
         .split(',')
@@ -2279,6 +2495,10 @@ where
             li { strong { "BCR-isotype Undetermined sensitivity policy: " } (if run.settings.corrected.exclude_undetermined_isotype { "exclude and renormalize" } else { "retain" }) }
             li { strong { "Exploratory TPM direction support: " } (if run.settings.exploratory_direction_check { "enabled" } else { "disabled" }) }
             li { strong { "PBMC / confounding diagnostics: " } (if run.settings.pbmc_diagnostics.is_some() { "enabled" } else { "disabled" }) }
+            li { strong { "Longitudinal patient-signature clustering: " } (if run.settings.longitudinal.is_some() { "enabled" } else { "disabled" }) }
+            @if let Some(longitudinal)=run.settings.longitudinal.as_ref() {
+                li { strong { "Longitudinal column roles: " } "observation/sample = " (longitudinal.observation_id_column) "; patient/person = " (longitudinal.patient_id_column) "; time/date = " (longitudinal.time_column.as_deref().unwrap_or("none")) "; QC/review = " (longitudinal.qc_status_column.as_deref().unwrap_or("none")) "." }
+            }
             @if run.settings.modalities.pathway {
                 li { strong { "Pathway GMT: " } code { (pathway_source) } }
                 li { strong { "Pathway foreground thresholds: " } "gene BH q ≤ " (fmt(run.settings.pathway_q_threshold)) "; |adjusted effect| ≥ " (fmt(run.settings.pathway_effect_threshold)) }
@@ -2347,6 +2567,15 @@ where
         report.add_section(build_corrected_pathway_section(result));
     } else if let Some(error) = primary.pathway_error.as_deref() {
         report.add_section(corrected_error_section("Pathways", error));
+    }
+
+    if let Some(longitudinal) = run.longitudinal.as_ref() {
+        report.add_section(build_longitudinal_report_section(longitudinal, false));
+    } else if let Some(error) = run.longitudinal_error.as_deref() {
+        report.add_section(corrected_error_section(
+            "Longitudinal patient-specific signatures",
+            error,
+        ));
     }
 
     progress(68, 100, "Rendering supporting expression direction checks");
@@ -2527,6 +2756,15 @@ pub fn generate_unified_simplified_html_report(
         report.add_section(structure);
     }
 
+    if let Some(longitudinal) = run.longitudinal.as_ref() {
+        report.add_section(build_longitudinal_report_section(longitudinal, true));
+    } else if let Some(error) = run.longitudinal_error.as_deref() {
+        report.add_section(corrected_error_section(
+            "Longitudinal patient-specific signatures",
+            error,
+        ));
+    }
+
     report.add_section(build_unified_analysis_documentation(run));
 
     let mut limitations = ReportSection::new("Confidence and limitations");
@@ -2617,6 +2855,9 @@ fn build_unified_analysis_documentation(run: &UnifiedCohortAnalysisRun) -> Repor
             li { strong { "Candidate display limits: " } (run.settings.candidate.top_genes) " genes, " (run.settings.candidate.top_transcripts) " transcripts, " (run.settings.candidate.top_pathways) " pathways, " (run.settings.candidate.top_other) " other signals; minimum candidate gene |log2FC| " (fmt(run.settings.candidate.min_gene_abs_log2fc)) "." }
             @if run.settings.modalities.pathway {
                 li { strong { "Pathway foreground: " } "gene BH q <= " (fmt(run.settings.pathway_q_threshold)) " and |adjusted log2FC| >= " (fmt(run.settings.pathway_effect_threshold)) "." }
+            }
+            @if let Some(longitudinal)=run.settings.longitudinal.as_ref() {
+                li { strong { "Longitudinal clustering metadata roles: " } "observation/sample = " (longitudinal.observation_id_column) "; patient/person = " (longitudinal.patient_id_column) "; time/date = " (longitudinal.time_column.as_deref().unwrap_or("none")) "; QC/review = " (longitudinal.qc_status_column.as_deref().unwrap_or("none")) "." }
             }
             li { strong { "Exploratory TPM direction annotation: " } (if run.settings.exploratory_direction_check { "enabled" } else { "disabled" }) }
             @if let Some(text) = qc_description.as_ref() {

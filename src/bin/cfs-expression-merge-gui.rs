@@ -42,6 +42,11 @@ use cfs_expression_merger::gmt_catalog::{
     GMT_CATALOG, MSIGDB_LICENSE_URL, MSIGDB_RELEASE_URL, MSIGDB_VERSION,
     cache_path as gmt_cache_path, download_public_gmt,
 };
+use cfs_expression_merger::longitudinal::{
+    LongitudinalAnalysisResult, LongitudinalClusteringConfig, LongitudinalModalityResult,
+    distinct_metadata_values, suggested_observation_id_column, suggested_patient_id_column,
+    suggested_qc_status_column, suggested_time_column,
+};
 use cfs_expression_merger::metadata::{
     STANDARD_METADATA_FIELDS, add_missing_standard_columns, canonical_sample_id,
     new_standard_metadata, row_matching_ids, unique_values as metadata_unique_values,
@@ -177,6 +182,7 @@ enum UnifiedResultView {
     TcrBeta,
     Immune,
     Pathway,
+    Longitudinal,
     QcRobustness,
 }
 
@@ -385,6 +391,12 @@ struct MergeApp {
     unified_result_view: UnifiedResultView,
     cohort_use_filtered_metadata: bool,
     unified_run_diagnostics: bool,
+    unified_run_longitudinal: bool,
+    longitudinal_observation_column: Option<String>,
+    longitudinal_patient_column: Option<String>,
+    longitudinal_time_column: Option<String>,
+    longitudinal_qc_column: Option<String>,
+    longitudinal_excluded_qc_values: HashSet<String>,
     corrected_subject_column: Option<String>,
     corrected_covariates: HashSet<String>,
     corrected_ambiguous_policy: AmbiguousCallPolicy,
@@ -725,6 +737,12 @@ impl MergeApp {
             unified_result_view: UnifiedResultView::Overview,
             cohort_use_filtered_metadata: false,
             unified_run_diagnostics: true,
+            unified_run_longitudinal: false,
+            longitudinal_observation_column: None,
+            longitudinal_patient_column: None,
+            longitudinal_time_column: None,
+            longitudinal_qc_column: None,
+            longitudinal_excluded_qc_values: HashSet::new(),
             corrected_subject_column: None,
             corrected_covariates: HashSet::new(),
             corrected_ambiguous_policy: AmbiguousCallPolicy::Exclude,
@@ -3223,6 +3241,9 @@ impl MergeApp {
             );
 
             let active = this.active_cohort_inputs();
+            if let Some((metadata, _, _, _)) = active.as_ref() {
+                this.configure_longitudinal_metadata_defaults_for(metadata);
+            }
             if let Some((metadata, path, _, uses_subset)) = active.as_ref() {
                 ui.label(format!(
                     "Cohort source: {}{} | {} metadata rows",
@@ -3598,6 +3619,147 @@ impl MergeApp {
                 });
             }
 
+            ui.separator();
+            ui.label(egui::RichText::new("Longitudinal patient-signature clustering").strong());
+            ui.checkbox(
+                &mut this.unified_run_longitudinal,
+                "Run hierarchical clustering across all QC-eligible samples",
+            )
+            .on_hover_text("Independent of the Case/Control comparison. For each selected modality, this clusters every metadata observation that passes the configured metadata QC filter, then quantifies whether repeated samples from the same patient/person are closer than samples from other people.");
+            if this.unified_run_longitudinal {
+                ui.label(
+                    egui::RichText::new(
+                        "Use the dropdowns to describe what the collaborator's columns mean. Column names are not hard-coded: for example, if subject_id contains the longitudinal sample identifier and sample_id contains the patient identifier, select them that way here.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                if let Some((metadata, _, _, _)) = active.as_ref() {
+                    let mut observation = this.longitudinal_observation_column.clone();
+                    let mut patient = this.longitudinal_patient_column.clone();
+                    let mut time = this.longitudinal_time_column.clone();
+                    let mut qc = this.longitudinal_qc_column.clone();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Observation / longitudinal sample ID:");
+                        egui::ComboBox::from_id_salt("longitudinal_observation_column")
+                            .selected_text(observation.clone().unwrap_or_else(|| "(choose column)".to_string()))
+                            .width(250.0)
+                            .show_ui(ui, |ui| {
+                                for column in &metadata.columns {
+                                    ui.selectable_value(&mut observation, Some(column.clone()), column);
+                                }
+                            });
+                        ui.label("Patient / person ID:");
+                        egui::ComboBox::from_id_salt("longitudinal_patient_column")
+                            .selected_text(patient.clone().unwrap_or_else(|| "(choose column)".to_string()))
+                            .width(250.0)
+                            .show_ui(ui, |ui| {
+                                for column in &metadata.columns {
+                                    if observation.as_ref() == Some(column) {
+                                        continue;
+                                    }
+                                    ui.selectable_value(&mut patient, Some(column.clone()), column);
+                                }
+                            });
+                    });
+                    if observation != this.longitudinal_observation_column {
+                        this.longitudinal_observation_column = observation.clone();
+                        if patient.as_ref() == observation.as_ref() {
+                            patient = observation
+                                .as_deref()
+                                .and_then(|column| suggested_patient_id_column(metadata, column));
+                        }
+                    }
+                    if patient != this.longitudinal_patient_column {
+                        this.longitudinal_patient_column = patient.clone();
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Collection date / timepoint:");
+                        egui::ComboBox::from_id_salt("longitudinal_time_column")
+                            .selected_text(time.clone().unwrap_or_else(|| "(none)".to_string()))
+                            .width(250.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut time, None, "(none)");
+                                for column in &metadata.columns {
+                                    ui.selectable_value(&mut time, Some(column.clone()), column);
+                                }
+                            });
+                        ui.label("Metadata QC / review column:");
+                        egui::ComboBox::from_id_salt("longitudinal_qc_column")
+                            .selected_text(qc.clone().unwrap_or_else(|| "(none)".to_string()))
+                            .width(250.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut qc, None, "(none)");
+                                for column in &metadata.columns {
+                                    ui.selectable_value(&mut qc, Some(column.clone()), column);
+                                }
+                            });
+                    });
+                    if time != this.longitudinal_time_column {
+                        this.longitudinal_time_column = time;
+                    }
+                    if qc != this.longitudinal_qc_column {
+                        this.longitudinal_qc_column = qc.clone();
+                        this.longitudinal_excluded_qc_values.clear();
+                        if let Some(column) = qc.as_deref() {
+                            if let Some(value) = distinct_metadata_values(metadata, column)
+                                .into_iter()
+                                .find(|value| value.eq_ignore_ascii_case("Failed"))
+                            {
+                                this.longitudinal_excluded_qc_values.insert(value);
+                            }
+                        }
+                    }
+                    if let Some(qc_column) = this.longitudinal_qc_column.as_deref() {
+                        let values = distinct_metadata_values(metadata, qc_column);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Exclude QC/review values:");
+                            egui::ComboBox::from_id_salt("longitudinal_excluded_qc_values")
+                                .selected_text(if this.longitudinal_excluded_qc_values.is_empty() {
+                                    "(none)".to_string()
+                                } else {
+                                    let mut selected = this.longitudinal_excluded_qc_values.iter().cloned().collect::<Vec<_>>();
+                                    selected.sort();
+                                    selected.join(", ")
+                                })
+                                .width(300.0)
+                                .show_ui(ui, |ui| {
+                                    for value in &values {
+                                        let mut selected = this.longitudinal_excluded_qc_values.contains(value);
+                                        if ui.checkbox(&mut selected, value).changed() {
+                                            if selected {
+                                                this.longitudinal_excluded_qc_values.insert(value.clone());
+                                            } else {
+                                                this.longitudinal_excluded_qc_values.remove(value);
+                                            }
+                                        }
+                                    }
+                                });
+                        });
+                    }
+                    if this.longitudinal_observation_column.is_none()
+                        || this.longitudinal_patient_column.is_none()
+                    {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(225, 120, 110),
+                            "Choose both the observation/sample ID and patient/person ID columns.",
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "Outputs include a patient-coloured average-linkage dendrogram for each selected modality, same-patient vs different-patient pairwise distances, patient-identity AUC (0.5 = no identity signal), nearest-neighbour patient accuracy, and a cross-modality ranking. Transcript-level clustering is also reported as transcript / isoform expression.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(225, 120, 110),
+                        "Load metadata to configure longitudinal clustering columns.",
+                    );
+                }
+            }
+
             egui::CollapsingHeader::new("Repertoire / model details")
                 .default_open(false)
                 .show(ui, |ui| {
@@ -3965,6 +4127,13 @@ impl MergeApp {
                 if run.primary.pathway.is_some() || run.primary.pathway_error.is_some() {
                     ui.selectable_value(&mut this.unified_result_view, UnifiedResultView::Pathway, "Pathways");
                 }
+                if run.longitudinal.is_some() || run.longitudinal_error.is_some() {
+                    ui.selectable_value(
+                        &mut this.unified_result_view,
+                        UnifiedResultView::Longitudinal,
+                        "Longitudinal",
+                    );
+                }
                 ui.selectable_value(
                     &mut this.unified_result_view,
                     UnifiedResultView::QcRobustness,
@@ -4006,6 +4175,25 @@ impl MergeApp {
                             "Top ranked pathway: {} — odds ratio {:.2}, BH q {:.2e}.",
                             top.pathway, top.odds_ratio, top.q_value
                         ));
+                    }
+                    if let Some(longitudinal) = run.longitudinal.as_ref() {
+                        if let Some(best) = longitudinal
+                            .modalities
+                            .iter()
+                            .filter(|row| row.identity_auc.is_finite())
+                            .max_by(|a, b| a.identity_auc.total_cmp(&b.identity_auc))
+                        {
+                            ui.label(format!(
+                                "Longitudinal patient-identity signal: {} ranks highest (AUC {:.3}; nearest-neighbour accuracy {}). Open the Longitudinal tab for the patient-coloured dendrograms.",
+                                best.modality,
+                                best.identity_auc,
+                                if best.nearest_neighbor_accuracy.is_finite() {
+                                    format!("{:.1}%", best.nearest_neighbor_accuracy * 100.0)
+                                } else {
+                                    "undefined".to_string()
+                                }
+                            ));
+                        }
                     }
                     if !run.warnings.is_empty() {
                         ui.add_space(6.0);
@@ -4090,6 +4278,17 @@ impl MergeApp {
                         this.render_corrected_pathway(ui, result, "unified_pathway");
                     } else {
                         ui.label(run.primary.pathway_error.as_deref().unwrap_or("Pathway analysis not requested."));
+                    }
+                }
+                UnifiedResultView::Longitudinal => {
+                    if let Some(result) = run.longitudinal.as_ref() {
+                        this.render_longitudinal_result(ui, result);
+                    } else {
+                        ui.label(
+                            run.longitudinal_error
+                                .as_deref()
+                                .unwrap_or("Longitudinal analysis not requested."),
+                        );
                     }
                 }
                 UnifiedResultView::QcRobustness => {
@@ -6121,6 +6320,356 @@ impl MergeApp {
         }
     }
 
+    fn render_longitudinal_result(
+        &mut self,
+        ui: &mut egui::Ui,
+        result: &LongitudinalAnalysisResult,
+    ) {
+        ui.heading("Longitudinal patient-specific signature");
+        ui.label(
+            "This analysis is independent of the Case/Control comparison. It uses every modality sample that maps to an eligible metadata observation and asks whether repeated observations from the same configured patient/person remain closer to one another than observations from different people.",
+        );
+        ui.label(
+            egui::RichText::new(format!(
+                "Column mapping — observation/sample ID: {} | patient/person ID: {} | time/date: {} | QC/review: {} | excluded values: {}",
+                result.config.observation_id_column,
+                result.config.patient_id_column,
+                result.config.time_column.as_deref().unwrap_or("none"),
+                result.config.qc_status_column.as_deref().unwrap_or("none"),
+                if result.config.excluded_qc_values.is_empty() {
+                    "none".to_string()
+                } else {
+                    result.config.excluded_qc_values.iter().cloned().collect::<Vec<_>>().join(", ")
+                }
+            ))
+            .small()
+            .weak(),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Metadata rows: {}", result.metadata_rows));
+            ui.separator();
+            ui.label(format!(
+                "QC-eligible rows: {}",
+                result.eligible_metadata_rows
+            ));
+            ui.separator();
+            ui.label(format!("QC-excluded rows: {}", result.qc_excluded_rows));
+            ui.separator();
+            ui.label(format!(
+                "Missing-ID rows: {}",
+                result.missing_identifier_rows
+            ));
+            ui.separator();
+            ui.label(format!(
+                "Ambiguous mapping keys: {}",
+                result.ambiguous_observation_keys
+            ));
+        });
+        ui.label(
+            egui::RichText::new(
+                "Patient-identity AUC is scale-independent: 0.5 means same-patient and different-patient pairs are not rank-separated; 1.0 means every same-patient pair is closer than every different-patient pair. Nearest-neighbour accuracy asks whether each repeat-eligible sample's closest other sample belongs to the same patient. Raw distance magnitudes should not be compared across modalities because the distance definitions differ.",
+            )
+            .small()
+            .weak(),
+        );
+
+        let mut ranked = result.modalities.iter().collect::<Vec<_>>();
+        ranked.sort_by(
+            |a, b| match (a.identity_auc.is_finite(), b.identity_auc.is_finite()) {
+                (true, true) => b.identity_auc.total_cmp(&a.identity_auc),
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => a.modality.cmp(&b.modality),
+            },
+        );
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Cross-modality patient-identity ranking").strong());
+        fixed_table_viewport(ui, "longitudinal_summary_scroll", 320.0, 1260.0, |ui| {
+            egui::Grid::new("longitudinal_summary_grid")
+                .striped(true)
+                .show(ui, |ui| {
+                    for heading in [
+                        "Modality",
+                        "Samples",
+                        "Patients",
+                        "Longitudinal patients",
+                        "Identity AUC",
+                        "NN accuracy",
+                        "Median within",
+                        "Median between",
+                        "Within/between",
+                    ] {
+                        ui.label(egui::RichText::new(heading).strong());
+                    }
+                    ui.end_row();
+                    for modality in &ranked {
+                        ui.label(&modality.modality);
+                        ui.label(modality.samples.to_string());
+                        ui.label(modality.patients.to_string());
+                        ui.label(modality.longitudinal_patients.to_string());
+                        ui.label(format_float_or_dash(modality.identity_auc));
+                        ui.label(if modality.nearest_neighbor_accuracy.is_finite() {
+                            format!("{:.1}%", modality.nearest_neighbor_accuracy * 100.0)
+                        } else {
+                            "—".to_string()
+                        });
+                        ui.label(format_float_or_dash(
+                            modality.median_within_patient_distance,
+                        ));
+                        ui.label(format_float_or_dash(
+                            modality.median_between_patient_distance,
+                        ));
+                        ui.label(format_float_or_dash(modality.within_between_ratio));
+                        ui.end_row();
+                    }
+                });
+        });
+
+        if let Some(best) = ranked
+            .iter()
+            .copied()
+            .find(|row| row.identity_auc.is_finite())
+        {
+            ui.colored_label(
+                egui::Color32::from_rgb(105, 190, 130),
+                format!(
+                    "Strongest observed patient-identity ranking signal: {} (AUC {:.3}, nearest-neighbour accuracy {}).",
+                    best.modality,
+                    best.identity_auc,
+                    if best.nearest_neighbor_accuracy.is_finite() {
+                        format!("{:.1}%", best.nearest_neighbor_accuracy * 100.0)
+                    } else {
+                        "undefined".to_string()
+                    }
+                ),
+            );
+        }
+
+        if !result.excluded_rows.is_empty() {
+            egui::CollapsingHeader::new(format!(
+                "Metadata rows excluded by longitudinal QC ({})",
+                result.excluded_rows.len()
+            ))
+            .show(ui, |ui| {
+                fixed_table_viewport(ui, "longitudinal_excluded_scroll", 260.0, 800.0, |ui| {
+                    egui::Grid::new("longitudinal_excluded_grid")
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for heading in ["Observation", "Patient", "QC value"] {
+                                ui.label(egui::RichText::new(heading).strong());
+                            }
+                            ui.end_row();
+                            for row in &result.excluded_rows {
+                                ui.monospace(&row.observation_id);
+                                ui.monospace(&row.patient_id);
+                                ui.label(&row.qc_value);
+                                ui.end_row();
+                            }
+                        });
+                });
+            });
+        }
+
+        for (idx, modality) in ranked.iter().enumerate() {
+            ui.separator();
+            egui::CollapsingHeader::new(format!(
+                "{} — AUC {}, NN {}",
+                modality.modality,
+                format_float_or_dash(modality.identity_auc),
+                if modality.nearest_neighbor_accuracy.is_finite() {
+                    format!("{:.1}%", modality.nearest_neighbor_accuracy * 100.0)
+                } else {
+                    "—".to_string()
+                }
+            ))
+            .default_open(idx == 0)
+            .show(ui, |ui| {
+                ui.label(format!(
+                    "{} samples from {} patients; {} patients have >=2 observations ({} longitudinal samples). Same-patient pairs: {}; different-patient pairs: {}.",
+                    modality.samples,
+                    modality.patients,
+                    modality.longitudinal_patients,
+                    modality.longitudinal_samples,
+                    modality.within_patient_pairs,
+                    modality.between_patient_pairs,
+                ));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Distance: {}. Median same-patient distance {}; median different-patient distance {}; ratio {}.",
+                        modality.distance_label,
+                        format_float_or_dash(modality.median_within_patient_distance),
+                        format_float_or_dash(modality.median_between_patient_distance),
+                        format_float_or_dash(modality.within_between_ratio),
+                    ))
+                    .small()
+                    .weak(),
+                );
+                if let Some(tree) = modality.dendrogram.as_ref() {
+                    self.render_longitudinal_dendrogram(
+                        ui,
+                        modality,
+                        tree,
+                        &format!("longitudinal_tree_{idx}"),
+                    );
+                }
+                if !modality.warnings.is_empty() {
+                    egui::CollapsingHeader::new(format!("Warnings ({})", modality.warnings.len()))
+                        .show(ui, |ui| {
+                            for warning in &modality.warnings {
+                                ui.label(format!("• {warning}"));
+                            }
+                        });
+                }
+            });
+        }
+        if !result.modality_errors.is_empty() {
+            ui.separator();
+            egui::CollapsingHeader::new(format!(
+                "Modalities that could not be clustered ({})",
+                result.modality_errors.len()
+            ))
+            .default_open(true)
+            .show(ui, |ui| {
+                for error in &result.modality_errors {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(225, 120, 110),
+                        format!("{}: {}", error.modality, error.error),
+                    );
+                }
+            });
+        }
+        if !result.warnings.is_empty() {
+            ui.separator();
+            for warning in &result.warnings {
+                ui.colored_label(egui::Color32::from_rgb(230, 170, 80), warning);
+            }
+        }
+    }
+
+    fn render_longitudinal_dendrogram(
+        &mut self,
+        ui: &mut egui::Ui,
+        modality: &LongitudinalModalityResult,
+        tree: &DendrogramResult,
+        id: &str,
+    ) {
+        ui.label(egui::RichText::new(&tree.name).strong());
+        ui.label(
+            egui::RichText::new(format!(
+                "Patient-coloured {} using {}. The leaf annotation is the selected collection date/timepoint when available.",
+                tree.linkage, tree.distance_label
+            ))
+            .small()
+            .weak(),
+        );
+        let annotations = modality
+            .annotations
+            .iter()
+            .map(|row| (normalize_sample_id(&row.sample_id), row))
+            .collect::<HashMap<_, _>>();
+        let mut grouped: BTreeMap<String, Vec<[f64; 2]>> = BTreeMap::new();
+        let mut hover_points = Vec::with_capacity(tree.leaves.len());
+        for leaf in &tree.leaves {
+            let patient = leaf.subject.clone();
+            grouped
+                .entry(patient.clone())
+                .or_default()
+                .push([0.0, leaf.position]);
+            let annotation = annotations.get(&normalize_sample_id(&leaf.sample_id));
+            let observation = annotation
+                .map(|row| row.observation_id.as_str())
+                .unwrap_or(leaf.sample_id.as_str());
+            let time = annotation
+                .map(|row| row.time_value.as_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("not provided");
+            hover_points.push((
+                0.0,
+                leaf.position,
+                format!(
+                    "Data sample: {}\nObservation ID: {}\nPatient/person: {}\nTime/date: {}\nCluster order: {}",
+                    leaf.sample_id,
+                    observation,
+                    patient,
+                    time,
+                    leaf.position as usize + 1
+                ),
+            ));
+        }
+        let formatter_points = hover_points.clone();
+        let mut plot = Plot::new(id)
+            .height(560.0)
+            .x_axis_label(&tree.distance_label)
+            .y_axis_label("Cluster leaf order")
+            .label_formatter(move |hover| match hover {
+                HoverPosition::NearDataPoint { position, .. } => {
+                    nearest_hover_label(position.x, position.y, &formatter_points)
+                }
+                _ => None,
+            });
+        if grouped.len() <= 16 {
+            plot = plot.legend(Legend::default());
+        }
+        let accent = ui.visuals().selection.bg_fill;
+        plot.show(ui, |plot_ui| {
+            for (idx, seg) in tree.segments.iter().enumerate() {
+                plot_ui.line(
+                    Line::new(
+                        format!("longitudinal_branch_{idx}"),
+                        vec![[seg.x1, seg.y1], [seg.x2, seg.y2]],
+                    )
+                    .color(egui::Color32::from_gray(120))
+                    .width(1.0)
+                    .allow_hover(false),
+                );
+            }
+            for (idx, (patient, points)) in grouped.into_iter().enumerate() {
+                let color = category_color(&patient, idx, "Subject / patient", accent);
+                plot_ui.points(Points::new(patient, points).color(color).radius(4.0));
+            }
+        });
+        egui::CollapsingHeader::new(format!(
+            "Patient-coloured leaf order ({} samples)",
+            tree.leaves.len()
+        ))
+        .show(ui, |ui| {
+            fixed_table_viewport(ui, &format!("{id}_leaves_scroll"), 360.0, 900.0, |ui| {
+                egui::Grid::new(format!("{id}_leaves"))
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for heading in [
+                            "Order",
+                            "Data sample",
+                            "Observation",
+                            "Patient",
+                            "Time/date",
+                        ] {
+                            ui.label(egui::RichText::new(heading).strong());
+                        }
+                        ui.end_row();
+                        for (i, leaf) in tree.leaves.iter().enumerate() {
+                            let annotation = annotations.get(&normalize_sample_id(&leaf.sample_id));
+                            ui.label((i + 1).to_string());
+                            ui.monospace(&leaf.sample_id);
+                            ui.monospace(
+                                annotation
+                                    .map(|row| row.observation_id.as_str())
+                                    .unwrap_or("—"),
+                            );
+                            ui.monospace(&leaf.subject);
+                            ui.label(
+                                annotation
+                                    .map(|row| row.time_value.as_str())
+                                    .filter(|value| !value.is_empty())
+                                    .unwrap_or("—"),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            });
+        });
+    }
+
     fn render_corrected_dendrogram(
         &mut self,
         ui: &mut egui::Ui,
@@ -7801,6 +8350,63 @@ impl MergeApp {
         }
     }
 
+    fn configure_longitudinal_metadata_defaults_for(&mut self, meta: &MetadataTable) {
+        let columns = &meta.columns;
+        let initialize_optional_defaults = self.longitudinal_observation_column.is_none()
+            && self.longitudinal_patient_column.is_none()
+            && self.longitudinal_time_column.is_none()
+            && self.longitudinal_qc_column.is_none();
+        if self
+            .longitudinal_observation_column
+            .as_ref()
+            .is_none_or(|column| !columns.contains(column))
+        {
+            self.longitudinal_observation_column = suggested_observation_id_column(meta);
+        }
+        let observation = self
+            .longitudinal_observation_column
+            .as_deref()
+            .unwrap_or(meta.id_column.as_str());
+        if self
+            .longitudinal_patient_column
+            .as_ref()
+            .is_none_or(|column| !columns.contains(column) || column == observation)
+        {
+            self.longitudinal_patient_column = suggested_patient_id_column(meta, observation);
+        }
+        if self
+            .longitudinal_time_column
+            .as_ref()
+            .is_some_and(|column| !columns.contains(column))
+        {
+            self.longitudinal_time_column = None;
+        }
+        if initialize_optional_defaults && self.longitudinal_time_column.is_none() {
+            self.longitudinal_time_column = suggested_time_column(meta);
+        }
+        if self
+            .longitudinal_qc_column
+            .as_ref()
+            .is_some_and(|column| !columns.contains(column))
+        {
+            self.longitudinal_qc_column = None;
+            self.longitudinal_excluded_qc_values.clear();
+        }
+        if initialize_optional_defaults && self.longitudinal_qc_column.is_none() {
+            self.longitudinal_qc_column = suggested_qc_status_column(meta);
+        }
+        if initialize_optional_defaults && self.longitudinal_excluded_qc_values.is_empty() {
+            if let Some(column) = self.longitudinal_qc_column.as_deref() {
+                if let Some(value) = distinct_metadata_values(meta, column)
+                    .into_iter()
+                    .find(|value| value.eq_ignore_ascii_case("Failed"))
+                {
+                    self.longitudinal_excluded_qc_values.insert(value);
+                }
+            }
+        }
+    }
+
     fn start_outlier_qc(&mut self) {
         let Some(scan) = self.cohort_scan.clone() else {
             self.cohort_status = "Load a project first.".to_string();
@@ -7982,6 +8588,54 @@ impl MergeApp {
         } else {
             None
         };
+        let longitudinal = if self.unified_run_longitudinal {
+            let Some(observation_id_column) = self
+                .longitudinal_observation_column
+                .clone()
+                .filter(|column| metadata.columns.contains(column))
+            else {
+                self.cohort_status =
+                    "Choose the metadata column that identifies each longitudinal sample/observation."
+                        .to_string();
+                return;
+            };
+            let Some(patient_id_column) = self
+                .longitudinal_patient_column
+                .clone()
+                .filter(|column| metadata.columns.contains(column))
+            else {
+                self.cohort_status =
+                    "Choose the metadata column that identifies the stable patient/person."
+                        .to_string();
+                return;
+            };
+            if observation_id_column == patient_id_column {
+                self.cohort_status =
+                    "Longitudinal sample/observation ID and patient/person ID must be different metadata columns."
+                        .to_string();
+                return;
+            }
+            Some(LongitudinalClusteringConfig {
+                observation_id_column,
+                patient_id_column,
+                time_column: self
+                    .longitudinal_time_column
+                    .clone()
+                    .filter(|column| metadata.columns.contains(column)),
+                qc_status_column: self
+                    .longitudinal_qc_column
+                    .clone()
+                    .filter(|column| metadata.columns.contains(column)),
+                excluded_qc_values: self
+                    .longitudinal_excluded_qc_values
+                    .iter()
+                    .cloned()
+                    .collect(),
+            })
+        } else {
+            None
+        };
+
         let modalities = CohortModalitySelection {
             gene: self.cohort_run_gene,
             transcript: self.cohort_run_transcript,
@@ -8014,6 +8668,7 @@ impl MergeApp {
             exploratory_direction_check: self.focused_run_exploratory_concordance,
             candidate: self.focused_settings.clone(),
             pbmc_diagnostics: diagnostics,
+            longitudinal,
         };
 
         let backend = Arc::clone(&self.analysis_backend);
@@ -8405,6 +9060,9 @@ impl MergeApp {
                 self.focused_outlier_snapshot = None;
                 self.outlier_excluded_ids.clear();
                 self.configure_corrected_metadata_defaults();
+                if let Some(meta) = self.cohort_metadata.clone() {
+                    self.configure_longitudinal_metadata_defaults_for(&meta);
+                }
                 self.rebuild_cohort_mapping();
                 self.cohort_status =
                     format!("Metadata loaded: {rows} rows; matching on '{id_column}'.");

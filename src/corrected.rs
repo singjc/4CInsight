@@ -168,6 +168,14 @@ pub struct DendrogramResult {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct UnsupervisedDistanceMatrix {
+    pub sample_ids: Vec<String>,
+    pub distances: Vec<Vec<f64>>,
+    pub distance_label: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DtuGeneResult {
     pub gene_id: String,
     pub n_transcripts: usize,
@@ -3122,6 +3130,484 @@ where
     })
 }
 
+/// Build the same normalized-expression sample distance used by the corrected
+/// PCA/dendrogram layer, but over an arbitrary QC-eligible sample set rather
+/// than a Case/Control comparison. This powers the dedicated longitudinal
+/// patient-signature analysis without inventing a synthetic phenotype group.
+pub(crate) fn run_unsupervised_expression_distance<F>(
+    merged_tsv: &Path,
+    eligible_ids: &HashSet<String>,
+    source_metric: &str,
+    feature_label: &str,
+    spec: &CorrectedModelSpec,
+    mut progress: F,
+) -> Result<UnsupervisedDistanceMatrix>
+where
+    F: FnMut(usize, usize, &str),
+{
+    let mut header_reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .flexible(true)
+        .from_path(merged_tsv)
+        .with_context(|| format!("Could not open {}", merged_tsv.display()))?;
+    let headers = header_reader.headers()?.clone();
+    let suffix = format!(" {source_metric}");
+    let mut header_cols: BTreeMap<String, (String, usize)> = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for (idx, header) in headers.iter().enumerate().skip(2) {
+        let Some(sample) = header.strip_suffix(&suffix) else {
+            continue;
+        };
+        let key = normalize_sample_id(sample);
+        if !eligible_ids.contains(&key) {
+            continue;
+        }
+        if let Some((first, _)) = header_cols.get(&key) {
+            warnings.push(format!(
+                "Duplicate normalized {feature_label} sample column '{sample}' matches '{first}'; using the first column"
+            ));
+        } else {
+            header_cols.insert(key, (sample.to_string(), idx));
+        }
+    }
+    if header_cols.len() < 2 {
+        bail!(
+            "Merged {feature_label} table has fewer than two QC-eligible '{source_metric}' sample columns"
+        );
+    }
+    let sample_ids = header_cols
+        .values()
+        .map(|(sample, _)| sample.clone())
+        .collect::<Vec<_>>();
+    let columns = header_cols
+        .values()
+        .map(|(_, idx)| *idx)
+        .collect::<Vec<_>>();
+    let file_bytes = fs::metadata(merged_tsv)
+        .with_context(|| format!("Could not stat {}", merged_tsv.display()))?
+        .len()
+        .max(1);
+    let units = usize::try_from(file_bytes).unwrap_or(usize::MAX / 4).max(1);
+    let total_work = units.saturating_mul(2).max(1);
+
+    progress(
+        0,
+        total_work,
+        &format!("{feature_label}: estimating count size factors"),
+    );
+    let mut medians = vec![P2Median::new(); columns.len()];
+    let mut pass1 = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .flexible(true)
+        .from_path(merged_tsv)?;
+    let mut record = csv::StringRecord::new();
+    let mut rows_seen = 0usize;
+    while pass1.read_record(&mut record)? {
+        let counts = values_at_columns_with_zero(&record, &columns);
+        let mut positive_count = 0usize;
+        let mut positive_log_sum = 0.0;
+        for count in &counts {
+            if *count > 0.0 {
+                positive_count += 1;
+                positive_log_sum += count.ln();
+            }
+        }
+        if positive_count >= 2 {
+            let gmean = (positive_log_sum / positive_count as f64).exp();
+            if gmean > 0.0 && gmean.is_finite() {
+                for (j, count) in counts.iter().enumerate() {
+                    if *count > 0.0 {
+                        medians[j].push(*count / gmean);
+                    }
+                }
+            }
+        }
+        rows_seen += 1;
+        if rows_seen % 2000 == 0 {
+            let done = usize::try_from(pass1.position().byte())
+                .unwrap_or(units)
+                .min(units);
+            progress(
+                done,
+                total_work,
+                &format!("{feature_label}: estimating count size factors ({rows_seen} rows)"),
+            );
+        }
+    }
+    let mut size_factors = medians
+        .iter()
+        .map(|median| {
+            median
+                .value()
+                .filter(|value| *value > 0.0 && value.is_finite())
+                .unwrap_or(1.0)
+        })
+        .collect::<Vec<_>>();
+    let sf_gmean = (size_factors.iter().map(|value| value.ln()).sum::<f64>()
+        / size_factors.len() as f64)
+        .exp();
+    if sf_gmean.is_finite() && sf_gmean > 0.0 {
+        for size_factor in &mut size_factors {
+            *size_factor /= sf_gmean;
+        }
+    }
+    progress(
+        units,
+        total_work,
+        &format!("{feature_label}: count size factors complete"),
+    );
+
+    let min_present = ((sample_ids.len() as f64 * spec.min_fraction_samples).ceil() as usize)
+        .max(3)
+        .min(sample_ids.len());
+    let mut top_variable = Vec::<VariableRow>::new();
+    let mut pass2 = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .flexible(true)
+        .from_path(merged_tsv)?;
+    let mut retained_rows = 0usize;
+    let mut filtered_rows = 0usize;
+    let mut record = csv::StringRecord::new();
+    while pass2.read_record(&mut record)? {
+        let counts = values_at_columns_with_zero(&record, &columns);
+        let normalized = counts
+            .iter()
+            .zip(size_factors.iter())
+            .map(|(count, size_factor)| count / size_factor.max(1e-12))
+            .collect::<Vec<_>>();
+        if normalized
+            .iter()
+            .filter(|value| **value >= spec.min_count)
+            .count()
+            < min_present
+        {
+            filtered_rows += 1;
+            continue;
+        }
+        let values = normalized
+            .iter()
+            .map(|value| (value + 0.5).log2())
+            .collect::<Vec<_>>();
+        let variance = sample_variance(&values);
+        if variance.is_finite() {
+            top_variable.push(VariableRow { variance, values });
+            retained_rows += 1;
+            if top_variable.len() > 700 {
+                trim_variable_rows(&mut top_variable, 350);
+            }
+        }
+        if (retained_rows + filtered_rows) % 2000 == 0 {
+            let done = usize::try_from(pass2.position().byte())
+                .unwrap_or(units)
+                .min(units);
+            progress(
+                units.saturating_add(done),
+                total_work,
+                &format!("{feature_label}: selecting top variable normalized features"),
+            );
+        }
+    }
+    top_variable.sort_by(|a, b| b.variance.total_cmp(&a.variance));
+    top_variable.truncate(300);
+    if top_variable.is_empty() {
+        bail!("No {feature_label} features passed the clustering support filter");
+    }
+    if top_variable.len() < 50 {
+        warnings.push(format!(
+            "Only {} {feature_label} features passed the clustering support filter",
+            top_variable.len()
+        ));
+    }
+    let rows = top_variable
+        .into_iter()
+        .map(|row| row.values)
+        .collect::<Vec<_>>();
+    let distances = euclidean_distance_from_rows(&rows);
+    progress(
+        total_work,
+        total_work,
+        &format!(
+            "{feature_label}: longitudinal clustering distance complete ({} samples; {} top variable features)",
+            sample_ids.len(),
+            rows.len()
+        ),
+    );
+    Ok(UnsupervisedDistanceMatrix {
+        sample_ids,
+        distances,
+        distance_label: "Euclidean distance on top variable normalized log2 counts".to_string(),
+        warnings,
+    })
+}
+
+/// Build abundance-weighted repertoire distances for all QC-eligible samples.
+/// Parsing, exact clonotype identity assignment, and Morisita-Horn semantics are
+/// identical to the corrected repertoire engine; only phenotype modeling and
+/// rarefaction summaries are skipped.
+pub(crate) fn run_unsupervised_repertoire_distance<F>(
+    files: &[DetectedCohortFile],
+    eligible_ids: &HashSet<String>,
+    modality: CohortModality,
+    policy: AmbiguousCallPolicy,
+    mut progress: F,
+) -> Result<UnsupervisedDistanceMatrix>
+where
+    F: FnMut(usize, usize, &str),
+{
+    let label = match modality {
+        CohortModality::Bcr => "BCR",
+        CohortModality::TcrAlpha => "TCR alpha",
+        CohortModality::TcrBeta => "TCR beta",
+        _ => bail!("Longitudinal repertoire clustering supports BCR/TCR only"),
+    };
+    let mut chosen: BTreeMap<String, &DetectedCohortFile> = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for file in files.iter().filter(|file| file.modality == modality) {
+        let key = normalize_sample_id(&file.sample_id);
+        if !eligible_ids.contains(&key) {
+            continue;
+        }
+        if let Some(first) = chosen.get(&key) {
+            warnings.push(format!(
+                "Duplicate {label} file for '{}': using {} and ignoring {}",
+                file.sample_id,
+                first.path.display(),
+                file.path.display()
+            ));
+        } else {
+            chosen.insert(key, file);
+        }
+    }
+    if chosen.len() < 2 {
+        bail!("Fewer than two QC-eligible {label} files were detected");
+    }
+    let total = chosen.len();
+    let mut parsed = Vec::with_capacity(total);
+    let mut scratch = ParsedClonotypeScratch::default();
+    for (i, file) in chosen.values().enumerate() {
+        progress(
+            i,
+            total.saturating_add(2),
+            &format!(
+                "{label}: longitudinal parsing {} ({}/{total})",
+                file.sample_id,
+                i + 1
+            ),
+        );
+        match parse_repertoire_file_with_audit(
+            &file.path,
+            &file.sample_id,
+            "Eligible",
+            modality,
+            policy,
+            &mut scratch,
+            |_| {},
+        ) {
+            Ok(sample) => parsed.push(sample),
+            Err(error) => warnings.push(format!("{}: {error:#}", file.path.display())),
+        }
+    }
+    drop(scratch);
+    if parsed.len() < 2 {
+        bail!("Fewer than two usable QC-eligible {label} repertoires remained after parsing");
+    }
+    progress(
+        total,
+        total.saturating_add(2),
+        &format!("{label}: assigning exact clonotype identities"),
+    );
+    let exact_clonotypes = assign_exact_clonotype_ids(&mut parsed)?;
+    progress(
+        total.saturating_add(1),
+        total.saturating_add(2),
+        &format!("{label}: building Morisita-Horn distances"),
+    );
+    let (distances, _) = repertoire_distance_matrices(&parsed, exact_clonotypes);
+    let sample_ids = parsed
+        .iter()
+        .map(|sample| sample.sample_id.clone())
+        .collect::<Vec<_>>();
+    release_repertoire_working_set(parsed);
+    progress(
+        total.saturating_add(2),
+        total.saturating_add(2),
+        &format!("{label}: longitudinal Morisita-Horn distance complete"),
+    );
+    Ok(UnsupervisedDistanceMatrix {
+        sample_ids,
+        distances,
+        distance_label: "1 - Morisita-Horn similarity".to_string(),
+        warnings,
+    })
+}
+
+pub(crate) fn run_unsupervised_isotype_distance<F>(
+    files: &[DetectedCohortFile],
+    eligible_ids: &HashSet<String>,
+    spec: &CorrectedModelSpec,
+    mut progress: F,
+) -> Result<UnsupervisedDistanceMatrix>
+where
+    F: FnMut(usize, usize, &str),
+{
+    let mut chosen: BTreeMap<String, &DetectedCohortFile> = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for file in files
+        .iter()
+        .filter(|file| file.modality == CohortModality::BcrIsotype)
+    {
+        let key = normalize_sample_id(&file.sample_id);
+        if !eligible_ids.contains(&key) {
+            continue;
+        }
+        if let Some(first) = chosen.get(&key) {
+            warnings.push(format!(
+                "Duplicate BCR-isotype file for '{}': using {} and ignoring {}",
+                file.sample_id,
+                first.path.display(),
+                file.path.display()
+            ));
+        } else {
+            chosen.insert(key, file);
+        }
+    }
+    let total = chosen.len();
+    let mut maps = Vec::new();
+    for (i, file) in chosen.values().enumerate() {
+        progress(
+            i + 1,
+            total.max(1),
+            &format!("BCR isotype: {}", file.sample_id),
+        );
+        match parse_isotype_file(&file.path, spec.exclude_undetermined_isotype) {
+            Ok(map) => maps.push((file.sample_id.clone(), map)),
+            Err(error) => warnings.push(format!("{}: {error:#}", file.path.display())),
+        }
+    }
+    if maps.len() < 2 {
+        bail!("Fewer than two usable QC-eligible BCR-isotype samples were detected");
+    }
+    let all_features = maps
+        .iter()
+        .flat_map(|(_, map)| map.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut retained = Vec::new();
+    for feature in all_features {
+        let values = maps
+            .iter()
+            .map(|(_, map)| map.get(&feature).copied().unwrap_or(0.0))
+            .collect::<Vec<_>>();
+        let avg = mean(&values);
+        let prevalence =
+            values.iter().filter(|value| **value > 0.0).count() as f64 / values.len().max(1) as f64;
+        if avg >= spec.composition_min_mean && prevalence >= spec.composition_min_prevalence {
+            retained.push(feature);
+        }
+    }
+    if retained.len() < 2 {
+        bail!("Fewer than two BCR-isotype features passed the composition filter");
+    }
+    let pseudo = spec.clr_pseudocount.max(1e-12);
+    let mut clr_by_sample = Vec::with_capacity(maps.len());
+    for (_, map) in &maps {
+        let logs = retained
+            .iter()
+            .map(|feature| (map.get(feature).copied().unwrap_or(0.0) + pseudo).ln())
+            .collect::<Vec<_>>();
+        let center = mean(&logs);
+        clr_by_sample.push(logs.into_iter().map(|value| value - center).collect());
+    }
+    Ok(UnsupervisedDistanceMatrix {
+        sample_ids: maps.into_iter().map(|(sample, _)| sample).collect(),
+        distances: euclidean_distance_from_sample_rows(&clr_by_sample),
+        distance_label: "Aitchison distance".to_string(),
+        warnings,
+    })
+}
+
+pub(crate) fn run_unsupervised_immune_distance<F>(
+    files: &[DetectedCohortFile],
+    eligible_ids: &HashSet<String>,
+    mut progress: F,
+) -> Result<UnsupervisedDistanceMatrix>
+where
+    F: FnMut(usize, usize, &str),
+{
+    let mut chosen: BTreeMap<String, &DetectedCohortFile> = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for file in files
+        .iter()
+        .filter(|file| file.modality == CohortModality::ImmuneInfiltrate)
+    {
+        let key = normalize_sample_id(&file.sample_id);
+        if !eligible_ids.contains(&key) {
+            continue;
+        }
+        if let Some(first) = chosen.get(&key) {
+            warnings.push(format!(
+                "Duplicate immune file for '{}': using {} and ignoring {}",
+                file.sample_id,
+                first.path.display(),
+                file.path.display()
+            ));
+        } else {
+            chosen.insert(key, file);
+        }
+    }
+    let total = chosen.len();
+    let mut maps = Vec::new();
+    for (i, file) in chosen.values().enumerate() {
+        progress(
+            i + 1,
+            total.max(1),
+            &format!("Immune infiltrate: {}", file.sample_id),
+        );
+        match parse_immune_file(&file.path) {
+            Ok(map) => maps.push((file.sample_id.clone(), map)),
+            Err(error) => warnings.push(format!("{}: {error:#}", file.path.display())),
+        }
+    }
+    if maps.len() < 2 {
+        bail!("Fewer than two usable QC-eligible immune-infiltrate samples were detected");
+    }
+    let features = maps
+        .iter()
+        .flat_map(|(_, map)| map.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut rows = Vec::new();
+    for feature in features {
+        let values = maps
+            .iter()
+            .map(|(_, map)| map.get(&feature).copied().unwrap_or(f64::NAN))
+            .collect::<Vec<_>>();
+        let center = mean_finite(&values);
+        let sd = sd_finite(&values, center);
+        if sd > 0.0 {
+            rows.push(
+                values
+                    .iter()
+                    .map(|value| {
+                        if value.is_finite() {
+                            (value - center) / sd
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    if rows.is_empty() {
+        bail!("No variable immune-infiltrate signatures were available for clustering");
+    }
+    Ok(UnsupervisedDistanceMatrix {
+        sample_ids: maps.into_iter().map(|(sample, _)| sample).collect(),
+        distances: euclidean_distance_from_rows(&rows),
+        distance_label: "Euclidean distance on standardized immune-signature scores".to_string(),
+        warnings,
+    })
+}
+
 fn composition_analysis(
     family: &str,
     samples: &[ParsedRepertoire],
@@ -4305,8 +4791,42 @@ fn average_linkage_dendrogram(
     title: &str,
     distance_label: &str,
 ) -> Option<DendrogramResult> {
+    let groups = design
+        .group_case
+        .iter()
+        .map(|is_case| if *is_case { "Case" } else { "Control" }.to_string())
+        .collect::<Vec<_>>();
+    average_linkage_dendrogram_for_samples(
+        dist,
+        &design.sample_ids,
+        &groups,
+        &design.subjects,
+        title,
+        distance_label,
+    )
+}
+
+/// Average-linkage clustering over an already-computed sample distance matrix.
+///
+/// This shared entry point is also used by the longitudinal patient-signature
+/// analysis, where `groups` carries a descriptive collection/time label and
+/// `subjects` carries the configured patient/person identifier.  The clustering
+/// itself never uses either annotation.
+pub(crate) fn average_linkage_dendrogram_for_samples(
+    dist: &[Vec<f64>],
+    sample_ids: &[String],
+    groups: &[String],
+    subjects: &[String],
+    title: &str,
+    distance_label: &str,
+) -> Option<DendrogramResult> {
     let n = dist.len();
-    if n < 2 || design.sample_ids.len() != n || dist.iter().any(|row| row.len() != n) {
+    if n < 2
+        || sample_ids.len() != n
+        || groups.len() != n
+        || subjects.len() != n
+        || dist.iter().any(|row| row.len() != n)
+    {
         return None;
     }
     let max_nodes = n * 2 - 1;
@@ -4443,14 +4963,9 @@ fn average_linkage_dendrogram(
         .into_iter()
         .enumerate()
         .map(|(pos, i)| DendrogramLeaf {
-            sample_id: design.sample_ids[i].clone(),
-            group: if design.group_case[i] {
-                "Case"
-            } else {
-                "Control"
-            }
-            .to_string(),
-            subject: design.subjects[i].clone(),
+            sample_id: sample_ids[i].clone(),
+            group: groups[i].clone(),
+            subject: subjects[i].clone(),
             position: pos as f64,
         })
         .collect::<Vec<_>>();

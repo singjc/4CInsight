@@ -14,6 +14,7 @@ use crate::corrected::{
 };
 use crate::diagnostics::{PbmcDiagnosticsConfig, PbmcDiagnosticsResult};
 use crate::focused::{FocusedCandidateSettings, FocusedCandidateSummary};
+use crate::longitudinal::{LongitudinalAnalysisResult, LongitudinalClusteringConfig};
 use crate::outliers::OutlierFilterSnapshot;
 use std::path::PathBuf;
 
@@ -63,6 +64,9 @@ pub struct CohortAnalysisSettingsSnapshot {
     pub exploratory_direction_check: bool,
     pub candidate: FocusedCandidateSettings,
     pub pbmc_diagnostics: Option<PbmcDiagnosticsConfig>,
+    /// Optional unsupervised all-eligible-sample analysis of longitudinal
+    /// patient/person identity, independent of the Case/Control comparison.
+    pub longitudinal: Option<LongitudinalClusteringConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +154,8 @@ pub struct UnifiedCohortAnalysisRun {
     pub exploratory_support: ExploratorySupportBundle,
     pub diagnostics: Option<PbmcDiagnosticsResult>,
     pub diagnostics_error: Option<String>,
+    pub longitudinal: Option<LongitudinalAnalysisResult>,
+    pub longitudinal_error: Option<String>,
     pub candidates: FocusedCandidateSummary,
     pub warnings: Vec<String>,
 }
@@ -193,6 +199,7 @@ use crate::corrected::{
 };
 use crate::diagnostics::run_pbmc_diagnostics_with_baseline;
 use crate::focused::{annotate_focused_candidate_robustness, build_focused_candidate_summary};
+use crate::longitudinal::{run_longitudinal_analysis, write_longitudinal_analysis_tables};
 use anyhow::Result;
 
 /// Execute one complete cohort analysis using the existing statistical engines.
@@ -222,8 +229,9 @@ where
 }
 
 /// Execute the same unified native analysis while publishing a borrowed
-/// checkpoint after all primary corrected modalities/supporting direction
-/// checks are final but before optional PBMC/confounding sensitivity refits.
+/// checkpoint as soon as the primary corrected modalities/pathway result is
+/// final, before optional exploratory TPM direction checks and PBMC/confounding
+/// sensitivity refits.
 /// The ordinary native/desktop entry point above remains behaviorally
 /// identical and simply ignores this checkpoint.
 pub fn run_unified_cohort_analysis_with_primary_checkpoint<F, G>(
@@ -243,6 +251,7 @@ where
     let comparison = cohort.comparison.clone();
     let spec = settings.corrected.clone();
     let diagnostics_requested = settings.pbmc_diagnostics.is_some();
+    let longitudinal_requested = settings.longitudinal.is_some();
     let stage_total = [
         selection.gene || selection.pathway,
         selection.transcript,
@@ -254,6 +263,7 @@ where
         selection.pathway,
         settings.exploratory_direction_check && (selection.gene || selection.pathway),
         settings.exploratory_direction_check && selection.transcript,
+        longitudinal_requested,
         diagnostics_requested,
     ]
     .into_iter()
@@ -463,42 +473,11 @@ where
         stage += 1;
     }
 
+    // Publish the primary corrected result before optional supporting TPM
+    // direction checks. These exploratory checks are explicitly non-primary
+    // evidence and can require another full scan of very large merged matrices;
+    // they must not hold the main corrected result hostage.
     let mut exploratory_support = ExploratorySupportBundle::default();
-    if settings.exploratory_direction_check && (selection.gene || selection.pathway) {
-        progress(
-            stage * 1000,
-            stage_total * 1000,
-            "Gene TPM direction-concordance check",
-        );
-        if let Some(path) = scan.merged_gene_tsv.as_deref() {
-            match run_gene_comparison(path, &comparison, "TPM", |_, _, _| {}) {
-                Ok(result) => exploratory_support.gene = Some(result),
-                Err(error) => exploratory_support.gene_error = Some(format!("{error:#}")),
-            }
-        } else {
-            exploratory_support.gene_error =
-                Some("No merged gene-expression TSV detected.".to_string());
-        }
-        stage += 1;
-    }
-    if settings.exploratory_direction_check && selection.transcript {
-        progress(
-            stage * 1000,
-            stage_total * 1000,
-            "Transcript TPM direction-concordance check",
-        );
-        if let Some(path) = scan.merged_transcript_tsv.as_deref() {
-            match run_transcript_comparison(path, &comparison, "TPM", |_, _, _| {}) {
-                Ok(result) => exploratory_support.transcript = Some(result),
-                Err(error) => exploratory_support.transcript_error = Some(format!("{error:#}")),
-            }
-        } else {
-            exploratory_support.transcript_error =
-                Some("No merged transcript-expression TSV detected.".to_string());
-        }
-        stage += 1;
-    }
-
     let mut candidates = build_focused_candidate_summary(
         &cohort.metadata_path,
         &comparison.case_label,
@@ -507,9 +486,9 @@ where
         comparison.control_ids.len(),
         settings.candidate.clone(),
         primary.gene.as_ref(),
-        exploratory_support.gene.as_ref(),
+        None,
         primary.transcript.as_ref(),
-        exploratory_support.transcript.as_ref(),
+        None,
         primary.bcr.as_ref(),
         primary.bcr_isotype.as_ref(),
         primary.tcr_alpha.as_ref(),
@@ -519,12 +498,6 @@ where
     );
 
     let mut checkpoint_warnings = primary.warnings();
-    if let Some(error) = exploratory_support.gene_error.as_ref() {
-        checkpoint_warnings.push(format!("Exploratory gene support: {error}"));
-    }
-    if let Some(error) = exploratory_support.transcript_error.as_ref() {
-        checkpoint_warnings.push(format!("Exploratory transcript support: {error}"));
-    }
     if let Some(qc) = qc_snapshot.as_ref() {
         checkpoint_warnings.extend(
             qc.audit
@@ -542,12 +515,11 @@ where
         }
     }
 
-    // All primary corrected modalities, pathway/supporting checks and the
-    // initial candidate ranking are final here. PBMC/confounding diagnostics
-    // are an optional robustness layer and can be substantially more expensive
-    // because they refit the gene model with extra covariates. Publish this
-    // borrowed checkpoint so clients can inspect the primary scientific result
-    // without cloning the large native result or waiting for sensitivity refits.
+    // Primary corrected modalities and pathway analysis are final here.
+    // Exploratory TPM direction-concordance and PBMC/confounding sensitivity
+    // are supporting/robustness enrichment layers, so publish the borrowed
+    // checkpoint now. The later final result rebuilds the candidate summary
+    // after those optional enrichments complete.
     primary_ready(UnifiedPrimaryCheckpoint {
         cohort: &cohort,
         settings: &settings,
@@ -557,6 +529,117 @@ where
         candidates: &candidates,
         warnings: &checkpoint_warnings,
     });
+
+    // Longitudinal patient-signature clustering is intentionally independent
+    // of the Case/Control definition and uses all metadata rows that remain
+    // eligible under its own configured QC-status filter. Run it after the
+    // primary checkpoint so expensive all-cohort repertoire parsing cannot
+    // delay access to already-final corrected results.
+    let (mut longitudinal, mut longitudinal_error) = (None, None);
+    if let Some(config) = settings.longitudinal.as_ref() {
+        let base = stage;
+        match run_longitudinal_analysis(
+            scan,
+            metadata,
+            &selection,
+            &spec,
+            config.clone(),
+            |done, total, message| {
+                let denom = total.max(1);
+                let overall = base * 1000 + done.min(denom) * 1000 / denom;
+                progress(
+                    overall,
+                    stage_total * 1000,
+                    &format!("Longitudinal patient signature — {message}"),
+                );
+            },
+        ) {
+            Ok(result) => longitudinal = Some(result),
+            Err(error) => longitudinal_error = Some(format!("{error:#}")),
+        }
+        stage += 1;
+    }
+
+    if settings.exploratory_direction_check && (selection.gene || selection.pathway) {
+        progress(
+            stage * 1000,
+            stage_total * 1000,
+            "Gene TPM direction-concordance check",
+        );
+        if let Some(path) = scan.merged_gene_tsv.as_deref() {
+            let base = stage;
+            match run_gene_comparison(path, &comparison, "TPM", |done, total, msg| {
+                let denom = total.max(1);
+                let overall = base * 1000 + (done * 1000 / denom);
+                progress(
+                    overall,
+                    stage_total * 1000,
+                    &format!("Gene TPM direction-concordance check — {msg}"),
+                );
+            }) {
+                Ok(result) => exploratory_support.gene = Some(result),
+                Err(error) => exploratory_support.gene_error = Some(format!("{error:#}")),
+            }
+        } else {
+            exploratory_support.gene_error =
+                Some("No merged gene-expression TSV detected.".to_string());
+        }
+        stage += 1;
+    }
+    if settings.exploratory_direction_check && selection.transcript {
+        progress(
+            stage * 1000,
+            stage_total * 1000,
+            "Transcript TPM direction-concordance check",
+        );
+        if let Some(path) = scan.merged_transcript_tsv.as_deref() {
+            let base = stage;
+            match run_transcript_comparison(path, &comparison, "TPM", |done, total, msg| {
+                let denom = total.max(1);
+                let overall = base * 1000 + (done * 1000 / denom);
+                progress(
+                    overall,
+                    stage_total * 1000,
+                    &format!("Transcript TPM direction-concordance check — {msg}"),
+                );
+            }) {
+                Ok(result) => exploratory_support.transcript = Some(result),
+                Err(error) => exploratory_support.transcript_error = Some(format!("{error:#}")),
+            }
+        } else {
+            exploratory_support.transcript_error =
+                Some("No merged transcript-expression TSV detected.".to_string());
+        }
+        stage += 1;
+    }
+
+    // Enrich the same candidate ranking with exploratory direction support
+    // after the optional TPM checks finish. Corrected statistics remain the
+    // primary evidence and their ranks/effects are unchanged.
+    candidates = build_focused_candidate_summary(
+        &cohort.metadata_path,
+        &comparison.case_label,
+        &comparison.control_label,
+        comparison.case_ids.len(),
+        comparison.control_ids.len(),
+        settings.candidate.clone(),
+        primary.gene.as_ref(),
+        exploratory_support.gene.as_ref(),
+        primary.transcript.as_ref(),
+        exploratory_support.transcript.as_ref(),
+        primary.bcr.as_ref(),
+        primary.bcr_isotype.as_ref(),
+        primary.tcr_alpha.as_ref(),
+        primary.tcr_beta.as_ref(),
+        primary.immune.as_ref(),
+        primary.pathway.as_ref(),
+    );
+    if let Some(error) = exploratory_support.gene_error.as_ref() {
+        checkpoint_warnings.push(format!("Exploratory gene support: {error}"));
+    }
+    if let Some(error) = exploratory_support.transcript_error.as_ref() {
+        checkpoint_warnings.push(format!("Exploratory transcript support: {error}"));
+    }
 
     let (mut diagnostics, mut diagnostics_error) = (None, None);
     if let Some(config) = settings.pbmc_diagnostics.as_ref() {
@@ -606,6 +689,23 @@ where
                 .map(|warning| format!("PBMC/confounding diagnostics: {warning}")),
         );
     }
+    if let Some(error) = longitudinal_error.as_ref() {
+        warnings.push(format!("Longitudinal patient signature: {error}"));
+    }
+    if let Some(result) = longitudinal.as_ref() {
+        warnings.extend(
+            result
+                .warnings
+                .iter()
+                .map(|warning| format!("Longitudinal patient signature: {warning}")),
+        );
+        warnings.extend(result.modality_errors.iter().map(|error| {
+            format!(
+                "Longitudinal patient signature / {}: {}",
+                error.modality, error.error
+            )
+        }));
+    }
 
     progress(stage_total * 1000, stage_total * 1000, "Analysis complete");
     Ok(UnifiedCohortAnalysisRun {
@@ -616,6 +716,8 @@ where
         exploratory_support,
         diagnostics,
         diagnostics_error,
+        longitudinal,
+        longitudinal_error,
         candidates,
         warnings,
     })
@@ -1134,6 +1236,19 @@ where
     progress(10, STAGES, "Technical tables: QC provenance complete");
     hash_pool.discover()?;
 
+    if let Some(longitudinal) = run.longitudinal.as_ref() {
+        progress(
+            10,
+            STAGES,
+            "Technical tables: writing longitudinal patient-signature clustering",
+        );
+        write_longitudinal_analysis_tables(
+            &outdir.join("longitudinal_patient_signature"),
+            longitudinal,
+        )?;
+        hash_pool.discover()?;
+    }
+
     let candidate_dir = outdir.join("key_findings");
     write_key_findings_tables(&candidate_dir, &run.candidates)?;
     progress(11, STAGES, "Technical tables: candidate prioritization");
@@ -1208,6 +1323,33 @@ where
         ));
     } else {
         summary.push_str("QC exclusions applied: 0\n");
+    }
+    if let Some(longitudinal) = run.longitudinal.as_ref() {
+        summary.push_str(&format!(
+            "Longitudinal clustering: enabled\nLongitudinal observation/sample column: {}\nLongitudinal patient/person column: {}\nLongitudinal time/date column: {}\nLongitudinal QC/review column: {}\nLongitudinal QC values excluded: {}\nLongitudinal modalities completed: {}\n",
+            longitudinal.config.observation_id_column,
+            longitudinal.config.patient_id_column,
+            longitudinal.config.time_column.as_deref().unwrap_or("none"),
+            longitudinal.config.qc_status_column.as_deref().unwrap_or("none"),
+            if longitudinal.config.excluded_qc_values.is_empty() {
+                "none".to_string()
+            } else {
+                longitudinal
+                    .config
+                    .excluded_qc_values
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+            longitudinal.modalities.len(),
+        ));
+    } else if let Some(error) = run.longitudinal_error.as_deref() {
+        summary.push_str(&format!(
+            "Longitudinal clustering: failed\nLongitudinal error: {error}\n"
+        ));
+    } else {
+        summary.push_str("Longitudinal clustering: disabled\n");
     }
     if !run.warnings.is_empty() {
         summary.push_str("\nWarnings:\n");
