@@ -395,6 +395,53 @@ Average-linkage hierarchical clustering is then rendered as a **patient-coloured
 
 The **simplified report** contains the cross-modality patient-identity ranking and the strongest patient-coloured dendrogram. The **full report** contains the ranking plus every successfully generated modality dendrogram. The technical-table export additionally contains the sample annotations, all pairwise distances, QC-excluded metadata rows, modality warnings/errors, and dendrogram leaf orders under `longitudinal_patient_signature/`.
 
+## Post-selection significant-hit structure
+
+The unified analysis can optionally generate a dedicated **significant-hit PCA and hierarchical clustering** section. This answers a different question from the ordinary all-feature PCA/dendrograms.
+
+- The ordinary/global plots ask: **what is the dominant sample structure without selecting features by phenotype?**
+- The post-selection plots ask: **after restricting the data to features that are already significant in the corrected Case/Control comparison, do those hits form a coherent multivariate pattern across samples?**
+
+This distinction is essential. The same Case/Control labels are used first to select significant features and are then shown again on the PCA/dendrogram. Therefore, visible separation is **not independent validation**, classifier performance, or evidence that the signature will generalize to a new cohort. It is a descriptive way to assess the internal coherence of the discovered signal and to identify samples that do not follow the dominant hit pattern.
+
+The feature-selection rule is configurable in the Analysis settings:
+
+- **BH q threshold** — default `q <= 0.05`;
+- **minimum absolute adjusted effect** — optional additional effect-size filter;
+- **maximum analysis features** — safety cap for PCA/clustering when a very large number of features pass the threshold. Hits are ordered by q value and then absolute adjusted effect before this cap is applied.
+
+Modality-specific values are preserved rather than forcing all data types onto one inappropriate scale:
+
+- **gene expression** — selected significant genes are represented by the same median-ratio-normalized `log2(count + 0.5)` values used by the corrected expression support layer;
+- **transcript / isoform expression** — selected significant transcript-abundance hits use the equivalent normalized log2 transcript counts;
+- **BCR / TCR repertoire metrics** — significant diversity/clonality/sharing/convergence summaries are standardized feature-wise before PCA/clustering because they have different physical scales;
+- **BCR / TCR composition families** — significant V/D/J/V-J/isotype features retain CLR coordinates and are analyzed as selected compositional coordinates;
+- **BCR isotype** — significant isotype features retain CLR coordinates;
+- **immune infiltration** — significant ssGSEA signatures are standardized feature-wise.
+
+For every feature set with at least two selected hits, the app reports:
+
+- **significant-hit PCA**;
+- **average-linkage hierarchical dendrogram**;
+- **PERMANOVA** on the selected-hit distance matrix, with subject-blocked permutations when a repeated-measure subject column is configured;
+- **Case/Control silhouette score**, where positive values indicate that samples tend to be closer to their own analysis group than the other group;
+- **nearest-neighbour group accuracy**, the fraction of samples whose closest other sample has the same Case/Control label.
+
+Silhouette and nearest-neighbour accuracy are also **post-selection descriptive statistics**. They must not be described as cross-validated classification accuracy. A stronger generalization claim would require patient-grouped cross-validation in which feature selection is repeated inside each training fold and held-out patients are never used to choose the hits.
+
+If only one feature passes the configured threshold, the app keeps the feature in the selected-hit export but deliberately omits PCA/dendrograms because a multivariate visualization would be misleading.
+
+The GUI has a separate **Significant-hit structure** result tab with PCA, dendrogram, and a clustered selected-hit heatmap preview for each successful panel. The **full report** contains the complete cross-panel summary, selected-feature tables, PCA plots, dendrograms, and clustered heatmaps for every successful panel. The **simplified report** contains the cross-panel summary plus a representative panel with the strongest observed silhouette, including its PCA, dendrogram, and heatmap, while retaining the post-selection warning. Technical exports are written under `significant_hit_structure/` and include:
+
+- `summary.tsv`;
+- exact selected-feature tables;
+- PCA coordinates;
+- dendrogram leaf orders;
+- feature-by-sample **z-scored heatmap matrices** for convenient external plotting;
+- panel error tables when a modality cannot be reconstructed.
+
+The heatmap z scores are for visualization only. PCA and dendrogram calculations use the modality-specific values described above. The interactive/report heatmap may cap the number of displayed rows or columns for responsiveness/readability; the technical TSV retains the complete configured heatmap matrix and exact hierarchical sample order.
+
 ## How to read the main plots
 
 ### Volcano or effect-significance scatter

@@ -42,6 +42,10 @@ use cfs_expression_merger::gmt_catalog::{
     GMT_CATALOG, MSIGDB_LICENSE_URL, MSIGDB_RELEASE_URL, MSIGDB_VERSION,
     cache_path as gmt_cache_path, download_public_gmt,
 };
+use cfs_expression_merger::hit_structure::{
+    SignificantHitPanel, SignificantHitStructureConfig, SignificantHitStructureResult,
+    clustered_sample_order,
+};
 use cfs_expression_merger::longitudinal::{
     LongitudinalAnalysisResult, LongitudinalClusteringConfig, LongitudinalModalityResult,
     distinct_metadata_values, suggested_observation_id_column, suggested_patient_id_column,
@@ -183,6 +187,7 @@ enum UnifiedResultView {
     Immune,
     Pathway,
     Longitudinal,
+    SignificantHits,
     QcRobustness,
 }
 
@@ -392,6 +397,10 @@ struct MergeApp {
     cohort_use_filtered_metadata: bool,
     unified_run_diagnostics: bool,
     unified_run_longitudinal: bool,
+    unified_run_significant_hit_structure: bool,
+    significant_hit_q_threshold: f64,
+    significant_hit_min_abs_effect: f64,
+    significant_hit_max_features: usize,
     longitudinal_observation_column: Option<String>,
     longitudinal_patient_column: Option<String>,
     longitudinal_time_column: Option<String>,
@@ -626,6 +635,21 @@ fn bounded_plot_indices(n: usize, max_total: usize, keep_head: usize) -> Vec<usi
     out
 }
 
+fn significant_hit_heatmap_color(value: f64) -> egui::Color32 {
+    if !value.is_finite() {
+        return egui::Color32::from_gray(150);
+    }
+    let scaled = (value.clamp(-3.0, 3.0) / 3.0).abs();
+    let (target_r, target_g, target_b) = if value >= 0.0 {
+        (200.0, 70.0, 75.0)
+    } else {
+        (70.0, 125.0, 205.0)
+    };
+    let base = 225.0;
+    let mix = |target: f64| (base + (target - base) * scaled).round() as u8;
+    egui::Color32::from_rgb(mix(target_r), mix(target_g), mix(target_b))
+}
+
 fn category_color(
     category: &str,
     index: usize,
@@ -738,6 +762,10 @@ impl MergeApp {
             cohort_use_filtered_metadata: false,
             unified_run_diagnostics: true,
             unified_run_longitudinal: false,
+            unified_run_significant_hit_structure: false,
+            significant_hit_q_threshold: 0.05,
+            significant_hit_min_abs_effect: 0.0,
+            significant_hit_max_features: 500,
             longitudinal_observation_column: None,
             longitudinal_patient_column: None,
             longitudinal_time_column: None,
@@ -3760,6 +3788,43 @@ impl MergeApp {
                 }
             }
 
+            ui.separator();
+            ui.label(egui::RichText::new("Post-selection significant-hit structure").strong());
+            ui.checkbox(
+                &mut this.unified_run_significant_hit_structure,
+                "Run PCA + hierarchical clustering on significant hits",
+            )
+            .on_hover_text("Uses features declared significant by the corrected Case/Control analysis, then asks whether those hits form a coherent multivariate pattern across samples. This is descriptive post-selection visualization, not independent validation.");
+            if this.unified_run_significant_hit_structure {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("BH q ≤");
+                    ui.add(
+                        egui::DragValue::new(&mut this.significant_hit_q_threshold)
+                            .range(0.001..=0.25)
+                            .speed(0.005),
+                    );
+                    ui.label("minimum |adjusted effect| ≥");
+                    ui.add(
+                        egui::DragValue::new(&mut this.significant_hit_min_abs_effect)
+                            .range(0.0..=10.0)
+                            .speed(0.05),
+                    );
+                    ui.label("max features for PCA/clustering");
+                    ui.add(
+                        egui::DragValue::new(&mut this.significant_hit_max_features)
+                            .range(2..=5000)
+                            .speed(10.0),
+                    );
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Gene and transcript/isoform panels use normalized log2 counts; immune hits use standardized ssGSEA scores; repertoire metrics are standardized; BCR/TCR/isotype composition hits retain CLR coordinates. The full and simplified reports label these as post-selection plots because the same phenotype labels were used to choose the features.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
+
             egui::CollapsingHeader::new("Repertoire / model details")
                 .default_open(false)
                 .show(ui, |ui| {
@@ -4134,6 +4199,15 @@ impl MergeApp {
                         "Longitudinal",
                     );
                 }
+                if run.significant_hit_structure.is_some()
+                    || run.significant_hit_structure_error.is_some()
+                {
+                    ui.selectable_value(
+                        &mut this.unified_result_view,
+                        UnifiedResultView::SignificantHits,
+                        "Significant-hit structure",
+                    );
+                }
                 ui.selectable_value(
                     &mut this.unified_result_view,
                     UnifiedResultView::QcRobustness,
@@ -4288,6 +4362,17 @@ impl MergeApp {
                             run.longitudinal_error
                                 .as_deref()
                                 .unwrap_or("Longitudinal analysis not requested."),
+                        );
+                    }
+                }
+                UnifiedResultView::SignificantHits => {
+                    if let Some(result) = run.significant_hit_structure.as_ref() {
+                        this.render_significant_hit_structure(ui, result);
+                    } else {
+                        ui.label(
+                            run.significant_hit_structure_error
+                                .as_deref()
+                                .unwrap_or("Significant-hit structure analysis not requested."),
                         );
                     }
                 }
@@ -6317,6 +6402,298 @@ impl MergeApp {
         });
         if ord.points.len() > 180 {
             ui.label(egui::RichText::new(format!("{} samples are drawn in grouped point series for responsive interaction; hover labels are resolved from the nearest plotted point.",ord.points.len())).small().weak());
+        }
+    }
+
+    fn render_significant_hit_heatmap(
+        &mut self,
+        ui: &mut egui::Ui,
+        panel: &SignificantHitPanel,
+        id: &str,
+    ) {
+        if panel.heatmap_features.is_empty() || panel.heatmap_zscores.is_empty() {
+            return;
+        }
+        let order = clustered_sample_order(panel);
+        let sample_positions = bounded_plot_indices(order.len(), 120, 0);
+        let display_order = sample_positions
+            .iter()
+            .filter_map(|position| order.get(*position).copied().map(|idx| (*position, idx)))
+            .collect::<Vec<_>>();
+        let feature_n = panel.heatmap_features.len().min(40);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Selected-hit heatmap").strong());
+            ui.label(
+                egui::RichText::new("blue = below feature mean; red = above feature mean")
+                    .small()
+                    .weak(),
+            );
+        });
+        if order.len() > display_order.len() || panel.heatmap_features.len() > feature_n {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Responsive preview: {} of {} clustered samples and {} of {} heatmap features are shown. The technical export retains the full configured matrix.",
+                    display_order.len(),
+                    order.len(),
+                    feature_n,
+                    panel.heatmap_features.len()
+                ))
+                .small()
+                .weak(),
+            );
+        }
+        let min_width = 220.0 + display_order.len() as f32 * 20.0;
+        fixed_table_viewport(ui, id, 520.0, min_width, |ui| {
+            egui::Grid::new(format!("{id}_grid"))
+                .spacing(egui::vec2(2.0, 2.0))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Feature").strong());
+                    for (cluster_position, sample_idx) in &display_order {
+                        ui.label(
+                            egui::RichText::new(format!("{}", cluster_position + 1))
+                                .small()
+                                .monospace(),
+                        )
+                        .on_hover_text(format!(
+                            "Cluster order {}
+Sample: {}
+Group: {}
+Subject: {}",
+                            cluster_position + 1,
+                            panel.sample_ids[*sample_idx],
+                            panel.groups[*sample_idx],
+                            panel.subjects[*sample_idx]
+                        ));
+                    }
+                    ui.end_row();
+                    for row_idx in 0..feature_n {
+                        let feature = &panel.heatmap_features[row_idx];
+                        ui.monospace(&feature.feature).on_hover_text(format!(
+                            "{}
+Family: {}
+Adjusted effect: {:.4}
+BH q: {:.3e}",
+                            feature.feature,
+                            feature.family,
+                            feature.adjusted_effect,
+                            feature.q_value
+                        ));
+                        let values = &panel.heatmap_zscores[row_idx];
+                        for (_, sample_idx) in &display_order {
+                            let z = values[*sample_idx];
+                            ui.label(
+                                egui::RichText::new("   ")
+                                    .background_color(significant_hit_heatmap_color(z)),
+                            )
+                            .on_hover_text(format!(
+                                "{}
+Sample: {}
+z score: {:.3}",
+                                feature.feature, panel.sample_ids[*sample_idx], z
+                            ));
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+        ui.label(
+            egui::RichText::new(
+                "Heatmap z scores are display-only. PCA and dendrogram distances use the modality-specific selected-hit values, not this display scaling unless standardization is part of that modality's definition.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    fn render_significant_hit_structure(
+        &mut self,
+        ui: &mut egui::Ui,
+        result: &SignificantHitStructureResult,
+    ) {
+        ui.heading("Post-selection significant-hit structure");
+        ui.colored_label(
+            egui::Color32::from_rgb(230, 170, 70),
+            "Interpretation guardrail: the same Case/Control labels were used to select these significant features. PCA/dendrogram separation is therefore descriptive evidence that the discovered hits form a coherent pattern; it is not independent validation or predictive accuracy.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("BH q ≤ {:.3}", result.config.q_threshold));
+            ui.separator();
+            ui.label(format!(
+                "minimum |adjusted effect| ≥ {:.3}",
+                result.config.min_abs_effect
+            ));
+            ui.separator();
+            ui.label(format!(
+                "max PCA/clustering features: {}",
+                result.config.max_analysis_features
+            ));
+            ui.separator();
+            ui.label(format!("panels: {}", result.panels.len()));
+        });
+        egui::CollapsingHeader::new("What this section answers")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("The global PCA/dendrograms elsewhere in the app are unbiased views of broad sample structure. This section instead restricts each modality to FDR-supported Case/Control hits and asks whether those hits collectively produce a coherent phenotype-associated pattern.");
+                ui.label("A positive silhouette score and high nearest-neighbour group accuracy indicate that samples with the same analysis label tend to be closer in the selected-hit space. These are post-selection descriptive metrics and must not be presented as out-of-sample classifier performance.");
+                ui.label("Gene/transcript abundance uses normalized log2 counts; immune signatures and repertoire summary metrics are standardized; repertoire/isotype composition panels use selected CLR coordinates. Each panel includes PCA, a dendrogram, and a clustered z-scored heatmap preview; technical exports retain the complete feature list, PCA coordinates, dendrogram leaf order, and heatmap matrix.");
+            });
+        for warning in &result.warnings {
+            ui.colored_label(egui::Color32::from_rgb(230, 170, 70), warning);
+        }
+        if !result.errors.is_empty() {
+            egui::CollapsingHeader::new(format!(
+                "Panel warnings / errors ({})",
+                result.errors.len()
+            ))
+            .default_open(false)
+            .show(ui, |ui| {
+                for error in &result.errors {
+                    ui.label(format!(
+                        "{} / {}: {}",
+                        error.modality, error.feature_set, error.error
+                    ));
+                }
+            });
+        }
+        if result.panels.is_empty() {
+            ui.label("No modality produced a significant feature set at the configured threshold.");
+            return;
+        }
+        ui.separator();
+        ui.label(egui::RichText::new("Cross-panel descriptive summary").strong());
+        fixed_table_viewport(ui, "significant_hit_summary_scroll", 360.0, 1280.0, |ui| {
+            egui::Grid::new("significant_hit_summary_grid")
+                .striped(true)
+                .show(ui, |ui| {
+                    for heading in [
+                        "Modality",
+                        "Feature set",
+                        "Significant hits",
+                        "Used",
+                        "Samples",
+                        "Silhouette",
+                        "NN group accuracy",
+                        "PERMANOVA p",
+                    ] {
+                        ui.label(egui::RichText::new(heading).strong());
+                    }
+                    ui.end_row();
+                    for panel in &result.panels {
+                        ui.label(&panel.modality);
+                        ui.label(&panel.feature_set);
+                        ui.label(panel.significant_features_total.to_string());
+                        ui.label(panel.analysis_features.len().to_string());
+                        ui.label(panel.sample_ids.len().to_string());
+                        ui.label(if panel.silhouette.is_finite() {
+                            format!("{:.3}", panel.silhouette)
+                        } else {
+                            "—".to_string()
+                        });
+                        ui.label(if panel.nearest_neighbor_group_accuracy.is_finite() {
+                            format!("{:.1}%", 100.0 * panel.nearest_neighbor_group_accuracy)
+                        } else {
+                            "—".to_string()
+                        });
+                        ui.label(panel.pca.as_ref().map_or_else(
+                            || "—".to_string(),
+                            |ord| {
+                                if ord.permanova_p.is_finite() {
+                                    format!("{:.3e}", ord.permanova_p)
+                                } else {
+                                    "—".to_string()
+                                }
+                            },
+                        ));
+                        ui.end_row();
+                    }
+                });
+        });
+        for (idx, panel) in result.panels.iter().enumerate() {
+            egui::CollapsingHeader::new(format!(
+                "{} — {} ({} significant hits)",
+                panel.modality, panel.feature_set, panel.significant_features_total
+            ))
+            .default_open(idx == 0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("Samples: {}", panel.sample_ids.len()));
+                    ui.separator();
+                    ui.label(format!("Features used: {}", panel.analysis_features.len()));
+                    ui.separator();
+                    if panel.silhouette.is_finite() {
+                        ui.label(format!("Silhouette: {:.3}", panel.silhouette));
+                    }
+                    if panel.nearest_neighbor_group_accuracy.is_finite() {
+                        ui.separator();
+                        ui.label(format!(
+                            "Nearest-neighbour group accuracy: {:.1}%",
+                            panel.nearest_neighbor_group_accuracy * 100.0
+                        ));
+                    }
+                });
+                ui.label(egui::RichText::new(&panel.distance_label).small().weak());
+                for warning in &panel.warnings {
+                    ui.colored_label(egui::Color32::from_rgb(230, 170, 70), warning);
+                }
+                if let Some(ord) = panel.pca.as_ref() {
+                    self.render_corrected_ordination(
+                        ui,
+                        ord,
+                        &format!("significant_hit_pca_{idx}"),
+                    );
+                }
+                if let Some(tree) = panel.dendrogram.as_ref() {
+                    egui::CollapsingHeader::new("Significant-hit hierarchical clustering")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            self.render_corrected_dendrogram(
+                                ui,
+                                tree,
+                                &format!("significant_hit_tree_{idx}"),
+                            );
+                        });
+                }
+                egui::CollapsingHeader::new("Clustered selected-hit heatmap")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        self.render_significant_hit_heatmap(
+                            ui,
+                            panel,
+                            &format!("significant_hit_heatmap_{idx}"),
+                        );
+                    });
+                egui::CollapsingHeader::new(format!(
+                    "Selected features ({})",
+                    panel.analysis_features.len()
+                ))
+                .default_open(false)
+                .show(ui, |ui| {
+                    fixed_table_viewport(
+                        ui,
+                        &format!("significant_hit_features_{idx}"),
+                        420.0,
+                        920.0,
+                        |ui| {
+                            egui::Grid::new(format!("significant_hit_features_grid_{idx}"))
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for heading in ["Feature", "Family", "Adjusted effect", "BH q"] {
+                                        ui.label(egui::RichText::new(heading).strong());
+                                    }
+                                    ui.end_row();
+                                    for feature in &panel.analysis_features {
+                                        ui.monospace(&feature.feature);
+                                        ui.label(&feature.family);
+                                        ui.label(format!("{:.4}", feature.adjusted_effect));
+                                        ui.label(format!("{:.3e}", feature.q_value));
+                                        ui.end_row();
+                                    }
+                                });
+                        },
+                    );
+                    ui.label(egui::RichText::new("The technical-table export retains the full z-scored heatmap matrix and clustered sample annotation order without the responsive on-screen display cap.").small().weak());
+                });
+            });
         }
     }
 
@@ -8636,6 +9013,17 @@ impl MergeApp {
             None
         };
 
+        let significant_hit_structure = if self.unified_run_significant_hit_structure {
+            Some(SignificantHitStructureConfig {
+                q_threshold: self.significant_hit_q_threshold.clamp(0.0, 1.0),
+                min_abs_effect: self.significant_hit_min_abs_effect.max(0.0),
+                max_analysis_features: self.significant_hit_max_features.max(2),
+                max_heatmap_features: 80,
+            })
+        } else {
+            None
+        };
+
         let modalities = CohortModalitySelection {
             gene: self.cohort_run_gene,
             transcript: self.cohort_run_transcript,
@@ -8669,6 +9057,7 @@ impl MergeApp {
             candidate: self.focused_settings.clone(),
             pbmc_diagnostics: diagnostics,
             longitudinal,
+            significant_hit_structure,
         };
 
         let backend = Arc::clone(&self.analysis_backend);

@@ -14,6 +14,7 @@ use crate::corrected::{
 };
 use crate::diagnostics::{PbmcDiagnosticsConfig, PbmcDiagnosticsResult};
 use crate::focused::{FocusedCandidateSettings, FocusedCandidateSummary};
+use crate::hit_structure::{SignificantHitStructureConfig, SignificantHitStructureResult};
 use crate::longitudinal::{LongitudinalAnalysisResult, LongitudinalClusteringConfig};
 use crate::outliers::OutlierFilterSnapshot;
 use std::path::PathBuf;
@@ -67,6 +68,9 @@ pub struct CohortAnalysisSettingsSnapshot {
     /// Optional unsupervised all-eligible-sample analysis of longitudinal
     /// patient/person identity, independent of the Case/Control comparison.
     pub longitudinal: Option<LongitudinalClusteringConfig>,
+    /// Optional descriptive PCA/dendrogram analysis restricted to features
+    /// that are significant in the same corrected Case/Control comparison.
+    pub significant_hit_structure: Option<SignificantHitStructureConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +160,8 @@ pub struct UnifiedCohortAnalysisRun {
     pub diagnostics_error: Option<String>,
     pub longitudinal: Option<LongitudinalAnalysisResult>,
     pub longitudinal_error: Option<String>,
+    pub significant_hit_structure: Option<SignificantHitStructureResult>,
+    pub significant_hit_structure_error: Option<String>,
     pub candidates: FocusedCandidateSummary,
     pub warnings: Vec<String>,
 }
@@ -199,6 +205,7 @@ use crate::corrected::{
 };
 use crate::diagnostics::run_pbmc_diagnostics_with_baseline;
 use crate::focused::{annotate_focused_candidate_robustness, build_focused_candidate_summary};
+use crate::hit_structure::{run_significant_hit_structure, write_significant_hit_structure_tables};
 use crate::longitudinal::{run_longitudinal_analysis, write_longitudinal_analysis_tables};
 use anyhow::Result;
 
@@ -252,6 +259,7 @@ where
     let spec = settings.corrected.clone();
     let diagnostics_requested = settings.pbmc_diagnostics.is_some();
     let longitudinal_requested = settings.longitudinal.is_some();
+    let significant_hit_structure_requested = settings.significant_hit_structure.is_some();
     let stage_total = [
         selection.gene || selection.pathway,
         selection.transcript,
@@ -264,6 +272,7 @@ where
         settings.exploratory_direction_check && (selection.gene || selection.pathway),
         settings.exploratory_direction_check && selection.transcript,
         longitudinal_requested,
+        significant_hit_structure_requested,
         diagnostics_requested,
     ]
     .into_iter()
@@ -560,6 +569,32 @@ where
         stage += 1;
     }
 
+    let (mut significant_hit_structure, mut significant_hit_structure_error) = (None, None);
+    if let Some(config) = settings.significant_hit_structure.as_ref() {
+        let base = stage;
+        match run_significant_hit_structure(
+            scan,
+            metadata,
+            &comparison,
+            &spec,
+            &primary,
+            config.clone(),
+            |done, total, message| {
+                let denom = total.max(1);
+                let overall = base * 1000 + done.min(denom) * 1000 / denom;
+                progress(
+                    overall,
+                    stage_total * 1000,
+                    &format!("Significant-hit structure — {message}"),
+                );
+            },
+        ) {
+            Ok(result) => significant_hit_structure = Some(result),
+            Err(error) => significant_hit_structure_error = Some(format!("{error:#}")),
+        }
+        stage += 1;
+    }
+
     if settings.exploratory_direction_check && (selection.gene || selection.pathway) {
         progress(
             stage * 1000,
@@ -706,6 +741,23 @@ where
             )
         }));
     }
+    if let Some(error) = significant_hit_structure_error.as_ref() {
+        warnings.push(format!("Significant-hit structure: {error}"));
+    }
+    if let Some(result) = significant_hit_structure.as_ref() {
+        warnings.extend(
+            result
+                .warnings
+                .iter()
+                .map(|warning| format!("Significant-hit structure: {warning}")),
+        );
+        warnings.extend(result.errors.iter().map(|error| {
+            format!(
+                "Significant-hit structure / {} / {}: {}",
+                error.modality, error.feature_set, error.error
+            )
+        }));
+    }
 
     progress(stage_total * 1000, stage_total * 1000, "Analysis complete");
     Ok(UnifiedCohortAnalysisRun {
@@ -718,6 +770,8 @@ where
         diagnostics_error,
         longitudinal,
         longitudinal_error,
+        significant_hit_structure,
+        significant_hit_structure_error,
         candidates,
         warnings,
     })
@@ -1248,6 +1302,18 @@ where
         )?;
         hash_pool.discover()?;
     }
+    if let Some(hit_structure) = run.significant_hit_structure.as_ref() {
+        progress(
+            10,
+            STAGES,
+            "Technical tables: writing significant-hit PCA/dendrogram outputs",
+        );
+        write_significant_hit_structure_tables(
+            &outdir.join("significant_hit_structure"),
+            hit_structure,
+        )?;
+        hash_pool.discover()?;
+    }
 
     let candidate_dir = outdir.join("key_findings");
     write_key_findings_tables(&candidate_dir, &run.candidates)?;
@@ -1350,6 +1416,21 @@ where
         ));
     } else {
         summary.push_str("Longitudinal clustering: disabled\n");
+    }
+    if let Some(hit_structure) = run.significant_hit_structure.as_ref() {
+        summary.push_str(&format!(
+            "Significant-hit structure: enabled\nSignificant-hit BH q threshold: {}\nSignificant-hit minimum |adjusted effect|: {}\nSignificant-hit max analysis features: {}\nSignificant-hit panels completed: {}\n",
+            hit_structure.config.q_threshold,
+            hit_structure.config.min_abs_effect,
+            hit_structure.config.max_analysis_features,
+            hit_structure.panels.len(),
+        ));
+    } else if let Some(error) = run.significant_hit_structure_error.as_deref() {
+        summary.push_str(&format!(
+            "Significant-hit structure: failed\nSignificant-hit error: {error}\n"
+        ));
+    } else {
+        summary.push_str("Significant-hit structure: disabled\n");
     }
     if !run.warnings.is_empty() {
         summary.push_str("\nWarnings:\n");

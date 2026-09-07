@@ -266,6 +266,8 @@ pub struct CorrectedRepertoireSample {
 pub struct CorrectedCompositionResult {
     pub family: String,
     pub retained_features: usize,
+    /// Exact CLR denominator/basis used when the composition was modeled.
+    pub retained_feature_names: Vec<String>,
     pub tests: Vec<AdjustedFeatureResult>,
     pub ordination: Option<OrdinationResult>,
     pub dendrogram: Option<DendrogramResult>,
@@ -291,6 +293,8 @@ pub struct CorrectedRepertoireResult {
 pub struct CorrectedIsotypeResult {
     pub files_used: usize,
     pub determined_only: bool,
+    /// Exact CLR denominator/basis used for the isotype composition.
+    pub retained_feature_names: Vec<String>,
     pub tests: Vec<AdjustedFeatureResult>,
     pub ordination: Option<OrdinationResult>,
     pub dendrogram: Option<DendrogramResult>,
@@ -2999,6 +3003,7 @@ where
     Ok(CorrectedIsotypeResult {
         files_used: samples.len(),
         determined_only: spec.exclude_undetermined_isotype,
+        retained_feature_names: comp.retained_feature_names,
         tests: comp.tests,
         ordination: comp.ordination,
         dendrogram: comp.dendrogram,
@@ -3700,6 +3705,7 @@ fn composition_analysis(
     Some(CorrectedCompositionResult {
         family: family.to_string(),
         retained_features: retained.len(),
+        retained_feature_names: retained,
         tests,
         ordination: ord,
         dendrogram,
@@ -3889,6 +3895,111 @@ fn sharing_fractions(
             (private / total, longitudinal / total, public / total)
         })
         .collect()
+}
+
+pub(crate) fn parse_repertoire_feature_maps(
+    path: &Path,
+    modality: CohortModality,
+    policy: AmbiguousCallPolicy,
+) -> Result<BTreeMap<String, HashMap<String, f64>>> {
+    if !matches!(
+        modality,
+        CohortModality::Bcr | CohortModality::TcrAlpha | CohortModality::TcrBeta
+    ) {
+        bail!("Repertoire feature-map parsing supports BCR/TCR only");
+    }
+
+    // This helper is used only when a repertoire composition family has
+    // significant hits.  Do not call `read_first_sheet`: cloning every XLSX
+    // worksheet cell into a second Vec<Vec<Data>> would recreate the large
+    // temporary/destructor pressure that the native repertoire cleanup work
+    // deliberately removed.  Consume Calamine's materialized Range in place,
+    // accumulate only the small composition maps, then release the Range before
+    // the workbook/shared-string container just like the main native parser.
+    let mut workbook: Xlsx<_> =
+        open_workbook(path).with_context(|| format!("Could not open {}", path.display()))?;
+    let sheet = workbook
+        .sheet_names()
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("Workbook has no worksheets"))?;
+    let range = workbook.worksheet_range(&sheet)?;
+    let mut rows = range.rows();
+    let header = rows.next().ok_or_else(|| anyhow!("Worksheet is empty"))?;
+    let headers = header.iter().map(cell_text).collect::<Vec<_>>();
+    let columns = header_map(&headers);
+    let count_idx =
+        find_header(&columns, &["Clone Count"]).ok_or_else(|| anyhow!("Missing Clone Count"))?;
+    let v_idx = find_header(&columns, &["Top V Hits"]);
+    let d_idx = find_header(&columns, &["Top D Hits"]);
+    let j_idx = find_header(&columns, &["Top J Hits"]);
+    let iso_idx = find_header(&columns, &["Isotype"]);
+    let mut feature_maps: BTreeMap<String, HashMap<String, f64>> = BTreeMap::new();
+    for family in match modality {
+        CohortModality::Bcr => vec!["Isotype", "V gene", "D gene", "J gene"],
+        _ => vec!["V gene", "J gene", "V-J pair"],
+    } {
+        feature_maps.insert(family.to_string(), HashMap::new());
+    }
+    for row in rows.by_ref() {
+        let count = row.get(count_idx).and_then(cell_f64).unwrap_or(0.0);
+        if count <= 0.0 {
+            continue;
+        }
+        if modality == CohortModality::Bcr {
+            if let Some(idx) = iso_idx {
+                let iso = row.get(idx).map(cell_text).unwrap_or_default();
+                if !iso.is_empty() {
+                    *feature_maps
+                        .get_mut("Isotype")
+                        .unwrap()
+                        .entry(iso)
+                        .or_insert(0.0) += count;
+                }
+            }
+        }
+        let v_raw = v_idx
+            .and_then(|idx| row.get(idx))
+            .map(cell_text)
+            .unwrap_or_default();
+        let d_raw = d_idx
+            .and_then(|idx| row.get(idx))
+            .map(cell_text)
+            .unwrap_or_default();
+        let j_raw = j_idx
+            .and_then(|idx| row.get(idx))
+            .map(cell_text)
+            .unwrap_or_default();
+        let v_calls = resolve_calls(&v_raw, policy);
+        let d_calls = resolve_calls(&d_raw, policy);
+        let j_calls = resolve_calls(&j_raw, policy);
+        add_resolved(feature_maps.get_mut("V gene").unwrap(), &v_calls, count);
+        if modality == CohortModality::Bcr {
+            add_resolved(feature_maps.get_mut("D gene").unwrap(), &d_calls, count);
+        }
+        add_resolved(feature_maps.get_mut("J gene").unwrap(), &j_calls, count);
+        if modality != CohortModality::Bcr {
+            let pair_map = feature_maps.get_mut("V-J pair").unwrap();
+            for (v, vw) in &v_calls {
+                for (j, jw) in &j_calls {
+                    *pair_map.entry(format!("{v} | {j}")).or_insert(0.0) += count * vw * jw;
+                }
+            }
+        }
+    }
+    drop(rows);
+    drop(range);
+    drop(workbook);
+
+    for map in feature_maps.values_mut() {
+        let denom = map.values().sum::<f64>();
+        if denom > 0.0 {
+            for value in map.values_mut() {
+                *value /= denom;
+            }
+        }
+    }
+    Ok(feature_maps)
 }
 
 fn parse_repertoire_file_with_audit<F>(
@@ -4482,6 +4593,43 @@ fn stable_seed(text: &str) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
+}
+
+pub(crate) fn pca_from_feature_rows_for_samples(
+    rows: &[Vec<f64>],
+    sample_ids: &[String],
+    group_case: &[bool],
+    subjects: &[String],
+    title: &str,
+    permutations: usize,
+) -> Option<OrdinationResult> {
+    if sample_ids.len() != group_case.len() || sample_ids.len() != subjects.len() {
+        return None;
+    }
+    let design = DesignMatrix {
+        sample_ids: sample_ids.to_vec(),
+        group_case: group_case.to_vec(),
+        subjects: subjects.to_vec(),
+        x: vec![vec![1.0]; sample_ids.len()],
+        column_names: vec!["Intercept".to_string()],
+        group_col: 0,
+        dropped_missing_covariates: 0,
+    };
+    pca_from_rows(rows, &design, title, permutations)
+}
+
+pub(crate) fn euclidean_distance_from_feature_rows(rows: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    euclidean_distance_from_rows(rows)
+}
+
+pub(crate) fn permanova_for_sample_distance(
+    dist: &[Vec<f64>],
+    group_case: &[bool],
+    subjects: &[String],
+    permutations: usize,
+    seed: u64,
+) -> (f64, f64) {
+    permanova(dist, group_case, subjects, permutations, seed)
 }
 
 fn pca_from_rows(

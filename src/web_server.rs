@@ -3768,6 +3768,7 @@ where
             candidate: crate::focused::FocusedCandidateSettings::default(),
             pbmc_diagnostics,
             longitudinal: None,
+            significant_hit_structure: None,
         };
 
         progress(

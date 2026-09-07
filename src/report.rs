@@ -15,6 +15,9 @@ use crate::diagnostics::PbmcDiagnosticsResult;
 use crate::focused::{
     FocusedCandidateSummary, FocusedGeneCandidate, FocusedOtherCandidate, FocusedPathwayCandidate,
 };
+use crate::hit_structure::{
+    SignificantHitPanel, SignificantHitStructureResult, clustered_sample_order,
+};
 use crate::longitudinal::{LongitudinalAnalysisResult, LongitudinalModalityResult};
 use crate::outliers::{OutlierConsensusRule, OutlierFilterSnapshot};
 use anyhow::{Context, Result};
@@ -2173,6 +2176,231 @@ fn build_longitudinal_report_section(
     section
 }
 
+fn hit_structure_metric(value: f64, digits: usize) -> String {
+    if value.is_finite() {
+        format!("{:.*}", digits, value)
+    } else {
+        "—".to_string()
+    }
+}
+
+fn hit_structure_summary_table(result: &SignificantHitStructureResult) -> Markup {
+    html! {
+        div class="table-container" {
+            table {
+                thead { tr {
+                    th { "Modality" }
+                    th { "Feature set" }
+                    th { "Significant hits" }
+                    th { "Used" }
+                    th { "Samples" }
+                    th { "Silhouette" }
+                    th { "Nearest-neighbour group accuracy" }
+                    th { "PERMANOVA p" }
+                } }
+                tbody {
+                    @for panel in &result.panels {
+                        tr {
+                            td { (panel.modality) }
+                            td { (panel.feature_set) }
+                            td { (panel.significant_features_total) }
+                            td { (panel.analysis_features.len()) }
+                            td { (panel.sample_ids.len()) }
+                            td { (hit_structure_metric(panel.silhouette, 3)) }
+                            td { @if panel.nearest_neighbor_group_accuracy.is_finite() { (format!("{:.1}%", panel.nearest_neighbor_group_accuracy * 100.0)) } @else { "—" } }
+                            td { @if let Some(ord)=panel.pca.as_ref() { (hit_structure_metric(ord.permanova_p, 4)) } @else { "—" } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn hit_structure_feature_table(panel: &SignificantHitPanel, limit: usize) -> Markup {
+    html! {
+        div class="table-container" {
+            table {
+                thead { tr { th { "Feature" } th { "Family" } th { "Adjusted effect" } th { "BH q" } } }
+                tbody {
+                    @for feature in panel.analysis_features.iter().take(limit) {
+                        tr {
+                            td { code { (feature.feature) } }
+                            td { (feature.family) }
+                            td { (fmt(feature.adjusted_effect)) }
+                            td { (fmt_sci(feature.q_value)) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn hit_structure_heatmap_color(value: f64) -> String {
+    if !value.is_finite() {
+        return "rgb(220,220,220)".to_string();
+    }
+    let scaled = (value.clamp(-3.0, 3.0) / 3.0).abs();
+    let (target_r, target_g, target_b) = if value >= 0.0 {
+        (178.0, 24.0, 43.0)
+    } else {
+        (33.0, 102.0, 172.0)
+    };
+    let base = 248.0;
+    let mix = |target: f64| (base + (target - base) * scaled).round() as u8;
+    format!("rgb({},{},{})", mix(target_r), mix(target_g), mix(target_b))
+}
+
+fn hit_structure_heatmap(
+    panel: &SignificantHitPanel,
+    max_features: usize,
+    max_samples: usize,
+) -> Markup {
+    let order = clustered_sample_order(panel);
+    let feature_n = panel.heatmap_features.len().min(max_features);
+    let sample_n = order.len().min(max_samples);
+    let shown_order = &order[..sample_n];
+    let clipped_features = panel.heatmap_features.len().saturating_sub(feature_n);
+    let clipped_samples = order.len().saturating_sub(sample_n);
+    html! {
+        h4 { "Clustered selected-hit heatmap" }
+        p {
+            "Feature-wise z scores are displayed only for visual comparison; PCA and dendrogram distances use the modality-specific values described above. Columns follow the hierarchical leaf order when a dendrogram is available, otherwise the modeled sample order. Red indicates above-feature mean and blue below-feature mean."
+            @if clipped_features > 0 || clipped_samples > 0 {
+                " Display is capped for report readability ("
+                (feature_n) "/" (panel.heatmap_features.len()) " heatmap features; "
+                (sample_n) "/" (order.len()) " samples shown). The technical TSV retains the complete configured matrix."
+            }
+        }
+        div class="table-container" style="max-height:720px;overflow:auto;" {
+            table style="border-collapse:collapse;font-size:9px;white-space:nowrap;" {
+                thead {
+                    tr {
+                        th style="position:sticky;left:0;background:#fff;z-index:3;min-width:150px;" { "Feature" }
+                        @for idx in shown_order {
+                            th
+                                style="height:92px;min-width:10px;max-width:14px;padding:1px;writing-mode:vertical-rl;transform:rotate(180deg);font-weight:400;"
+                                title=(format!("{} | group={} | subject={}", panel.sample_ids[*idx], panel.groups[*idx], panel.subjects[*idx]))
+                            { (panel.sample_ids[*idx]) }
+                        }
+                    }
+                    tr {
+                        th style="position:sticky;left:0;background:#fff;z-index:3;" { "Group" }
+                        @for idx in shown_order {
+                            @let group_color = if panel.groups[*idx] == "Case" { "#c95b5b" } else { "#5b78b8" };
+                            td
+                                style=(format!("background:{};min-width:10px;height:8px;padding:0;border:0;", group_color))
+                                title=(format!("{}: {}", panel.sample_ids[*idx], panel.groups[*idx]))
+                            { " " }
+                        }
+                    }
+                }
+                tbody {
+                    @for row_idx in 0..feature_n {
+                        @let feature = &panel.heatmap_features[row_idx];
+                        @let values = &panel.heatmap_zscores[row_idx];
+                        tr {
+                            th
+                                style="position:sticky;left:0;background:#fff;z-index:2;text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;"
+                                title=(format!("{} | {} | effect={:.4} | q={:.3e}", feature.feature, feature.family, feature.adjusted_effect, feature.q_value))
+                            { (feature.feature) }
+                            @for idx in shown_order {
+                                @let z = values[*idx];
+                                @let cell_style = format!(
+                                    "background:{};min-width:10px;width:10px;height:12px;padding:0;border:0;",
+                                    hit_structure_heatmap_color(z)
+                                );
+                                td
+                                    style=(cell_style)
+                                    title=(format!("{} | {} | z={:.3}", feature.feature, panel.sample_ids[*idx], z))
+                                { " " }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn build_significant_hit_structure_report_section(
+    result: &SignificantHitStructureResult,
+    simplified: bool,
+) -> ReportSection {
+    let mut section = ReportSection::new("Post-selection significant-hit structure");
+    section.add_content(html! {
+        p { strong { "Purpose: " } "These plots ask whether features already declared significant by the corrected Case/Control analysis form a coherent multivariate pattern across samples." }
+        p { strong { "Important interpretation guardrail: " } "The same phenotype labels were used to select the features and are then displayed in the PCA/dendrogram. Apparent separation is therefore post-selection descriptive evidence, not independent validation, classifier accuracy, or proof that the signature will generalize to a new cohort." }
+        ul {
+            li { "Global PCA/dendrograms elsewhere in this report remain the unbiased view of broad sample structure." }
+            li { "Gene and transcript/isoform panels use normalized log2 counts for the selected abundance hits." }
+            li { "Immune and repertoire-summary panels use standardized selected features; BCR/TCR/isotype composition panels use selected CLR coordinates." }
+            li { "Silhouette and nearest-neighbour group accuracy summarize how coherently the selected-hit space organizes the current samples; they are descriptive post-selection metrics." }
+            li { "A z-scored heatmap matrix and the exact selected-feature lists are written to the technical export under significant_hit_structure/." }
+        }
+        p { strong { "Selection rule: " } "BH q ≤ " (fmt(result.config.q_threshold)) "; minimum |adjusted effect| ≥ " (fmt(result.config.min_abs_effect)) "; at most " (result.config.max_analysis_features) " strongest hits enter PCA/clustering." }
+        (hit_structure_summary_table(result))
+    });
+    for warning in &result.warnings {
+        section.add_content(html! { p { strong { "Note: " } (warning) } });
+    }
+    if !result.errors.is_empty() && !simplified {
+        section.add_content(html! {
+            h3 { "Panel warnings / errors" }
+            ul { @for error in &result.errors { li { strong { (error.modality) " / " (error.feature_set) ": " } (error.error) } } }
+        });
+    }
+    if simplified {
+        let best = result
+            .panels
+            .iter()
+            .filter(|panel| panel.silhouette.is_finite())
+            .max_by(|a, b| a.silhouette.total_cmp(&b.silhouette))
+            .or_else(|| result.panels.first());
+        if let Some(panel) = best {
+            section.add_content(html! {
+                h3 { "Representative selected-hit view" }
+                p { strong { (panel.modality) " — " (panel.feature_set) } ". This panel has " (panel.significant_features_total) " configured significant hit(s); " (panel.analysis_features.len()) " enter the PCA/clustering. Silhouette " (hit_structure_metric(panel.silhouette, 3)) "; nearest-neighbour group accuracy " @if panel.nearest_neighbor_group_accuracy.is_finite() { (format!("{:.1}%", 100.0 * panel.nearest_neighbor_group_accuracy)) } @else { "—" } "." }
+                (hit_structure_feature_table(panel, 12))
+            });
+            if let Some(ord) = panel.pca.as_ref().and_then(corrected_ordination_plot) {
+                section.add_plot(ord);
+            }
+            if let Some(tree) = panel
+                .dendrogram
+                .as_ref()
+                .and_then(corrected_dendrogram_plot)
+            {
+                section.add_plot(tree);
+            }
+            section.add_content(hit_structure_heatmap(panel, 24, 200));
+        }
+    } else {
+        for panel in &result.panels {
+            section.add_content(html! {
+                h3 { (panel.modality) " — " (panel.feature_set) }
+                p { (panel.significant_features_total) " hit(s) pass the configured threshold; " (panel.analysis_features.len()) " are used for multivariate visualization across " (panel.sample_ids.len()) " samples. Silhouette " (hit_structure_metric(panel.silhouette, 3)) "; nearest-neighbour group accuracy " @if panel.nearest_neighbor_group_accuracy.is_finite() { (format!("{:.1}%", panel.nearest_neighbor_group_accuracy * 100.0)) } @else { "—" } "." }
+                p { strong { "Distance definition: " } (panel.distance_label) }
+                (hit_structure_feature_table(panel, 30))
+                @for warning in &panel.warnings { p { strong { "Panel note: " } (warning) } }
+            });
+            if let Some(plot) = panel.pca.as_ref().and_then(corrected_ordination_plot) {
+                section.add_plot(plot);
+            }
+            if let Some(plot) = panel
+                .dendrogram
+                .as_ref()
+                .and_then(corrected_dendrogram_plot)
+            {
+                section.add_plot(plot);
+            }
+            section.add_content(hit_structure_heatmap(panel, 40, 320));
+        }
+    }
+    section
+}
+
 fn compact_hover_gene_list(value: &str, max_items: usize, max_chars: usize) -> String {
     let items = value
         .split(',')
@@ -2496,6 +2724,10 @@ where
             li { strong { "Exploratory TPM direction support: " } (if run.settings.exploratory_direction_check { "enabled" } else { "disabled" }) }
             li { strong { "PBMC / confounding diagnostics: " } (if run.settings.pbmc_diagnostics.is_some() { "enabled" } else { "disabled" }) }
             li { strong { "Longitudinal patient-signature clustering: " } (if run.settings.longitudinal.is_some() { "enabled" } else { "disabled" }) }
+            li { strong { "Post-selection significant-hit structure: " } (if run.settings.significant_hit_structure.is_some() { "enabled" } else { "disabled" }) }
+            @if let Some(hit)=run.settings.significant_hit_structure.as_ref() {
+                li { strong { "Significant-hit selection: " } "BH q ≤ " (fmt(hit.q_threshold)) "; minimum |adjusted effect| ≥ " (fmt(hit.min_abs_effect)) "; max PCA/clustering features " (hit.max_analysis_features) "." }
+            }
             @if let Some(longitudinal)=run.settings.longitudinal.as_ref() {
                 li { strong { "Longitudinal column roles: " } "observation/sample = " (longitudinal.observation_id_column) "; patient/person = " (longitudinal.patient_id_column) "; time/date = " (longitudinal.time_column.as_deref().unwrap_or("none")) "; QC/review = " (longitudinal.qc_status_column.as_deref().unwrap_or("none")) "." }
             }
@@ -2574,6 +2806,17 @@ where
     } else if let Some(error) = run.longitudinal_error.as_deref() {
         report.add_section(corrected_error_section(
             "Longitudinal patient-specific signatures",
+            error,
+        ));
+    }
+    if let Some(hit_structure) = run.significant_hit_structure.as_ref() {
+        report.add_section(build_significant_hit_structure_report_section(
+            hit_structure,
+            false,
+        ));
+    } else if let Some(error) = run.significant_hit_structure_error.as_deref() {
+        report.add_section(corrected_error_section(
+            "Post-selection significant-hit structure",
             error,
         ));
     }
@@ -2756,6 +2999,18 @@ pub fn generate_unified_simplified_html_report(
         report.add_section(structure);
     }
 
+    if let Some(hit_structure) = run.significant_hit_structure.as_ref() {
+        report.add_section(build_significant_hit_structure_report_section(
+            hit_structure,
+            true,
+        ));
+    } else if let Some(error) = run.significant_hit_structure_error.as_deref() {
+        report.add_section(corrected_error_section(
+            "Post-selection significant-hit structure",
+            error,
+        ));
+    }
+
     if let Some(longitudinal) = run.longitudinal.as_ref() {
         report.add_section(build_longitudinal_report_section(longitudinal, true));
     } else if let Some(error) = run.longitudinal_error.as_deref() {
@@ -2858,6 +3113,9 @@ fn build_unified_analysis_documentation(run: &UnifiedCohortAnalysisRun) -> Repor
             }
             @if let Some(longitudinal)=run.settings.longitudinal.as_ref() {
                 li { strong { "Longitudinal clustering metadata roles: " } "observation/sample = " (longitudinal.observation_id_column) "; patient/person = " (longitudinal.patient_id_column) "; time/date = " (longitudinal.time_column.as_deref().unwrap_or("none")) "; QC/review = " (longitudinal.qc_status_column.as_deref().unwrap_or("none")) "." }
+            }
+            @if let Some(hit)=run.settings.significant_hit_structure.as_ref() {
+                li { strong { "Post-selection significant-hit structure: " } "BH q <= " (fmt(hit.q_threshold)) "; minimum |adjusted effect| >= " (fmt(hit.min_abs_effect)) "; max PCA/clustering features " (hit.max_analysis_features) "; max heatmap features " (hit.max_heatmap_features) "." }
             }
             li { strong { "Exploratory TPM direction annotation: " } (if run.settings.exploratory_direction_check { "enabled" } else { "disabled" }) }
             @if let Some(text) = qc_description.as_ref() {

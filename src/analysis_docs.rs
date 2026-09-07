@@ -309,6 +309,53 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
         ],
     },
     AnalysisDocSection {
+        title: "Post-selection significant-hit PCA and clustering",
+        summary: "This optional descriptive view restricts each modality to features that are already significant in the corrected Case/Control analysis and asks whether those hits form a coherent multivariate sample pattern. It complements, but does not replace, the unbiased all-feature PCA/dendrograms.",
+        default_open: false,
+        examples: &[],
+        subsections: &[
+            AnalysisDocSubsection {
+                title: "What question it answers",
+                paragraphs: &[
+                    "The ordinary PCA/dendrograms ask what broad sample structure exists without selecting features because of the phenotype comparison. The significant-hit view asks a narrower follow-up question: after selecting FDR-supported features from the corrected Case/Control model, do those hits collectively organize the samples in a coherent way?",
+                    "This can reveal whether a differential signal is distributed consistently across many cases/controls or whether a nominal hit list is driven by a small subset of samples. It can also reveal when patient, batch, timepoint, or another metadata factor appears to dominate the selected-hit structure.",
+                    "Because the same Case/Control labels are used to select the features and are then displayed again on the PCA/dendrogram, visible separation is expected to some degree and cannot be treated as independent validation, classifier accuracy, or evidence of out-of-sample generalization.",
+                ],
+                bullets: &[
+                    "Use global/unbiased PCA and clustering to understand broad cohort structure.",
+                    "Use significant-hit PCA/clustering to understand the coherence and sample-level consistency of the discovered differential signal.",
+                    "Use independent replication or patient-grouped cross-validation for claims about generalization or prediction.",
+                ],
+            },
+            AnalysisDocSubsection {
+                title: "Feature selection and modality-specific geometry",
+                paragraphs: &[
+                    "The user chooses a BH q threshold, an optional minimum absolute adjusted effect, and a maximum number of hits entering PCA/clustering. When more hits pass than the configured maximum, the strongest hits are chosen by q value and then absolute adjusted effect; the report records the cap.",
+                    "Gene and transcript/isoform abundance hits use normalized log2 counts. Immune ssGSEA hits and repertoire summary metrics are standardized feature-wise because their native scales differ. BCR/TCR/isotype composition hits retain CLR coordinates so the selected-hit view remains consistent with compositional analysis.",
+                    "Feature-wise z scores are exported as a heatmap matrix for display only. The PCA and dendrogram themselves use the modality-appropriate values rather than the heatmap z scores unless standardization is part of that modality's analysis definition.",
+                ],
+                bullets: &[
+                    "At least two selected hits are required for PCA and hierarchical clustering; a single hit is retained for inspection but not converted into a misleading multivariate plot.",
+                    "Repertoire analyses are separated into scientifically coherent feature families instead of mixing clonality, V/J composition, and isotype values on one arbitrary scale.",
+                    "Transcript abundance hits are isoform-level abundance leads; they are not equivalent to differential transcript usage unless the dedicated DTU result also supports that interpretation.",
+                ],
+            },
+            AnalysisDocSubsection {
+                title: "How to interpret separation metrics and exports",
+                paragraphs: &[
+                    "The silhouette score compares each sample's average distance to its own Case/Control group with its average distance to the other group. Positive values indicate more coherent same-group neighborhoods; values near zero indicate overlap; negative values indicate that samples are often closer to the opposite group.",
+                    "Nearest-neighbour group accuracy asks whether each sample's closest other sample has the same Case/Control label. PERMANOVA summarizes multivariate group separation using the selected-hit distance matrix and uses subject-blocked permutations when repeated measures are configured.",
+                    "All three values remain post-selection descriptive statistics. The native result view and full report show PCA, dendrogram, and a clustered z-scored heatmap for every successful panel; the simplified report shows the cross-panel summary and a representative panel with the same three views. Technical tables retain the complete selected features, PCA coordinates, dendrogram leaf order, z-scored heatmap matrices, and panel errors under significant_hit_structure/.",
+                ],
+                bullets: &[
+                    "Do not call nearest-neighbour group accuracy cross-validated prediction accuracy.",
+                    "A clean selected-hit PCA with a mixed global PCA can mean that phenotype-associated biology is concentrated in a restricted subset of features rather than dominating the whole dataset.",
+                    "If selected-hit structure follows patient identity or batch more strongly than phenotype, investigate confounding and longitudinal effects before prioritizing the signature.",
+                ],
+            },
+        ],
+    },
+    AnalysisDocSection {
         title: "Sample QC and cross-modal outlier analysis",
         summary: "Outlier QC asks whether a sample looks unusually far from other samples in one or more data types. It is deliberately a flag-for-review system, not an automatic sample-deletion system.",
         default_open: false,
