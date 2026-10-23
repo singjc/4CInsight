@@ -119,7 +119,7 @@ pub struct CrossModalOutlierResult {
 }
 
 /// Immutable record of the exact reviewed QC filter that was applied to a
-/// downstream analysis.  Keeping this snapshot separate from the live GUI
+/// downstream analysis.  Keeping this snapshot separate from the live UI
 /// state makes exported tables/reports reproducible even if the user changes
 /// the outlier settings after the analysis has finished.
 #[derive(Debug, Clone)]

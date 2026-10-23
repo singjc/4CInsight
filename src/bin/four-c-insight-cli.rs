@@ -1,15 +1,15 @@
 use anyhow::{Result, bail};
-use cfs_expression_merger::{
+use clap::{Parser, ValueEnum};
+use four_c_insight::{
     ColumnOrder, DataKind, MergeConfig, Metric, all_metrics, collaborator_default_metrics,
     discover_xlsx_files, inspect_kind, merge_wide,
 };
-use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "Merge gene/transcript expression Excel reports without loading the whole cohort into RAM"
+    about = "4C Insight CLI: merge gene/transcript expression Excel reports with bounded memory use"
 )]
 struct Args {
     /// Folder containing .xlsx reports.

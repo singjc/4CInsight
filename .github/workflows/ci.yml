@@ -1,0 +1,42 @@
+name: 4c-insight-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo check --locked
+      - run: cargo test --locked
+
+  wasm-bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo test --manifest-path wasm/Cargo.toml
+      - run: cargo check --manifest-path wasm/Cargo.toml --target wasm32-unknown-unknown
+
+  web-static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - run: node --test app/tests/*.test.mjs
+      - run: |
+          node --check app/main.js
+          node --check app/analysis-worker.js
+          node --check app/file-classifier.js
+          node --check app/save.js
+          node --check app/coi-serviceworker.js

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#111827" />
+  <meta name="description" content="4C Insight — local-first multi-omics cohort analysis" />
+  <link rel="stylesheet" href="./styles.css" />
+  <title>4C Insight</title>
+</head>
+<body>
+  <noscript>4C Insight requires JavaScript to run local browser analysis.</noscript>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">4C</div>
+        <div><h1>4C Insight</h1><p>Local-first multi-omics cohort analysis</p></div>
+      </div>
+      <div class="privacy-chip" title="Selected data stay on this device">
+        <span class="privacy-dot"></span> Runs on this device
+      </div>
+    </header>
+    <div class="workspace">
+      <aside class="sidebar" aria-label="Analysis workflows">
+        <div class="sidebar-label">Workflow</div>
+        <nav id="workflow-nav" class="workflow-nav"></nav>
+        <div id="sidebar-status" class="sidebar-status"></div>
+      </aside>
+      <main id="main-content" class="main-content"></main>
+    </div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

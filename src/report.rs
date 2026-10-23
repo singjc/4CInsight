@@ -120,7 +120,7 @@ impl Report {
                 match block {
                     ReportBlock::Html(markup) => writer.write_all(markup.as_bytes())?,
                     ReportBlock::Plot(plot) => {
-                        let plot_id = format!("cfs-report-plot-{section_index}-{block_index}");
+                        let plot_id = format!("fourc-report-plot-{section_index}-{block_index}");
                         writer.write_all(b"<div class=\"plot-wrapper\">")?;
                         let fragment = plot.to_inline_html(Some(&plot_id));
                         writer.write_all(fragment.as_bytes())?;
@@ -158,12 +158,7 @@ pub struct CohortReportInputs<'a> {
 
 pub fn generate_cohort_html_report(path: &Path, inputs: CohortReportInputs<'_>) -> Result<()> {
     let title = format!("4C cohort analysis — {}", inputs.comparison.name);
-    let mut report = Report::new(
-        "4C Cohort Explorer",
-        env!("CARGO_PKG_VERSION"),
-        None,
-        &title,
-    );
+    let mut report = Report::new("4C Insight", env!("CARGO_PKG_VERSION"), None, &title);
 
     report.add_section(build_overview_section(&inputs));
     if let Some(mapping) = inputs.mapping {
@@ -1526,7 +1521,7 @@ mod tests {
         )
         .unwrap();
         let html = std::fs::read_to_string(path).unwrap();
-        assert!(html.contains("4C Cohort Explorer"));
+        assert!(html.contains("4C Insight"));
         assert!(html.contains("Gene expression"));
         assert!(html.contains("TEST1"));
         assert!(html.contains("Gene: TEST1"));
@@ -1603,12 +1598,7 @@ pub fn generate_corrected_html_report(
     inputs: CorrectedReportInputs<'_>,
 ) -> Result<()> {
     let title = format!("4C corrected cohort analysis — {}", inputs.comparison.name);
-    let mut report = Report::new(
-        "4C Cohort Explorer",
-        env!("CARGO_PKG_VERSION"),
-        None,
-        &title,
-    );
+    let mut report = Report::new("4C Insight", env!("CARGO_PKG_VERSION"), None, &title);
     let subject = inputs.spec.subject_column.as_deref().unwrap_or("none");
     let covariates = if inputs.spec.covariates.is_empty() {
         "none".to_string()
@@ -2497,12 +2487,7 @@ pub fn generate_focused_candidate_html_report(
         "4C focused candidate signals — {} vs {}",
         summary.case_label, summary.control_label
     );
-    let mut report = Report::new(
-        "4C Cohort Explorer",
-        env!("CARGO_PKG_VERSION"),
-        None,
-        &title,
-    );
+    let mut report = Report::new("4C Insight", env!("CARGO_PKG_VERSION"), None, &title);
 
     let mut overview = ReportSection::new("Overview");
     overview.add_content(html!{
@@ -2674,12 +2659,7 @@ where
         "4C cohort analysis — {} — full report",
         run.primary.comparison.name
     );
-    let mut report = Report::new(
-        "4C Cohort Explorer",
-        env!("CARGO_PKG_VERSION"),
-        None,
-        &title,
-    );
+    let mut report = Report::new("4C Insight", env!("CARGO_PKG_VERSION"), None, &title);
     let subject = run
         .settings
         .corrected
@@ -2952,7 +2932,7 @@ where
 
     let mut limitations = ReportSection::new("Warnings, assumptions, and limitations");
     limitations.add_content(html! {
-        p { "4C Cohort Explorer supports discovery, robustness assessment, and candidate prioritization. Results are preliminary and must not be described as validated clinical biomarkers without independent replication/validation." }
+        p { "4C Insight supports discovery, robustness assessment, and candidate prioritization. Results are preliminary and must not be described as validated clinical biomarkers without independent replication/validation." }
         p { "The native expression model does not reproduce the full empirical-Bayes/dispersion-shrinkage machinery of DESeq2, edgeR, or limma-voom. Interpret model-specific effects and uncertainty accordingly." }
         @if run.warnings.is_empty() {
             p { "No additional run warnings were recorded." }
@@ -2985,12 +2965,7 @@ pub fn generate_unified_simplified_html_report(
         "4C key findings — {} vs {}",
         run.primary.comparison.case_label, run.primary.comparison.control_label
     );
-    let mut report = Report::new(
-        "4C Cohort Explorer",
-        env!("CARGO_PKG_VERSION"),
-        None,
-        &title,
-    );
+    let mut report = Report::new("4C Insight", env!("CARGO_PKG_VERSION"), None, &title);
 
     let top_gene = run.candidates.genes.first();
     let mut overview = ReportSection::new("Comparison and main takeaway");
@@ -3174,8 +3149,8 @@ fn build_unified_analysis_documentation(run: &UnifiedCohortAnalysisRun) -> Repor
     section.add_content(html! {
         p {
             "This appendix is intentionally written for readers who are not expected to know the statistical terminology in advance. "
-            "The GUI Docs workspace and both unified HTML report styles use the same canonical explanations and toy examples below. "
-            "The desktop guide has a built-in search box; in this HTML report, use the browser's Find command and open the relevant expandable section. "
+            "The 4C Insight Docs workflow and both unified HTML report styles use the same canonical explanations and toy examples below. "
+            "The in-app guide provides searchable documentation; in this HTML report, use the browser's Find command and open the relevant expandable section. "
             "The first block records the values used for this completed run; the expandable sections then explain what those values and outputs mean with small illustrative plots."
         }
         h3 { "Settings used in this completed run" }

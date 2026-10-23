@@ -1,5 +1,5 @@
-//! Shared 4C input filename conventions used by native project scanning, the
-//! local web server, and the WASM browser preflight.
+//! Shared 4C input filename conventions used by local input adapters and the
+//! WASM browser preflight.
 //!
 //! These helpers only classify names. They never authorize access, choose a
 //! storage path, or replace content validation/mapping.
@@ -43,7 +43,7 @@ pub struct FilenameInputClassification {
 }
 
 /// Classify a filename using the same exact sample-workbook suffix conventions
-/// used by the native desktop project scanner, plus the native merged-TSV and
+/// used by the established 4C sample naming rules, plus the merged-TSV and
 /// metadata-candidate conventions.
 pub fn classify_input_filename(name: &str) -> Option<FilenameInputClassification> {
     let canonical_name = strip_xlsx_copy_suffix(name);

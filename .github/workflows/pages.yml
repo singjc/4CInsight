@@ -1,0 +1,62 @@
+name: deploy-4c-insight-pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'wasm/**'
+      - 'src/input_conventions.rs'
+      - '.github/workflows/pages.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      - name: Build Rust/WASM bridge into static site
+        run: |
+          wasm-pack build wasm \
+            --target web \
+            --out-dir ../app/wasm \
+            --out-name four_c_insight_wasm \
+            --release
+      - name: Check local-first browser contract
+        run: node --test app/tests/*.test.mjs
+      - name: Check JavaScript syntax
+        run: |
+          node --check app/main.js
+          node --check app/analysis-worker.js
+          node --check app/file-classifier.js
+          node --check app/save.js
+          node --check app/coi-serviceworker.js
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: app
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy 4C Insight
+        id: deployment
+        uses: actions/deploy-pages@v4

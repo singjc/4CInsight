@@ -1,6 +1,6 @@
 # Standard multi-omics sample metadata
 
-4C Cohort Explorer v0.16.27 defines a standard **one-row-per-biological-sample** metadata table. The table is intentionally a plain UTF-8 TSV so it can be edited in Excel/LibreOffice/R/Python or curated inside the desktop app's **Metadata Builder** tab.
+4C Insight v0.17.0 defines a standard **one-row-per-biological-sample** metadata table. The table is intentionally a plain UTF-8 TSV so it can be edited in Excel/LibreOffice/R/Python or curated with a local metadata editor.
 
 ## Core rules
 
@@ -17,7 +17,7 @@
 
 The standard 4C template convention remains `sample_id = biological observation/specimen` and `subject_id = participant/patient`. Imported collaborator metadata does **not** have to follow those literal names.
 
-For the dedicated **Longitudinal patient-signature clustering** workflow, the GUI provides dropdowns for:
+For the dedicated **Longitudinal patient-signature clustering** workflow, the workflow provides dropdowns for:
 
 - the observation / longitudinal sample ID column;
 - the stable patient / person ID column;
@@ -26,7 +26,7 @@ For the dedicated **Longitudinal patient-signature clustering** workflow, the GU
 
 The selected roles, not the header spelling, define the analysis. For example, a collaborator sheet in which `subject_id` identifies each longitudinal specimen while `sample_id` identifies the person can be analyzed by selecting `subject_id` as **Observation / longitudinal sample ID** and `sample_id` as **Patient / person ID**. There is no requirement to rewrite the collaborator's headers.
 
-If the selected QC/review column contains a value named `Failed`, the desktop UI automatically proposes `Failed` for exclusion; the user can add/remove any distinct status values before running. The completed run freezes the chosen role mapping and excluded values into the result/report provenance.
+If the selected QC/review column contains a value named `Failed`, the UI can automatically propose `Failed` for exclusion; the user can add/remove any distinct status values before running. The completed run freezes the chosen role mapping and excluded values into the result/report provenance.
 
 ## Cross-modality identifiers
 
@@ -40,7 +40,7 @@ The canonical `sample_id` should represent the biological sample. If an upstream
 - `tcr_beta_id`
 - `immune_infiltrate_id`
 
-4C Cohort Explorer resolves these aliases back to the canonical `sample_id`. Aliases therefore do not create additional biological observations or inflate case/control counts.
+4C Insight resolves these aliases back to the canonical `sample_id`. Aliases therefore do not create additional biological observations or inflate case/control counts.
 
 ## Custom comparisons
 

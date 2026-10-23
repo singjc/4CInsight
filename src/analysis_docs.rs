@@ -1,6 +1,6 @@
 //! Canonical plain-language documentation for cohort-analysis methods.
 //!
-//! The GUI and both unified HTML report styles render these same sections so
+//! The application and both unified HTML report styles render these same sections so
 //! interpretation language does not drift between user-facing surfaces.
 
 #[derive(Debug, Clone, Copy)]
@@ -1097,7 +1097,7 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
                 title: "How the foreground and background are defined",
                 paragraphs: &[
                     "The background/universe is the set of gene symbols that passed expression filtering and received a corrected gene test. This is preferable to using every gene in the genome because only tested genes had a chance to enter the foreground.",
-                    "The foreground contains tested genes meeting both a q-value threshold and an absolute adjusted log2 fold-change threshold. The GUI defaults are q<=0.05 and |adjusted log2FC|>=0.5, but the run stores the exact user-selected thresholds.",
+                    "The foreground contains tested genes meeting both a q-value threshold and an absolute adjusted log2 fold-change threshold. The application defaults are q<=0.05 and |adjusted log2FC|>=0.5, but the run stores the exact user-selected thresholds.",
                 ],
                 bullets: &[
                     "Only GMT sets with 10 to 500 genes overlapping the measured universe are tested.",
@@ -1462,7 +1462,7 @@ pub static ANALYSIS_DOC_SECTIONS: &[AnalysisDocSection] = &[
     },
     AnalysisDocSection {
         title: "Statistical glossary: common terms in the results",
-        summary: "This glossary translates the recurring statistical terms into the specific role they play in 4C Cohort Explorer.",
+        summary: "This glossary translates the recurring statistical terms into the specific role they play in 4C Insight.",
         default_open: false,
         examples: &[
             AnalysisDocToyExample {

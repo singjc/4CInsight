@@ -2,7 +2,7 @@
 //!
 //! This module intentionally separates the original exploratory screens from a
 //! second, more rigorous analysis layer.  It implements common building blocks
-//! directly in Rust so the desktop application stays self contained:
+//! directly in Rust so the scientific engine stays self contained:
 //!
 //! - count normalization by DESeq2-style positive-count median ratios;
 //! - covariate-adjusted NB2 GLMs for RNA counts plus robust repeated-measure inference;
@@ -4014,7 +4014,7 @@ fn parse_repertoire_file_with_audit<F>(
 where
     F: FnMut(&str),
 {
-    // The server and desktop both enter this exact parser. The audit callbacks
+    // All orchestration paths enter this exact parser. The audit callbacks
     // deliberately bracket XLSX materialization, row scanning, worksheet
     // destruction, and compact-store finalization so a stale "parsing sample"
     // message cannot hide allocator work at one of those boundaries.
@@ -4309,8 +4309,8 @@ pub(crate) fn parse_repertoire_qc_metrics(
     // previous implementation used the full corrected parser, allocating and
     // destroying exact clonotype arenas, V/J composition maps, nucleotide
     // convergence state, and hash tables for every repertoire file immediately
-    // before the server reparsed the same inputs for corrected analysis. That
-    // is unnecessary allocator churn and is a concrete server/native lifecycle
+    // before the same inputs were reparsed for corrected analysis. That
+    // is unnecessary allocator churn and is a concrete orchestration lifecycle
     // difference because frozen web jobs run QC immediately before unified
     // science. Keep this preflight parser intentionally minimal.
     let mut workbook: Xlsx<_> =
@@ -6102,7 +6102,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn proc_status_memory_parser_extracts_kib_values() {
-        let status = "Name:\tcfs-server\nVmPeak:\t  123456 kB\nVmSize:\t  120000 kB\nVmRSS:\t   64000 kB\nVmSwap:\t    8192 kB\nMemAvailable:\t 2048000 kB\nSwapFree:\t 1024000 kB\n";
+        let status = "Name:\tfour-c-insight\nVmPeak:\t  123456 kB\nVmSize:\t  120000 kB\nVmRSS:\t   64000 kB\nVmSwap:\t    8192 kB\nMemAvailable:\t 2048000 kB\nSwapFree:\t 1024000 kB\n";
         assert_eq!(proc_status_kib(status, "VmRSS:"), Some(64_000));
         assert_eq!(proc_status_kib(status, "VmSize:"), Some(120_000));
         assert_eq!(proc_status_kib(status, "VmPeak:"), Some(123_456));

@@ -1655,7 +1655,7 @@ pub fn write_pbmc_diagnostics_tables(
         )?;
     }
     let notes = format!(
-        "4C Cohort Explorer PBMC/confounding diagnostics\nComparison: {}\n\nThese outputs are diagnostic. Automatic PCA or immune-signature outlier flags are not proof that a sample is invalid. Review provenance, sample type, processing history, longitudinal consistency, and the raw expression distributions before making final exclusion decisions.\n",
+        "4C Insight PBMC/confounding diagnostics\nComparison: {}\n\nThese outputs are diagnostic. Automatic PCA or immune-signature outlier flags are not proof that a sample is invalid. Review provenance, sample type, processing history, longitudinal consistency, and the raw expression distributions before making final exclusion decisions.\n",
         result.comparison.name
     );
     fs::write(output_dir.join("README.txt"), notes)?;

@@ -326,7 +326,7 @@ pub struct UnifiedCohortAnalysisRun {
 
 /// Borrowed view of the completed primary corrected/modal analysis before
 /// optional PBMC/confounding sensitivity diagnostics run. This checkpoint is
-/// presentation-only: it lets the web server expose already-final primary
+/// presentation-only: it lets a caller expose already-final primary
 /// cohort results without duplicating or cloning the large native result.
 pub struct UnifiedPrimaryCheckpoint<'a> {
     pub cohort: &'a CohortDefinitionSnapshot,
@@ -395,7 +395,7 @@ where
 /// checkpoint as soon as the primary corrected modalities/pathway result is
 /// final, before optional exploratory TPM direction checks and PBMC/confounding
 /// sensitivity refits.
-/// The ordinary native/desktop entry point above remains behaviorally
+/// The ordinary synchronous entry point above remains behaviorally
 /// identical and simply ignores this checkpoint.
 pub fn run_unified_cohort_analysis_with_primary_checkpoint<F, G>(
     scan: &ProjectScan,
@@ -1565,7 +1565,7 @@ where
         ),
     };
     let mut summary = format!(
-        "4C Cohort Explorer unified analysis\nComparison: {}\nComparison definition: {}\nCase: {}\nControl: {}\nMetadata: {}\nFiltered metadata subset: {}\nSubject column: {}\nCovariates: {}\n",
+        "4C Insight unified analysis\nComparison: {}\nComparison definition: {}\nCase: {}\nControl: {}\nMetadata: {}\nFiltered metadata subset: {}\nSubject column: {}\nCovariates: {}\n",
         run.primary.comparison.name,
         comparison_definition,
         run.primary.comparison.case_label,

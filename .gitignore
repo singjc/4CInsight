@@ -1,0 +1,5 @@
+/target/
+/wasm/target/
+/app/wasm/
+.DS_Store
+*.log

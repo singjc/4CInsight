@@ -1,4 +1,4 @@
-# 4C Cohort Explorer analysis guide
+# 4C Insight analysis guide
 
 This guide explains the current unified **Cohort Analysis** workflow in plain language. The application is intended for cohort QC, robust discovery, candidate prioritization, and transparent sensitivity analysis. It does **not** by itself establish a clinically validated biomarker.
 
@@ -18,15 +18,13 @@ The **corrected / standard analysis is the primary inferential engine**. Cross-m
 
 Both HTML report styles and the technical table export are generated from the **same frozen completed analysis run**. Exporting a different report does not rerun statistics or change sample inclusion.
 
-### Browser availability (v0.16.1 Phase 2)
+### 4C Insight WASM migration
 
-The repository now also contains a browser/WASM preview under `web/`. The browser build reuses this canonical analysis documentation, but it does **not** run the scientific analysis locally in WebAssembly. In Phase 2, Docs and browser interaction shells are available while native-data actions remain disabled. The production-capable analysis path is still the desktop `LocalBackend`.
+From v0.17.0, the primary product is the local-first 4C Insight web application. Users select files from their own computer; the target scientific execution path is Rust/WebAssembly in browser workers, with results saved locally. The existing Rust scientific implementation remains authoritative while each workflow is moved behind browser-safe byte/reader APIs and native/WASM parity tests. See `docs/wasm_architecture.md` and `docs/wasm_development.md`.
 
-For exact browser build/run instructions and the Phase-3 local-server boundary, see `docs/web_development.md`.
+### Searchable visual in-app and report documentation
 
-### Searchable visual in-app and report documentation (v0.15.4)
-
-The desktop **Docs** workspace now contains a much more detailed method-and-interpretation reference intended for readers without a statistics background. The same canonical reference is embedded in both the simplified and full unified HTML reports. The report version also begins with the exact settings used for that completed run (expression support thresholds, covariates/subject handling, repertoire rarefaction and ambiguity policy, composition thresholds/pseudocount, PERMANOVA permutations, pathway thresholds, QC rule, and diagnostic thresholds).
+The **Docs** workflow contains a detailed method-and-interpretation reference intended for readers without a statistics background. The same canonical reference is embedded in both the simplified and full unified HTML reports. The report version also begins with the exact settings used for that completed run (expression support thresholds, covariates/subject handling, repertoire rarefaction and ambiguity policy, composition thresholds/pseudocount, PERMANOVA permutations, pathway thresholds, QC rule, and diagnostic thresholds).
 
 A particularly important repertoire clarification is that **BCR/TCR clonality is a per-sample summary**. For each sample the app calculates Shannon entropy from the complete clonotype abundance distribution and then computes `1 - Shannon / ln(observed richness)`. Each sample therefore has one clonality value. The adjusted Case-versus-Control model then compares those sample-level clonality values. Clonality is not calculated separately for each V gene or each individual clonotype; V/D/J/V-J composition tests are separate CLR/Aitchison analyses.
 
@@ -35,14 +33,14 @@ The in-app/report guide also explains, in implementation-specific terms, raw-cou
 The Docs workspace now has a case-insensitive search box. When a search term is present, non-matching sections/subsections are hidden and matching sections open automatically. Search also covers the educational examples and chart labels, so a reader can type a concept such as `clonality`, `q value`, `PCA`, `outlier`, `pathway`, `DTU`, or `covariate` rather than scanning the full guide.
 Only the introductory **Start here** section is expanded by default; the larger method sections remain collapsed until the reader opens them or a search matches them.
 
-Each major documentation section also has one or more fixed **toy examples** with synthetic values, small plots, numbered walkthroughs, and one-sentence takeaways. These examples are teaching aids only: they are not sampled from the current cohort, never enter a statistical model, and are visually labelled as illustrative. The same example definitions are rendered with `egui_plot` in the GUI and as inline self-contained SVG figures in both HTML report styles.
+Each major documentation section also has one or more fixed **toy examples** with synthetic values, small plots, numbered walkthroughs, and one-sentence takeaways. These examples are teaching aids only: they are not sampled from the current cohort, never enter a statistical model, and are visually labelled as illustrative. The same example definitions can be rendered in the in-app documentation and as inline self-contained SVG figures in both HTML report styles.
 
 The v0.15.4 documentation pass makes the examples more sample-oriented and adds dedicated visual explainers for several statistics that are otherwise difficult to understand from prose alone: **normalized Shannon diversity versus clonality, matched-depth rarefaction, Morisita-Horn versus Jaccard similarity, Aitchison/CLR geometry, PERMANOVA pseudo-F permutations, Benjamini-Hochberg q-value adjustment, hypergeometric pathway ORA, PCA variance explained, and PCA feature loadings**. The Docs-only categorical tick formatter is also stricter so grouped toy bars no longer repeat the same x-axis label around offset bar positions.
 
 
 ## 1. Cohort & metadata
 
-Start by choosing the project folder and loading the primary sample metadata table.
+Start in the **Project** workflow by selecting local cohort files or a local folder and identifying the primary sample metadata table.
 
 The app recursively detects the supported data types and merged expression matrices. Sample IDs are matched with the same punctuation-insensitive normalization used throughout the project, and the sample-ID metadata column can be selected explicitly.
 
@@ -322,7 +320,7 @@ When a subject/patient column is available, repeated samples can be summarized b
 
 ## 5. Unified results
 
-One completed run owns the result/provenance required by all views and exports. The GUI groups the output into:
+One completed run owns the result/provenance required by all views and exports. The Results workflow groups the output into:
 
 - Overview / key findings,
 - Gene,
@@ -395,7 +393,7 @@ The technical export writes the mapping/QC provenance and selected corrected/dia
 
 The unified analysis can optionally run a dedicated **all-QC-eligible-sample longitudinal clustering** analysis that is independent of the selected Case/Control comparison. This is intended for questions such as whether repeated samples from the same person retain a stable molecular signature over time and which available data type preserves that identity most strongly.
 
-The metadata roles are selected explicitly in the GUI and are **not inferred from fixed column names**:
+The metadata roles are selected explicitly in the workflow and are **not inferred from fixed column names**:
 
 - **Observation / longitudinal sample ID** — the identifier that matches the expression matrix column or modality filename for each actual specimen/visit.
 - **Patient / person ID** — the stable identifier shared by repeated observations from one individual.
@@ -456,7 +454,7 @@ Silhouette and nearest-neighbour accuracy are also **post-selection descriptive 
 
 If only one feature passes the configured threshold, the app keeps the feature in the selected-hit export but deliberately omits PCA/dendrograms because a multivariate visualization would be misleading.
 
-The GUI has a separate **Significant-hit structure** result tab with PCA, dendrogram, and a clustered selected-hit heatmap preview for each successful panel. The **full report** contains the complete cross-panel summary, selected-feature tables, PCA plots, dendrograms, and clustered heatmaps for every successful panel. The **simplified report** contains the cross-panel summary plus a representative panel with the strongest observed silhouette, including its PCA, dendrogram, and heatmap, while retaining the post-selection warning. Technical exports are written under `significant_hit_structure/` and include:
+4C Insight has a separate **Significant Hits** workflow with PCA, dendrogram, and a clustered selected-hit heatmap preview for each successful panel. The **full report** contains the complete cross-panel summary, selected-feature tables, PCA plots, dendrograms, and clustered heatmaps for every successful panel. The **simplified report** contains the cross-panel summary plus a representative panel with the strongest observed silhouette, including its PCA, dendrogram, and heatmap, while retaining the post-selection warning. Technical exports are written under `significant_hit_structure/` and include:
 
 - `summary.tsv`;
 - exact selected-feature tables;
@@ -524,4 +522,4 @@ Each point is a pathway. Stronger statistical support appears higher in the plot
 
 ## Practical note
 
-4C Cohort Explorer is intended to help with transparent discovery, QC, robustness assessment, and interpretation. It does not replace independent validation, domain-specific clinical interpretation, or a full study-design discussion.
+4C Insight is intended to help with transparent discovery, QC, robustness assessment, and interpretation. It does not replace independent validation, domain-specific clinical interpretation, or a full study-design discussion.

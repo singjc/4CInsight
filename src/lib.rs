@@ -1,6 +1,5 @@
 pub mod analysis;
 pub mod analysis_docs;
-pub mod backend;
 pub mod cohort;
 pub mod corrected;
 pub mod diagnostics;
@@ -12,8 +11,6 @@ pub mod longitudinal;
 pub mod metadata;
 pub mod outliers;
 pub mod report;
-pub mod ui_theme;
-pub mod web_server;
 
 use anyhow::{Context, Result, anyhow, bail};
 use calamine::{Data, Range, Reader, Xlsx, open_workbook};
@@ -173,7 +170,7 @@ pub struct EntityCatalogEntry {
     pub gene_symbol: String,
 }
 
-/// Per-sample summary used by the GUI QC distribution plots.
+/// Per-sample summary used by interactive QC distribution plots.
 #[derive(Debug, Clone)]
 pub struct SampleDistributionSummary {
     pub sample: String,
