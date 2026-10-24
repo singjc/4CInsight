@@ -27,6 +27,7 @@ use csv::ReaderBuilder;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -101,7 +102,7 @@ impl Default for CorrectedModelSpec {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AdjustedFeatureResult {
     pub feature: String,
     pub secondary_id: String,
@@ -122,7 +123,7 @@ pub struct AdjustedFeatureResult {
     pub method: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OrdinationPoint {
     pub sample_id: String,
     pub group: String,
@@ -131,7 +132,7 @@ pub struct OrdinationPoint {
     pub y: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OrdinationResult {
     pub name: String,
     pub x_label: String,
@@ -142,7 +143,7 @@ pub struct OrdinationResult {
     pub permutations: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DendrogramLeaf {
     pub sample_id: String,
     pub group: String,
@@ -150,7 +151,7 @@ pub struct DendrogramLeaf {
     pub position: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DendrogramSegment {
     pub x1: f64,
     pub y1: f64,
@@ -158,7 +159,7 @@ pub struct DendrogramSegment {
     pub y2: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DendrogramResult {
     pub name: String,
     pub distance_label: String,
@@ -175,7 +176,7 @@ pub(crate) struct UnsupervisedDistanceMatrix {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DtuGeneResult {
     pub gene_id: String,
     pub n_transcripts: usize,
@@ -184,7 +185,7 @@ pub struct DtuGeneResult {
     pub max_abs_clr_effect: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CorrectedDtuResult {
     pub genes_tested: usize,
     pub transcripts_tested: usize,
@@ -193,7 +194,7 @@ pub struct CorrectedDtuResult {
     pub method_description: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CorrectedExpressionResult {
     pub input: PathBuf,
     pub feature_label: String,
@@ -1142,6 +1143,53 @@ fn model_expression_batch_parallel(
     ))
 }
 
+#[derive(Clone, Copy)]
+enum ExpressionInput<'a> {
+    Path(&'a Path),
+    Bytes { name: &'a str, bytes: &'a [u8] },
+}
+
+impl<'a> ExpressionInput<'a> {
+    fn reader(self) -> Result<csv::Reader<Box<dyn Read + 'a>>> {
+        let input: Box<dyn Read + 'a> = match self {
+            Self::Path(path) => Box::new(
+                fs::File::open(path)
+                    .with_context(|| format!("Could not open {}", path.display()))?,
+            ),
+            Self::Bytes { bytes, .. } => Box::new(Cursor::new(bytes)),
+        };
+        Ok(ReaderBuilder::new()
+            .delimiter(b'\t')
+            .flexible(true)
+            .from_reader(input))
+    }
+
+    fn units(self) -> Result<usize> {
+        let bytes = match self {
+            Self::Path(path) => fs::metadata(path)
+                .with_context(|| format!("Could not stat {}", path.display()))?
+                .len(),
+            Self::Bytes { bytes, .. } => bytes.len() as u64,
+        }
+        .max(1);
+        Ok(usize::try_from(bytes).unwrap_or(usize::MAX / 4).max(1))
+    }
+
+    fn input_path(self) -> PathBuf {
+        match self {
+            Self::Path(path) => path.to_path_buf(),
+            Self::Bytes { name, .. } => PathBuf::from(name),
+        }
+    }
+
+    fn display_name(self) -> String {
+        match self {
+            Self::Path(path) => path.display().to_string(),
+            Self::Bytes { name, .. } => name.to_string(),
+        }
+    }
+}
+
 pub fn run_corrected_expression<F>(
     merged_tsv: &Path,
     metadata: &MetadataTable,
@@ -1178,16 +1226,76 @@ pub fn run_corrected_expression_with_reference<F>(
     feature_label: &str,
     spec: &CorrectedModelSpec,
     normalization_reference: Option<&CorrectedExpressionResult>,
+    progress: F,
+) -> Result<CorrectedExpressionResult>
+where
+    F: FnMut(usize, usize, &str),
+{
+    run_corrected_expression_source(
+        ExpressionInput::Path(merged_tsv),
+        metadata,
+        comparison,
+        source_metric,
+        feature_label,
+        spec,
+        normalization_reference,
+        progress,
+    )
+}
+
+/// Browser-safe corrected expression entry point.
+///
+/// This executes the same normalization, adjusted NB2 model, ordination,
+/// dendrogram, and transcript DTU code as [`run_corrected_expression`], but
+/// reads the merged TSV from an in-memory byte slice instead of a filesystem
+/// path. It is the authoritative WASM path for expression group comparison.
+pub fn run_corrected_expression_bytes<F>(
+    input_name: &str,
+    merged_tsv_bytes: &[u8],
+    metadata: &MetadataTable,
+    comparison: &CohortComparison,
+    source_metric: &str,
+    feature_label: &str,
+    spec: &CorrectedModelSpec,
+    progress: F,
+) -> Result<CorrectedExpressionResult>
+where
+    F: FnMut(usize, usize, &str),
+{
+    run_corrected_expression_source(
+        ExpressionInput::Bytes {
+            name: input_name,
+            bytes: merged_tsv_bytes,
+        },
+        metadata,
+        comparison,
+        source_metric,
+        feature_label,
+        spec,
+        None,
+        progress,
+    )
+}
+
+fn run_corrected_expression_source<'a, F>(
+    source: ExpressionInput<'a>,
+    metadata: &MetadataTable,
+    comparison: &CohortComparison,
+    source_metric: &str,
+    feature_label: &str,
+    spec: &CorrectedModelSpec,
+    normalization_reference: Option<&CorrectedExpressionResult>,
     mut progress: F,
 ) -> Result<CorrectedExpressionResult>
 where
     F: FnMut(usize, usize, &str),
 {
-    let mut header_reader = ReaderBuilder::new()
-        .delimiter(b'\t')
-        .flexible(true)
-        .from_path(merged_tsv)
-        .with_context(|| format!("Could not open {}", merged_tsv.display()))?;
+    let mut header_reader = source.reader().with_context(|| {
+        format!(
+            "Could not open merged {feature_label} input {}",
+            source.display_name()
+        )
+    })?;
     let headers = header_reader.headers()?.clone();
     let suffix = format!(" {source_metric}");
     let mut header_cols: BTreeMap<String, (String, usize)> = BTreeMap::new();
@@ -1225,11 +1333,7 @@ where
     // matrix solely to count rows. The old row-count pass was an extra full
     // CSV/TSV parse before normalization/modeling and was particularly costly
     // for transcript-scale matrices with hundreds of sample columns.
-    let file_bytes = fs::metadata(merged_tsv)
-        .with_context(|| format!("Could not stat {}", merged_tsv.display()))?
-        .len()
-        .max(1);
-    let file_units = usize::try_from(file_bytes).unwrap_or(usize::MAX / 4).max(1);
+    let file_units = source.units()?;
     let is_transcript = feature_label.eq_ignore_ascii_case("Transcript");
     // Gene: normalization + feature models. Transcript: those two passes plus
     // the two DTU matrix passes. Saturating arithmetic keeps progress robust
@@ -1260,10 +1364,7 @@ where
         // Pass 1: DESeq2-style `poscounts` median-ratio size factors. P² keeps the
         // median estimate bounded-memory even for transcript-scale matrices.
         let mut medians = vec![P2Median::new(); design_cols.len()];
-        let mut pass1 = ReaderBuilder::new()
-            .delimiter(b'\t')
-            .flexible(true)
-            .from_path(merged_tsv)?;
+        let mut pass1 = source.reader()?;
         let mut record = csv::StringRecord::new();
         let mut row_idx = 0usize;
         while pass1.read_record(&mut record)? {
@@ -1324,10 +1425,7 @@ where
     let mut tests = Vec::new();
     let mut filtered = 0usize;
     let mut top_variable: Vec<VariableRow> = Vec::new();
-    let mut pass2 = ReaderBuilder::new()
-        .delimiter(b'\t')
-        .flexible(true)
-        .from_path(merged_tsv)?;
+    let mut pass2 = source.reader()?;
     const MODEL_BATCH_ROWS: usize = 4096;
     let mut work_batch = Vec::with_capacity(MODEL_BATCH_ROWS);
     let mut modeled_rows = 0usize;
@@ -1414,25 +1512,19 @@ where
             total_work,
             "Transcript: DTU gene-total pass",
         );
-        match run_dtu_screen(
-            merged_tsv,
-            &design_cols,
-            &design,
-            spec,
-            |done, total, msg| {
-                let denom = total.max(1);
-                let dtu_span = file_units.saturating_mul(2);
-                let scaled = done.saturating_mul(dtu_span) / denom;
-                progress(
-                    file_units
-                        .saturating_mul(2)
-                        .saturating_add(scaled)
-                        .min(total_work),
-                    total_work,
-                    msg,
-                );
-            },
-        ) {
+        match run_dtu_screen_source(source, &design_cols, &design, spec, |done, total, msg| {
+            let denom = total.max(1);
+            let dtu_span = file_units.saturating_mul(2);
+            let scaled = done.saturating_mul(dtu_span) / denom;
+            progress(
+                file_units
+                    .saturating_mul(2)
+                    .saturating_add(scaled)
+                    .min(total_work),
+                total_work,
+                msg,
+            );
+        }) {
             Ok(result) => Some(result),
             Err(_) => None,
         }
@@ -1458,7 +1550,7 @@ where
         &format!("{feature_label}: corrected analysis complete"),
     );
     Ok(CorrectedExpressionResult {
-        input: merged_tsv.to_path_buf(),
+        input: source.input_path(),
         feature_label: feature_label.to_string(),
         source_metric: source_metric.to_string(),
         normalization: "Positive-count median-ratio size factors; count models include a log(size-factor) offset".to_string(),
@@ -1482,8 +1574,8 @@ where
     })
 }
 
-fn run_dtu_screen<F>(
-    merged_tsv: &Path,
+fn run_dtu_screen_source<'a, F>(
+    source: ExpressionInput<'a>,
     design_cols: &[usize],
     design: &DesignMatrix,
     spec: &CorrectedModelSpec,
@@ -1495,20 +1587,13 @@ where
     let n = design_cols.len();
     let pseudo = 0.5_f64;
     let min_present = ((n as f64 * spec.min_fraction_samples).ceil() as usize).max(3);
-    let file_bytes = fs::metadata(merged_tsv)
-        .with_context(|| format!("Could not stat {}", merged_tsv.display()))?
-        .len()
-        .max(1);
-    let file_units = usize::try_from(file_bytes).unwrap_or(usize::MAX / 2).max(1);
+    let file_units = source.units()?;
     let total_work = file_units.saturating_mul(2).max(1);
     let mut transcript_counts: HashMap<String, usize> = HashMap::new();
     let mut gene_totals: HashMap<String, Vec<f64>> = HashMap::new();
     let mut gene_log_sums: HashMap<String, Vec<f64>> = HashMap::new();
 
-    let mut reader = ReaderBuilder::new()
-        .delimiter(b'\t')
-        .flexible(true)
-        .from_path(merged_tsv)?;
+    let mut reader = source.reader()?;
     let mut record = csv::StringRecord::new();
     let mut rows_seen = 0usize;
     while reader.read_record(&mut record)? {
@@ -1558,10 +1643,7 @@ where
 
     let mut transcript_tests = Vec::new();
     let mut by_gene_p: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
-    let mut reader = ReaderBuilder::new()
-        .delimiter(b'\t')
-        .flexible(true)
-        .from_path(merged_tsv)?;
+    let mut reader = source.reader()?;
     let mut record = csv::StringRecord::new();
     let mut rows_seen_second = 0usize;
     while reader.read_record(&mut record)? {

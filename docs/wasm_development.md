@@ -76,3 +76,51 @@ node --test app/tests/*.test.mjs
 ```
 
 The root test suite includes `tests/w2_portable_parity.rs`. It compares metadata parsing and expression distribution statistics from the byte-oriented parser against the established native path reader on fixed fixtures.
+
+## W3 metadata-defined expression comparison
+
+W3 enables the **Compare Groups** workflow in the local browser application. The browser UI only manages file handles, metadata role selection, progress, rendering, and export. The scientific calculations remain in shared Rust.
+
+The browser sends the selected metadata file and one selected merged expression table at a time to the Web Worker. The worker converts the local `File` to bytes and calls the Rust/WASM bridge. No selected cohort data are sent with `fetch` or an analysis API.
+
+The user selects these metadata roles independently:
+
+- expression/sample ID column;
+- grouping column and one or more Case values;
+- one or more Control values;
+- optional patient/subject column for repeated measures;
+- optional model covariates.
+
+Two independent metadata exclusion rules are available. One is labelled for reviewed QC status and the other is a general custom metadata exclusion. Each rule uses a user-selected column and one or more observed values. Matching rows are removed before cohort construction and model fitting.
+
+Gene comparison uses `Raw Count` columns. Transcript comparison uses `Total Reads` columns. Both use the established corrected-expression engine: positive-count median-ratio normalization, the corrected negative-binomial group model, BH adjustment, global PCA, and average-linkage hierarchical clustering. Transcript comparison also runs the existing transcript-usage screen.
+
+W3 adds a byte-oriented entry point to `src/corrected.rs`; it is a different input source for the same model code, not a second statistical implementation.
+
+### W3 parity validation
+
+After applying W3, regenerate the root and WASM lockfiles because the package version changes:
+
+```bash
+cargo generate-lockfile --offline
+(
+  cd wasm
+  cargo generate-lockfile --offline
+)
+```
+
+Then validate:
+
+```bash
+cargo fmt --all
+git diff --check
+cargo check --locked
+cargo test --locked
+cargo test --test w3_expression_compare_parity --locked
+cargo check --manifest-path wasm/Cargo.toml --locked
+cargo test --manifest-path wasm/Cargo.toml --locked
+cargo check --manifest-path wasm/Cargo.toml --locked --target wasm32-unknown-unknown
+node --test app/tests/*.test.mjs
+```
+
+`tests/w3_expression_compare_parity.rs` compares native path input and byte input for gene and transcript corrected analyses. It covers size factors, adjusted feature tests, PCA coordinates, dendrogram structure, transcript DTU output, and metadata-defined exclusion before model fitting.

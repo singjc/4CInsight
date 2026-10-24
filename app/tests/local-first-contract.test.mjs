@@ -33,3 +33,15 @@ test('W2 expression QC stays inside the worker and Rust/WASM bridge', async () =
   assert.match(worker, /await file\.arrayBuffer\(\)/)
   assert.equal(worker.includes('fetch('), false, 'analysis worker must not send selected data over the network')
 })
+
+test('W3 corrected group comparison stays inside the worker and shared Rust/WASM engine', async () => {
+  const main = await readFile(new URL('../main.js', import.meta.url), 'utf8')
+  const worker = await readFile(new URL('../analysis-worker.js', import.meta.url), 'utf8')
+  assert.match(main, /run-expression-comparison/)
+  assert.match(main, /metadata-column-values/)
+  assert.match(worker, /run_expression_comparison_json/)
+  assert.match(worker, /metadata_column_values_json/)
+  assert.match(main, /Custom metadata exclusion/)
+  assert.match(main, /Patient\/subject column for repeated measures/)
+  assert.equal(worker.includes('fetch('), false, 'W3 analysis worker must not send selected data over the network')
+})

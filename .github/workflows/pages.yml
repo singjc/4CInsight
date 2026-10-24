@@ -9,6 +9,10 @@ on:
       - 'wasm/**'
       - 'src/input_conventions.rs'
       - 'src/portable_io.rs'
+      - 'src/portable_compare.rs'
+      - 'src/corrected.rs'
+      - 'src/cohort.rs'
+      - 'src/metadata.rs'
       - '.github/workflows/pages.yml'
 
 permissions:

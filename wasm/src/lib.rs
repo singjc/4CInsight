@@ -3,13 +3,24 @@ use wasm_bindgen::prelude::*;
 
 #[path = "../../src/input_conventions.rs"]
 mod input_conventions;
+#[path = "../../src/cohort.rs"]
+mod cohort;
+#[path = "../../src/metadata.rs"]
+mod metadata;
+#[path = "../../src/corrected.rs"]
+mod corrected;
 #[path = "../../src/portable_io.rs"]
 mod portable_io;
+#[path = "../../src/portable_compare.rs"]
+mod portable_compare;
 
 use input_conventions::{FilenameInputKind, classify_input_filename};
+use portable_compare::{
+    PortableExpressionComparisonConfig, run_portable_expression_comparison,
+};
 use portable_io::{
     PortableExpressionKind, PortableExpressionMetric, inspect_metadata_bytes,
-    summarize_expression_bytes,
+    metadata_column_values_bytes, summarize_expression_bytes,
 };
 
 #[derive(Serialize)]
@@ -18,7 +29,7 @@ struct EngineInfo<'a> {
     package: &'a str,
     version: &'a str,
     execution: &'a str,
-    capabilities: [&'a str; 3],
+    capabilities: [&'a str; 5],
 }
 
 #[derive(Serialize)]
@@ -56,7 +67,13 @@ pub fn engine_info_json() -> String {
         package: env!("CARGO_PKG_NAME"),
         version: env!("CARGO_PKG_VERSION"),
         execution: "local-browser-wasm",
-        capabilities: ["filename-classification", "metadata", "expression-qc"],
+        capabilities: [
+            "filename-classification",
+            "metadata",
+            "expression-qc",
+            "metadata-grouping",
+            "corrected-expression-comparison",
+        ],
     })
     .expect("engine info serialization is infallible")
 }
@@ -113,6 +130,56 @@ pub fn summarize_expression_json(
     serde_json::to_string(&summary).map_err(js_error)
 }
 
+
+#[wasm_bindgen]
+pub fn metadata_column_values_json(
+    file_name: &str,
+    bytes: &[u8],
+    column: &str,
+) -> Result<String, JsValue> {
+    let values = metadata_column_values_bytes(file_name, bytes, column).map_err(js_error)?;
+    serde_json::to_string(&values).map_err(js_error)
+}
+
+fn run_expression_comparison_json_core(
+    metadata_file_name: &str,
+    metadata_bytes: &[u8],
+    merged_file_name: &str,
+    merged_bytes: &[u8],
+    config_json: &str,
+) -> Result<String, String> {
+    let config: PortableExpressionComparisonConfig =
+        serde_json::from_str(config_json).map_err(|error| error.to_string())?;
+    let result = run_portable_expression_comparison(
+        metadata_file_name,
+        metadata_bytes,
+        merged_file_name,
+        merged_bytes,
+        &config,
+        |_done, _total, _message| {},
+    )
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string(&result).map_err(|error| error.to_string())
+}
+
+#[wasm_bindgen]
+pub fn run_expression_comparison_json(
+    metadata_file_name: &str,
+    metadata_bytes: &[u8],
+    merged_file_name: &str,
+    merged_bytes: &[u8],
+    config_json: &str,
+) -> Result<String, JsValue> {
+    run_expression_comparison_json_core(
+        metadata_file_name,
+        metadata_bytes,
+        merged_file_name,
+        merged_bytes,
+        config_json,
+    )
+    .map_err(js_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +218,43 @@ mod tests {
         .unwrap();
         assert!(json.contains("\"sample\":\"S1\""));
         assert!(json.contains("\"median\":3.0"));
+    }
+
+
+    #[test]
+    fn w3_gene_comparison_runs_through_wasm_bridge() {
+        let metadata = include_bytes!("../../tests/fixtures/w3_metadata.tsv");
+        let merged = include_bytes!("../../tests/fixtures/w3_merged_gene_expression.tsv");
+        let config = serde_json::json!({
+            "kind": "gene-expression",
+            "metadataIdColumn": "sample_id",
+            "groupColumn": "analysis_group",
+            "caseValues": ["Case"],
+            "controlValues": ["Control"],
+            "comparisonName": "Case vs Control",
+            "caseLabel": "Case",
+            "controlLabel": "Control",
+            "subjectColumn": "patient_id",
+            "covariates": ["batch"],
+            "exclusions": [{
+                "enabled": true,
+                "label": "Reviewed QC",
+                "column": "qc_review_status",
+                "values": ["Failed"]
+            }],
+            "minCount": 10.0,
+            "minFractionSamples": 0.20
+        });
+        let json = run_expression_comparison_json_core(
+            "w3_metadata.tsv",
+            metadata,
+            "w3_merged_gene_expression.tsv",
+            merged,
+            &config.to_string(),
+        )
+        .unwrap();
+        assert!(json.contains("\"excluded_rows\":1"));
+        assert!(json.contains("\"n_model_samples\":7"));
+        assert!(json.contains("\"feature_label\":\"Gene\""));
     }
 }

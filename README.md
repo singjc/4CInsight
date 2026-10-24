@@ -22,20 +22,23 @@ HTML / TSV / ZIP / JSON saved locally
 
 The existing Rust scientific modules remain the reference implementation while they are migrated to browser-safe byte/reader APIs. Each migrated workflow must pass native/WASM parity tests before the UI enables it as production analysis.
 
-## Current W2 status
+## Current W3 status
 
-W1 established the static, local-first browser shell. W2 adds the first real browser scientific workflow and bumps the source version to **v0.18.0**:
+W1 established the static, local-first browser shell and W2 added metadata/expression QC. W3 bumps the source version to **v0.19.0** and enables metadata-defined gene/transcript group comparison in local Rust/WASM:
 
-- metadata tables (`.xlsx`, `.xls`, `.tsv`, `.txt`, `.csv`) are parsed from local bytes in Rust;
-- the sample-ID column is selectable from the detected metadata columns;
-- gene and transcript workbooks are processed locally in a Web Worker;
-- the Rust/WASM bridge calculates per-sample expression distribution QC for user-selected metrics;
-- source workbooks are read sequentially so browser memory is bounded to one active workbook plus WASM working memory;
-- Explore & QC shows sample-level mean, median, quartiles, zero fraction, and missing fraction;
-- QC results can be saved as a local JSON file;
-- fixed fixtures compare native path-based expression summaries with the byte-oriented parser used by WASM.
+- W2 metadata and per-sample gene/transcript expression QC remain available;
+- the sample/expression ID, patient/subject ID, grouping column, and adjustment covariates are selected by role rather than hardcoded names;
+- Case and Control can each contain one or more observed metadata values;
+- reviewed-QC exclusions and a separate arbitrary metadata column/value exclusion rule are applied before cohort construction;
+- gene comparison uses Raw Count columns and the established corrected NB2 expression model;
+- transcript comparison uses Total Reads columns and also runs the established transcript-usage screen;
+- repeated measures can use the selected patient/subject column for subject-clustered sandwich standard errors;
+- global PCA and average-linkage hierarchical clustering use top-variable normalized features and do not select features from Case/Control significance;
+- merged gene/transcript tables are read from local bytes inside the Web Worker;
+- comparison results can be saved locally as JSON;
+- fixed W3 fixtures compare the native filesystem path with the byte/WASM path for differential tests, normalization, PCA, dendrograms, exclusions, and transcript DTU.
 
-W2 does **not** yet enable Case/Control testing, outlier detection, longitudinal analysis, significant-hit structure, repertoire analysis, or full report generation in the browser. Those workflows remain visible but disabled until their Rust/WASM parity work is complete.
+W3 does **not** yet enable repertoire comparison, immune-infiltration analysis, longitudinal patient-signature analysis, significant-hit structure, or full report generation in the browser. Those workflows remain gated until their own Rust/WASM parity work is complete.
 
 ## Repository layout
 
@@ -58,7 +61,7 @@ Requirements:
 - Rust stable with `wasm32-unknown-unknown`;
 - `wasm-pack` for the Rust/WASM package.
 
-Build the W2 WASM engine:
+Build the W3 WASM engine:
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -70,7 +73,7 @@ wasm-pack build wasm \
   --release
 ```
 
-Then serve the static `app/` directory from any local HTTP server. The app can still show filename preflight without the generated WASM package. W2 metadata and expression QC require the generated WASM package and remain disabled when it is absent. Production Pages builds compile the WASM package first and publish the static `app/` directory directly.
+Then serve the static `app/` directory from any local HTTP server. The app can still show filename preflight without the generated WASM package. W2/W3 metadata, expression QC, and group comparison require the generated WASM package and remain disabled when it is absent. Production Pages builds compile the WASM package first and publish the static `app/` directory directly.
 
 ## Validation
 

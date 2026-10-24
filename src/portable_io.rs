@@ -27,6 +27,12 @@ pub struct MetadataColumnSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataValueCount {
+    pub value: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataInspection {
     pub file_name: String,
     pub rows: usize,
@@ -41,7 +47,9 @@ pub struct MetadataInspection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PortableExpressionKind {
+    #[serde(alias = "gene-expression", alias = "gene_expression")]
     Gene,
+    #[serde(alias = "transcript-expression", alias = "transcript_expression")]
     Transcript,
 }
 
@@ -212,6 +220,37 @@ pub fn parse_metadata_bytes(file_name: &str, bytes: &[u8]) -> Result<PortableMet
         rows,
         id_column,
     })
+}
+
+pub fn metadata_column_values_bytes(
+    file_name: &str,
+    bytes: &[u8],
+    column: &str,
+) -> Result<Vec<MetadataValueCount>> {
+    let table = parse_metadata_bytes(file_name, bytes)?;
+    let column_index = table
+        .columns
+        .iter()
+        .position(|name| name == column)
+        .ok_or_else(|| anyhow!("metadata column '{column}' does not exist"))?;
+
+    let mut counts = BTreeMap::<String, usize>::new();
+    for row in &table.rows {
+        let value = row
+            .get(column_index)
+            .map(String::as_str)
+            .unwrap_or_default()
+            .trim();
+        if !value.is_empty() {
+            *counts.entry(value.to_string()).or_default() += 1;
+        }
+    }
+    let mut values = counts
+        .into_iter()
+        .map(|(value, count)| MetadataValueCount { value, count })
+        .collect::<Vec<_>>();
+    values.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+    Ok(values)
 }
 
 pub fn inspect_metadata_bytes(

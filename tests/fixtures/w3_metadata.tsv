@@ -1,0 +1,9 @@
+sample_id	patient_id	analysis_group	batch	qc_review_status
+C1_T0	P1	Case	A	Pass
+C1_T1	P1	Case	B	Pass
+C2_T0	P2	Case	B	Pass
+C2_T1	P2	Case	A	Failed
+N1_T0	P3	Control	A	Pass
+N1_T1	P3	Control	B	Pass
+N2_T0	P4	Control	B	Pass
+N2_T1	P4	Control	A	Pass

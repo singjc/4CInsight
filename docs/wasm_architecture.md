@@ -71,3 +71,29 @@ The web application follows seven practical interaction principles derived from 
 ## Scientific parity rule
 
 A workflow is not complete because it runs in WASM. It is complete only when fixed-fixture native and WASM outputs agree within documented numerical tolerances and the browser path preserves the same scientific definitions.
+
+## W3 corrected expression comparison boundary
+
+W3 extends the shared Rust/WASM boundary from input QC to cohort comparison. `src/portable_compare.rs` owns browser-safe metadata-role and exclusion configuration. It constructs the same Rust cohort comparison used by the native core and delegates statistics to `src/corrected.rs`.
+
+The corrected expression engine now accepts either a native filesystem path or an in-memory byte source. Both sources enter the same normalization, model, PCA, dendrogram, and transcript-DTU implementation. On `wasm32`, existing single-worker fallbacks are used where native builds use scoped CPU workers.
+
+The intended data flow is:
+
+```text
+local metadata File + selected merged expression File
+                    ↓
+               Web Worker
+                    ↓
+             Uint8Array bytes
+                    ↓
+       portable metadata comparison
+                    ↓
+       shared corrected Rust engine
+                    ↓
+ differential tests + PCA + dendrogram + DTU
+                    ↓
+       browser result state / local JSON
+```
+
+The browser must not construct its own statistical model or send selected data to a server.

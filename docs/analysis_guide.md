@@ -523,3 +523,13 @@ Each point is a pathway. Stronger statistical support appears higher in the plot
 ## Practical note
 
 4C Insight is intended to help with transparent discovery, QC, robustness assessment, and interpretation. It does not replace independent validation, domain-specific clinical interpretation, or a full study-design discussion.
+
+## W3 local Compare Groups workflow
+
+4C Insight v0.19.0 enables corrected gene and transcript group comparisons in the browser. Metadata roles are selected by meaning. The expression/sample ID column can therefore differ from the patient/subject column used for repeated measures.
+
+Case and Control can each contain one or more values from a selected metadata column. Optional reviewed-QC and custom metadata exclusion rules remove matching rows before groups are constructed. The exact exclusion rules and excluded sample IDs are retained in the exported result.
+
+Gene expression uses Raw Count columns. Transcript expression uses Total Reads columns. The corrected engine uses positive-count median-ratio size factors and the established negative-binomial group model. If a patient/subject column is selected, repeated observations use subject-clustered sandwich standard errors. Selected covariates are included in the same model.
+
+The PCA and hierarchical dendrogram are global cohort-structure views. They use top-variable normalized features and do not select features based on the Case/Control differential result. The dendrogram uses average linkage on Euclidean distance. Significant-hit PCA/clustering remains a separate post-selection workflow.

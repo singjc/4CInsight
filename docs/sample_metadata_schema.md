@@ -77,3 +77,15 @@ The corrected/standard statistical engine is unchanged; the metadata selector on
 | `analysis_include`, `known_wrong_source`, `qc_review_status`, `qc_exclusion_reason`, `notes` | optional | Review | Curation/provenance fields; do not replace frozen per-run QC. |
 
 The repository template is `templates/4C_multiomics_sample_metadata_template.tsv`. The Metadata Builder can also create the same schema directly from a scanned cohort project and pre-populate canonical sample IDs.
+
+## W3 flexible metadata roles
+
+The browser does not require literal column names such as `sample_id` or `subject_id`. In Compare Groups, users select:
+
+- the column that maps metadata rows to expression sample columns;
+- an optional patient/subject column for repeated measurements;
+- the grouping column and Case/Control values;
+- optional adjustment covariates;
+- optional metadata exclusion columns and values.
+
+This supports cohorts where a column named `subject_id` is actually the longitudinal observation ID and a column named `sample_id` is the patient ID, or any other project-specific naming convention. The role selection is authoritative for the analysis.

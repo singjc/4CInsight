@@ -159,6 +159,74 @@ async function handleExpressionQc(request) {
   })
 }
 
+
+async function handleMetadataColumnValues(request) {
+  const wasm = await loadWasm()
+  if (!wasm) throw new Error('Rust/WASM is required to read metadata values. Build or deploy app/wasm first.')
+  if (!request.file || !request.column) throw new Error('Metadata file and column are required')
+  const bytes = await wasmBytes(request.file)
+  const result = JSON.parse(
+    wasm.metadata_column_values_json(request.file.name, bytes, request.column),
+  )
+  self.postMessage({
+    type: 'metadata-column-values-result',
+    requestId: request.requestId,
+    result,
+  })
+}
+
+async function handleExpressionComparison(request) {
+  const wasm = await loadWasm()
+  if (!wasm) throw new Error('Rust/WASM is required for group comparison. Build or deploy app/wasm first.')
+  if (!request.metadataFile) throw new Error('Select a metadata file before running a group comparison')
+
+  const analyses = [
+    ['gene', request.gene],
+    ['transcript', request.transcript],
+  ].filter(([, entry]) => entry?.enabled && entry?.file)
+  if (!analyses.length) throw new Error('Enable gene and/or transcript expression and select a merged table')
+
+  const total = analyses.length
+  let completed = 0
+  postProgress(request.requestId, completed, total, `Reading metadata: ${request.metadataFile.name}`)
+  const metadataBytes = await wasmBytes(request.metadataFile)
+  const result = {
+    comparisonName: request.comparisonName || 'Metadata-defined comparison',
+    gene: null,
+    transcript: null,
+    completedAt: null,
+    execution: 'local-browser-wasm',
+  }
+
+  for (const [kind, entry] of analyses) {
+    const label = kind === 'gene' ? 'Gene expression' : 'Transcript expression'
+    postProgress(request.requestId, completed, total, `${label}: reading ${entry.file.name}`)
+    const mergedBytes = await wasmBytes(entry.file)
+    const config = {
+      ...request.config,
+      kind: kind === 'gene' ? 'gene-expression' : 'transcript-expression',
+    }
+    result[kind] = JSON.parse(
+      wasm.run_expression_comparison_json(
+        request.metadataFile.name,
+        metadataBytes,
+        entry.file.name,
+        mergedBytes,
+        JSON.stringify(config),
+      ),
+    )
+    completed += 1
+    postProgress(request.requestId, completed, total, `${label}: comparison complete`)
+  }
+
+  result.completedAt = new Date().toISOString()
+  self.postMessage({
+    type: 'expression-comparison-result',
+    requestId: request.requestId,
+    result,
+  })
+}
+
 self.addEventListener('message', async (event) => {
   const request = event.data
   if (!request?.type || !request.requestId) return
@@ -174,6 +242,14 @@ self.addEventListener('message', async (event) => {
     }
     if (request.type === 'run-expression-qc') {
       await handleExpressionQc(request)
+      return
+    }
+    if (request.type === 'metadata-column-values') {
+      await handleMetadataColumnValues(request)
+      return
+    }
+    if (request.type === 'run-expression-comparison') {
+      await handleExpressionComparison(request)
     }
   } catch (error) {
     postError(request.requestId, error)

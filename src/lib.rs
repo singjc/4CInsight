@@ -10,6 +10,7 @@ pub mod input_conventions;
 pub mod longitudinal;
 pub mod metadata;
 pub mod outliers;
+pub mod portable_compare;
 pub mod portable_io;
 pub mod report;
 

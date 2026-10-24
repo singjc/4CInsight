@@ -196,3 +196,52 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
   .config-block:first-child { grid-column: auto; }
   .run-row, .result-heading, .result-card, .progress-card { grid-template-columns: 1fr; flex-direction: column; align-items: stretch; }
 }
+
+/* W3 metadata-defined corrected expression comparison */
+.compare-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.exclusion-grid, .expression-source-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.multi-select { min-height: 104px; padding-right: 8px !important; }
+.config-block input[type="number"], .form-grid input[type="number"] {
+  width: 100%; min-width: 0; border: 1px solid #d0d5dd; background: #fff; color: #344054;
+  border-radius: 8px; padding: 8px 9px; font-size: 11.5px;
+}
+.advanced-settings { margin-top: 14px; border: 1px solid #e4e7ec; border-radius: 10px; background: #fbfcfe; padding: 11px 13px; }
+.advanced-settings summary { cursor: pointer; color: #475467; font-size: 11.5px; font-weight: 700; }
+.advanced-settings > p { margin: 9px 0 0; color: #98a2b3; font-size: 10.5px; line-height: 1.45; }
+.advanced-grid { margin-top: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.analysis-warnings { display: grid; gap: 6px; margin: 0 0 14px; }
+.analysis-warnings > div { border: 1px solid #fedf89; background: #fffaeb; color: #7a4d08; border-radius: 8px; padding: 8px 10px; font-size: 10.5px; line-height: 1.45; }
+.plot-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+.plot-card { border: 1px solid #e4e7ec; border-radius: 10px; background: #fcfcfd; min-width: 0; overflow: hidden; }
+.plot-heading { padding: 11px 12px 9px; border-bottom: 1px solid #eaecf0; }
+.plot-heading strong, .plot-heading span { display: block; }
+.plot-heading strong { color: #344054; font-size: 11.5px; }
+.plot-heading span { margin-top: 3px; color: #98a2b3; font-size: 9.5px; line-height: 1.4; }
+.plot-scroll { overflow: auto; max-width: 100%; background: #fff; }
+.dendro-scroll { max-height: 620px; }
+.science-plot { display: block; width: 100%; min-width: 520px; height: auto; }
+.science-plot.dendrogram { min-width: 720px; }
+.plot-axis { stroke: #d0d5dd; stroke-width: 1; }
+.plot-label, .dendro-label { fill: #667085; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 10px; }
+.dendro-label { font-size: 8px; }
+.dendro-line { stroke: #98a2b3; stroke-width: 1; fill: none; }
+.case-point { fill: #3159d9; stroke: #fff; stroke-width: 1; }
+.control-point { fill: #12a078; stroke: #fff; stroke-width: 1; }
+.plot-legend { display: flex; gap: 14px; padding: 8px 12px 10px; color: #667085; font-size: 9.5px; }
+.plot-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+.plot-empty { min-height: 140px; display: grid; place-items: center; padding: 20px; color: #98a2b3; font-size: 11px; text-align: center; }
+.comparison-result { margin-bottom: 20px; }
+.result-details { margin-top: 12px; }
+.differential-table { margin-top: 10px; max-height: 520px; }
+.table-note, .method-note { margin: 8px 0 0; color: #98a2b3; font-size: 9.5px; line-height: 1.45; }
+
+@media (max-width: 1120px) {
+  .compare-grid { grid-template-columns: 1fr 1fr; }
+  .compare-grid .config-block:first-child { grid-column: 1 / -1; }
+  .plot-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .compare-grid, .exclusion-grid, .expression-source-grid, .advanced-grid { grid-template-columns: 1fr; }
+  .compare-grid .config-block:first-child { grid-column: auto; }
+}
