@@ -3,12 +3,16 @@ use wasm_bindgen::prelude::*;
 
 #[path = "../../src/input_conventions.rs"]
 mod input_conventions;
+#[allow(dead_code)]
 #[path = "../../src/cohort.rs"]
 mod cohort;
+#[allow(dead_code)]
 #[path = "../../src/metadata.rs"]
 mod metadata;
+#[allow(dead_code)]
 #[path = "../../src/corrected.rs"]
 mod corrected;
+#[allow(dead_code)]
 #[path = "../../src/portable_io.rs"]
 mod portable_io;
 #[path = "../../src/portable_compare.rs"]

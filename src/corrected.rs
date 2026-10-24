@@ -1950,6 +1950,7 @@ struct ParsedClonotypeStore {
     entries: Vec<ParsedClonotype>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ClonotypeKeyRef<'a>(&'a [u8]);
 
@@ -1958,6 +1959,7 @@ impl ParsedClonotypeStore {
         self.entries.len()
     }
 
+    #[cfg(test)]
     fn iter(&self) -> impl Iterator<Item = (ClonotypeKeyRef<'_>, &ParsedClonotype)> {
         self.entries
             .iter()
@@ -4644,9 +4646,6 @@ impl XorShift64 {
         self.state = x;
         x
     }
-    fn next_f64(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
-    }
     fn next_bounded(&mut self, upper: u64) -> u64 {
         if upper <= 1 {
             return 0;
@@ -4958,6 +4957,7 @@ fn permanova_f_from_pairs(pairs: &[(usize, usize, f64)], groups: &[bool], total:
     (between / 1.0) / (within / (n as f64 - 2.0))
 }
 
+#[cfg(test)]
 fn permanova_f(dist: &[Vec<f64>], groups: &[bool]) -> f64 {
     if dist.len() != groups.len() || groups.is_empty() {
         return f64::NAN;

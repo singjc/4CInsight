@@ -526,14 +526,32 @@ function mergedFileOptions(records, selected) {
 }
 
 function exclusionRuleView(prefix, title, enabled, column, selectedValues, columns, values, help) {
+  let status = 'Optional'
+  if (enabled) status = column && selectedValues.length ? 'Active' : 'Needs input'
   return `<div class="config-block stacked">
-    <div class="config-heading"><label class="check-label"><input id="${prefix}-enabled" type="checkbox" ${enabled ? 'checked' : ''}/><span><strong>${title}</strong><small>${help}</small></span></label><span class="tag ${enabled ? 'warning' : 'neutral'}">${enabled ? 'Active' : 'Optional'}</span></div>
+    <div class="config-heading"><label class="check-label"><input id="${prefix}-enabled" type="checkbox" ${enabled ? 'checked' : ''}/><span><strong>${title}</strong><small>${help}</small></span></label><span class="tag ${enabled ? 'warning' : 'neutral'}">${status}</span></div>
     <label><span>Metadata column</span><select id="${prefix}-column" ${enabled ? '' : 'disabled'}>${columnOptions(columns, column, true)}</select></label>
     <label><span>Exclude rows with these values</span><select id="${prefix}-values" class="multi-select" multiple size="${Math.min(6, Math.max(3, values.length || 3))}" ${enabled && column ? '' : 'disabled'}>${values.length ? metadataValueOptions(values, selectedValues) : '<option disabled>Choose a column to load values</option>'}</select></label>
   </div>`
 }
 
-function pcaSvg(pca) {
+function plotControls(plotId) {
+  return `<div class="plot-toolbar" role="toolbar" aria-label="Plot zoom controls">
+    <button type="button" class="plot-tool-button" data-plot-id="${plotId}" data-plot-action="out" aria-label="Zoom out">−</button>
+    <button type="button" class="plot-tool-button" data-plot-id="${plotId}" data-plot-action="fit">Fit</button>
+    <button type="button" class="plot-tool-button" data-plot-id="${plotId}" data-plot-action="in" aria-label="Zoom in">+</button>
+    <span class="plot-toolbar-hint">Ctrl/⌘ + wheel to zoom · drag to pan</span>
+  </div>`
+}
+
+function plotLegend(plotId, caseLabel, controlLabel) {
+  return `<div class="plot-legend" aria-label="Group visibility">
+    <button type="button" class="plot-legend-button" data-plot-id="${plotId}" data-plot-group-toggle="case" aria-pressed="true"><i class="legend-dot case-point"></i><span>Case · ${escapeHtml(caseLabel || 'Case')}</span></button>
+    <button type="button" class="plot-legend-button" data-plot-id="${plotId}" data-plot-group-toggle="control" aria-pressed="true"><i class="legend-dot control-point"></i><span>Control · ${escapeHtml(controlLabel || 'Control')}</span></button>
+  </div>`
+}
+
+function pcaSvg(pca, plotId, caseLabel, controlLabel) {
   const points = pca?.points || []
   if (!points.length) return '<div class="plot-empty">PCA is not available for this result.</div>'
   const width = 760
@@ -553,37 +571,141 @@ function pcaSvg(pca) {
   const xZero = minX <= 0 && maxX >= 0 ? sx(0) : pad
   const yZero = minY <= 0 && maxY >= 0 ? sy(0) : height - pad
   const circles = points.map((point) => {
-    const klass = String(point.group).toLowerCase() === 'case' ? 'case-point' : 'control-point'
-    return `<circle class="${klass}" cx="${sx(Number(point.x)).toFixed(2)}" cy="${sy(Number(point.y)).toFixed(2)}" r="4.2"><title>${escapeHtml(point.sample_id)} · ${escapeHtml(point.group)} · subject ${escapeHtml(point.subject)} · ${escapeHtml(pca.x_label)} ${formatNumber(point.x)} · ${escapeHtml(pca.y_label)} ${formatNumber(point.y)}</title></circle>`
+    const group = String(point.group).toLowerCase() === 'case' ? 'case' : 'control'
+    const klass = group === 'case' ? 'case-point' : 'control-point'
+    return `<circle class="${klass}" data-plot-group="${group}" cx="${sx(Number(point.x)).toFixed(2)}" cy="${sy(Number(point.y)).toFixed(2)}" r="4.2"><title>${escapeHtml(point.sample_id)} · ${escapeHtml(point.group)} · subject ${escapeHtml(point.subject)} · ${escapeHtml(pca.x_label)} ${formatNumber(point.x)} · ${escapeHtml(pca.y_label)} ${formatNumber(point.y)}</title></circle>`
   }).join('')
-  return `<div class="plot-scroll"><svg class="science-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(pca.name)}">
-    <line class="plot-axis" x1="${pad}" y1="${yZero}" x2="${width-pad}" y2="${yZero}"/><line class="plot-axis" x1="${xZero}" y1="${pad}" x2="${xZero}" y2="${height-pad}"/>
-    ${circles}
-    <text class="plot-label" x="${width/2}" y="${height-10}" text-anchor="middle">${escapeHtml(pca.x_label)}</text>
-    <text class="plot-label" x="14" y="${height/2}" text-anchor="middle" transform="rotate(-90 14 ${height/2})">${escapeHtml(pca.y_label)}</text>
-  </svg></div><div class="plot-legend"><span><i class="legend-dot case-point"></i>Case</span><span><i class="legend-dot control-point"></i>Control</span></div>`
+  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-scale="1">
+    ${plotControls(plotId)}
+    <div class="plot-scroll interactive-plot-scroll"><svg class="science-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(pca.name)}">
+      <line class="plot-axis" x1="${pad}" y1="${yZero}" x2="${width-pad}" y2="${yZero}"/><line class="plot-axis" x1="${xZero}" y1="${pad}" x2="${xZero}" y2="${height-pad}"/>
+      ${circles}
+      <text class="plot-label" x="${width/2}" y="${height-10}" text-anchor="middle">${escapeHtml(pca.x_label)}</text>
+      <text class="plot-label" x="14" y="${height/2}" text-anchor="middle" transform="rotate(-90 14 ${height/2})">${escapeHtml(pca.y_label)}</text>
+    </svg></div>
+    ${plotLegend(plotId, caseLabel, controlLabel)}
+  </div>`
 }
 
-function dendrogramSvg(tree) {
+function dendrogramSvg(tree, plotId, caseLabel, controlLabel) {
   const leaves = tree?.leaves || []
   const segments = tree?.segments || []
   if (!leaves.length || !segments.length) return '<div class="plot-empty">Hierarchical clustering is not available for this result.</div>'
   const width = 860
-  const height = Math.max(300, Math.min(1400, 90 + leaves.length * 4.2))
+  const height = Math.max(320, Math.min(2400, 90 + leaves.length * 6))
   const left = 118; const right = 28; const top = 28; const bottom = 28
   const maxDistance = Math.max(1e-12, ...segments.flatMap((segment) => [Number(segment.x1), Number(segment.x2)]).filter(Number.isFinite))
   const maxPosition = Math.max(1, ...leaves.map((leaf) => Number(leaf.position)).filter(Number.isFinite))
   const sx = (x) => left + (Number(x) / maxDistance) * (width - left - right)
   const sy = (y) => top + (Number(y) / maxPosition) * (height - top - bottom)
   const lines = segments.map((segment) => `<line class="dendro-line" x1="${sx(segment.x1).toFixed(2)}" y1="${sy(segment.y1).toFixed(2)}" x2="${sx(segment.x2).toFixed(2)}" y2="${sy(segment.y2).toFixed(2)}"/>`).join('')
-  const labelEvery = Math.max(1, Math.ceil(leaves.length / 55))
-  const leafMarks = leaves.map((leaf, index) => {
-    const klass = String(leaf.group).toLowerCase() === 'case' ? 'case-point' : 'control-point'
+  const leafMarks = leaves.map((leaf) => {
+    const group = String(leaf.group).toLowerCase() === 'case' ? 'case' : 'control'
+    const klass = group === 'case' ? 'case-point' : 'control-point'
     const y = sy(leaf.position)
-    const label = index % labelEvery === 0 ? `<text class="dendro-label" x="${left-10}" y="${(y+3).toFixed(2)}" text-anchor="end">${escapeHtml(leaf.sample_id)}</text>` : ''
-    return `${label}<circle class="${klass}" cx="${left}" cy="${y.toFixed(2)}" r="2.7"><title>${escapeHtml(leaf.sample_id)} · ${escapeHtml(leaf.group)} · subject ${escapeHtml(leaf.subject)}</title></circle>`
+    return `<text class="dendro-label" data-plot-group="${group}" x="${left-10}" y="${(y+3).toFixed(2)}" text-anchor="end">${escapeHtml(leaf.sample_id)}</text><circle class="${klass}" data-plot-group="${group}" cx="${left}" cy="${y.toFixed(2)}" r="2.7"><title>${escapeHtml(leaf.sample_id)} · ${escapeHtml(leaf.group)} · subject ${escapeHtml(leaf.subject)}</title></circle>`
   }).join('')
-  return `<div class="plot-scroll dendro-scroll"><svg class="science-plot dendrogram" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(tree.name)}">${lines}${leafMarks}<text class="plot-label" x="${(left+width-right)/2}" y="${height-6}" text-anchor="middle">${escapeHtml(tree.distance_label)} · ${escapeHtml(tree.linkage)}</text></svg></div>`
+  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-scale="1">
+    ${plotControls(plotId)}
+    <div class="plot-scroll dendro-scroll interactive-plot-scroll"><svg class="science-plot dendrogram" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(tree.name)}">${lines}${leafMarks}<text class="plot-label" x="${(left+width-right)/2}" y="${height-6}" text-anchor="middle">${escapeHtml(tree.distance_label)} · ${escapeHtml(tree.linkage)}</text></svg></div>
+    ${plotLegend(plotId, caseLabel, controlLabel)}
+  </div>`
+}
+
+function setPlotScale(shell, nextScale, anchorX = null, anchorY = null) {
+  const viewport = shell.querySelector('.interactive-plot-scroll')
+  const svg = shell.querySelector('.science-plot')
+  if (!viewport || !svg) return
+  const previousScale = Number(shell.dataset.plotScale || 1)
+  const scale = Math.min(5, Math.max(0.6, nextScale))
+  const oldWidth = svg.getBoundingClientRect().width
+  const oldHeight = svg.getBoundingClientRect().height
+  if (!Number.isFinite(Number(shell.dataset.fitWidth))) shell.dataset.fitWidth = String(oldWidth)
+  const fitWidth = Number(shell.dataset.fitWidth) || oldWidth
+  const localX = anchorX ?? viewport.clientWidth / 2
+  const localY = anchorY ?? viewport.clientHeight / 2
+  const contentX = viewport.scrollLeft + localX
+  const contentY = viewport.scrollTop + localY
+
+  svg.style.minWidth = '0'
+  svg.style.width = `${fitWidth * scale}px`
+  shell.dataset.plotScale = String(scale)
+
+  const newWidth = svg.getBoundingClientRect().width
+  const newHeight = svg.getBoundingClientRect().height
+  if (oldWidth > 0) viewport.scrollLeft = contentX * (newWidth / oldWidth) - localX
+  if (oldHeight > 0) viewport.scrollTop = contentY * (newHeight / oldHeight) - localY
+
+  shell.querySelectorAll('[data-plot-action="fit"]').forEach((button) => {
+    button.textContent = Math.abs(scale - 1) < 0.01 ? 'Fit' : `${Math.round(scale * 100)}%`
+  })
+  if (previousScale !== scale) viewport.classList.toggle('is-zoomed', scale > 1.01)
+}
+
+function fitPlot(shell) {
+  const viewport = shell.querySelector('.interactive-plot-scroll')
+  const svg = shell.querySelector('.science-plot')
+  if (!viewport || !svg) return
+  svg.style.width = ''
+  svg.style.minWidth = ''
+  shell.dataset.plotScale = '1'
+  delete shell.dataset.fitWidth
+  viewport.scrollLeft = 0
+  viewport.scrollTop = 0
+  viewport.classList.remove('is-zoomed')
+  shell.querySelectorAll('[data-plot-action="fit"]').forEach((button) => { button.textContent = 'Fit' })
+}
+
+function bindInteractivePlots() {
+  document.querySelectorAll('[data-interactive-plot]').forEach((shell) => {
+    const viewport = shell.querySelector('.interactive-plot-scroll')
+    if (!viewport) return
+
+    shell.querySelectorAll('[data-plot-action]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const action = button.dataset.plotAction
+        const scale = Number(shell.dataset.plotScale || 1)
+        if (action === 'fit') fitPlot(shell)
+        else setPlotScale(shell, action === 'in' ? scale * 1.25 : scale / 1.25)
+      })
+    })
+
+    shell.querySelectorAll('[data-plot-group-toggle]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const group = button.dataset.plotGroupToggle
+        const visible = button.getAttribute('aria-pressed') !== 'false'
+        button.setAttribute('aria-pressed', visible ? 'false' : 'true')
+        button.classList.toggle('is-hidden', visible)
+        shell.querySelectorAll(`[data-plot-group="${group}"]`).forEach((mark) => {
+          mark.style.display = visible ? 'none' : ''
+        })
+      })
+    })
+
+    viewport.addEventListener('wheel', (event) => {
+      if (!event.ctrlKey && !event.metaKey) return
+      event.preventDefault()
+      const rect = viewport.getBoundingClientRect()
+      const scale = Number(shell.dataset.plotScale || 1)
+      setPlotScale(shell, event.deltaY < 0 ? scale * 1.12 : scale / 1.12, event.clientX - rect.left, event.clientY - rect.top)
+    }, { passive: false })
+
+    let drag = null
+    viewport.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return
+      drag = { x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop }
+      viewport.setPointerCapture?.(event.pointerId)
+      viewport.classList.add('is-dragging')
+    })
+    viewport.addEventListener('pointermove', (event) => {
+      if (!drag) return
+      viewport.scrollLeft = drag.left - (event.clientX - drag.x)
+      viewport.scrollTop = drag.top - (event.clientY - drag.y)
+    })
+    const stopDrag = () => { drag = null; viewport.classList.remove('is-dragging') }
+    viewport.addEventListener('pointerup', stopDrag)
+    viewport.addEventListener('pointercancel', stopDrag)
+  })
 }
 
 function differentialTable(analysis) {
@@ -595,6 +717,9 @@ function differentialTable(analysis) {
 function comparisonResultSection(title, result) {
   if (!result?.analysis) return ''
   const analysis = result.analysis
+  const plotPrefix = title.toLowerCase().startsWith('gene') ? 'gene' : 'transcript'
+  const caseLabel = result.comparison?.case_label || 'Case'
+  const controlLabel = result.comparison?.control_label || 'Control'
   const significant = (analysis.tests || []).filter((row) => Number.isFinite(Number(row.q_value)) && Number(row.q_value) <= 0.05).length
   return `<section class="card comparison-result">
     <div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(result.source_metric)} · corrected native/WASM-parity expression model</p></div><span class="tag success">Rust/WASM</span></div>
@@ -605,7 +730,7 @@ function comparisonResultSection(title, result) {
       ${summaryCard('Excluded rows', result.comparison.excluded_rows.toLocaleString(), `${result.comparison.metadata_rows_after_exclusions} metadata rows retained`)}
     </div>
     ${analysis.warnings?.length ? `<div class="analysis-warnings">${analysis.warnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join('')}</div>` : ''}
-    <div class="plot-grid"><article class="plot-card"><div class="plot-heading"><strong>Global expression PCA</strong><span>Top variable normalized features; groups do not select the PCA features.</span></div>${pcaSvg(analysis.pca)}</article><article class="plot-card"><div class="plot-heading"><strong>Hierarchical clustering</strong><span>Average linkage on Euclidean distance across the same normalized feature space.</span></div>${dendrogramSvg(analysis.dendrogram)}</article></div>
+    <div class="plot-grid"><article class="plot-card"><div class="plot-heading"><strong>Global expression PCA</strong><span>Top variable normalized features; groups do not select the PCA features.</span></div>${pcaSvg(analysis.pca, `${plotPrefix}-pca`, caseLabel, controlLabel)}</article><article class="plot-card"><div class="plot-heading"><strong>Hierarchical clustering</strong><span>Average linkage on Euclidean distance across the same normalized feature space.</span></div>${dendrogramSvg(analysis.dendrogram, `${plotPrefix}-dendrogram`, caseLabel, controlLabel)}</article></div>
     <details class="details-block result-details" open><summary>Differential feature table</summary>${differentialTable(analysis)}</details>
     ${analysis.dtu ? `<details class="details-block result-details"><summary>Transcript-usage screen (${analysis.dtu.genes_tested.toLocaleString()} genes)</summary><p class="method-note">${escapeHtml(analysis.dtu.method_description)}</p><div class="table-scroll"><table><thead><tr><th>Gene</th><th>Transcripts</th><th>q-value</th><th>Max |CLR effect|</th></tr></thead><tbody>${analysis.dtu.gene_tests.slice(0, 100).map((row) => `<tr><td><strong>${escapeHtml(row.gene_id)}</strong></td><td>${row.n_transcripts}</td><td>${formatNumber(row.q_value)}</td><td>${formatNumber(row.max_abs_clr_effect)}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
   </section>`
@@ -627,6 +752,15 @@ function compareView() {
   const metadataReady = Boolean(metadata && !metadata.blank_id_rows && !metadata.duplicate_id_values.length)
   const modalityReady = (cfg.geneEnabled && cfg.geneMergedId) || (cfg.transcriptEnabled && cfg.transcriptMergedId)
   const exclusionReady = (!cfg.qcExclusionEnabled || (Boolean(cfg.qcExclusionColumn) && cfg.qcExclusionValues.length > 0)) && (!cfg.customExclusionEnabled || (Boolean(cfg.customExclusionColumn) && cfg.customExclusionValues.length > 0))
+  const incompleteExclusion = cfg.qcExclusionEnabled && !cfg.qcExclusionColumn
+    ? 'Reviewed QC exclusion is enabled. Select a metadata column and at least one value, or turn it off.'
+    : cfg.qcExclusionEnabled && !cfg.qcExclusionValues.length
+      ? 'Reviewed QC exclusion is enabled. Select at least one value to exclude, or turn it off.'
+      : cfg.customExclusionEnabled && !cfg.customExclusionColumn
+        ? 'Custom metadata exclusion is enabled. Select a metadata column and at least one value, or turn it off.'
+        : cfg.customExclusionEnabled && !cfg.customExclusionValues.length
+          ? 'Custom metadata exclusion is enabled. Select at least one value to exclude, or turn it off.'
+          : ''
   const runnable = state.wasmReady && !state.busy && metadataReady && Boolean(cfg.groupColumn) && cfg.caseValues.length > 0 && cfg.controlValues.length > 0 && !overlap && modalityReady && exclusionReady
 
   return `<section class="page-heading"><div><span class="eyebrow">Compare Groups · W3</span><h2>Define a cohort comparison from metadata</h2><p>Select the metadata roles and group values that match this cohort. 4C Insight runs the established corrected count model, PCA, and hierarchical clustering inside the local Rust/WASM worker.</p></div><div class="local-card"><strong>Same science, local bytes</strong><span>The native and byte/WASM paths share the corrected-expression implementation.</span></div></section>
@@ -634,6 +768,7 @@ function compareView() {
   ${!metadataRecords.length ? '<div class="notice-banner"><strong>Metadata required.</strong><span>Select a metadata file in the Project tab before defining groups.</span></div>' : ''}
   ${metadata && (!metadataReady) ? `<div class="notice-banner"><strong>Resolve metadata IDs first.</strong><span>The selected ID column has ${metadata.blank_id_rows} blank row(s) and ${metadata.duplicate_id_values.length} duplicate value(s).</span></div>` : ''}
   ${overlap ? '<div class="notice-banner"><strong>Case and control selections overlap.</strong><span>Remove the same value from one group before running the comparison.</span></div>' : ''}
+  ${incompleteExclusion ? `<div class="notice-banner"><strong>Finish or disable the optional exclusion.</strong><span>${escapeHtml(incompleteExclusion)}</span></div>` : ''}
   <section class="card"><div class="card-heading"><div><h3>1. Metadata and groups</h3><p>The sample-ID column maps expression columns. The patient/subject column is independent and optional.</p></div><span class="tag neutral">W3</span></div>
     <div class="config-grid compare-grid">
       <div class="config-block stacked"><div class="config-heading"><div><strong>Metadata roles</strong><span>Choose columns by meaning, not by hardcoded names.</span></div><span class="tag success">Flexible</span></div>
@@ -934,6 +1069,7 @@ function bindCompareEvents() {
   })
   document.querySelector('#run-group-comparison')?.addEventListener('click', () => void runGroupComparison())
   document.querySelector('#export-comparison')?.addEventListener('click', () => void exportCompareResult())
+  bindInteractivePlots()
 
   if (
     state.qcConfig.metadataId &&

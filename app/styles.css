@@ -245,3 +245,25 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
   .compare-grid, .exclusion-grid, .expression-source-grid, .advanced-grid { grid-template-columns: 1fr; }
   .compare-grid .config-block:first-child { grid-column: auto; }
 }
+
+/* W3 interactive scientific plots */
+.plot-shell { min-width: 0; }
+.plot-toolbar { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-bottom: 1px solid #eaecf0; background: #fff; }
+.plot-tool-button { min-width: 30px; min-height: 28px; padding: 4px 8px; border: 1px solid #d0d5dd; border-radius: 6px; background: #fff; color: #344054; font: inherit; font-size: 10px; font-weight: 600; cursor: pointer; }
+.plot-tool-button:hover { background: #f9fafb; }
+.plot-tool-button:focus-visible, .plot-legend-button:focus-visible { outline: 2px solid #3159d9; outline-offset: 2px; }
+.plot-toolbar-hint { margin-left: auto; color: #98a2b3; font-size: 9px; }
+.interactive-plot-scroll { max-height: 620px; cursor: grab; overscroll-behavior: contain; touch-action: pan-x pan-y; }
+.interactive-plot-scroll.is-dragging { cursor: grabbing; user-select: none; }
+.interactive-plot-scroll .science-plot { transform-origin: top left; }
+.plot-legend { flex-wrap: wrap; }
+.plot-legend-button { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 4px 7px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #667085; font: inherit; font-size: 9.5px; cursor: pointer; }
+.plot-legend-button:hover { background: #f9fafb; border-color: #eaecf0; }
+.plot-legend-button.is-hidden { opacity: 0.42; text-decoration: line-through; }
+.legend-dot.case-point { background: #3159d9; }
+.legend-dot.control-point { background: #12a078; }
+@media (max-width: 720px) {
+  .plot-toolbar { flex-wrap: wrap; }
+  .plot-toolbar-hint { width: 100%; margin-left: 0; }
+  .plot-tool-button, .plot-legend-button { min-height: 36px; }
+}
