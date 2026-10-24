@@ -22,3 +22,14 @@ test('static entry point is branded 4C Insight', async () => {
   assert.match(html, /<title>4C Insight<\/title>/)
   assert.doesNotMatch(html, /Cohort Explorer|cfs-expression-merger/i)
 })
+
+
+test('W2 expression QC stays inside the worker and Rust/WASM bridge', async () => {
+  const main = await readFile(new URL('../main.js', import.meta.url), 'utf8')
+  const worker = await readFile(new URL('../analysis-worker.js', import.meta.url), 'utf8')
+  assert.match(main, /run-expression-qc/)
+  assert.match(worker, /summarize_expression_json/)
+  assert.match(worker, /inspect_metadata_json/)
+  assert.match(worker, /await file\.arrayBuffer\(\)/)
+  assert.equal(worker.includes('fetch('), false, 'analysis worker must not send selected data over the network')
+})

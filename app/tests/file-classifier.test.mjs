@@ -15,6 +15,7 @@ test('classifies established 4C sample workbook names', () => {
 test('classifies merged tables and metadata candidates', () => {
   assert.equal(classifyInputFilename('merged_gene_expression.tsv').kind, 'merged-gene-expression')
   assert.equal(classifyInputFilename('cohort_sample_metadata.xlsx').kind, 'metadata-candidate')
+  assert.equal(classifyInputFilename('cohort_sample_metadata.tsv').kind, 'metadata-candidate')
 })
 
 test('leaves unrelated files unresolved for user review', () => {

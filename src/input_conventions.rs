@@ -98,8 +98,11 @@ pub fn classify_input_filename(name: &str) -> Option<FilenameInputClassification
         }
     }
 
-    if (raw_lower.ends_with(".xlsx") || raw_lower.ends_with(".xls"))
-        && raw_lower.contains("sample")
+    let metadata_extension = [".xlsx", ".xls", ".tsv", ".csv", ".txt"]
+        .iter()
+        .any(|extension| raw_lower.ends_with(extension));
+    if metadata_extension
+        && (raw_lower.contains("sample") || raw_lower.contains("cohort"))
         && (raw_lower.contains("submission") || raw_lower.contains("metadata"))
     {
         return Some(FilenameInputClassification {
@@ -154,6 +157,12 @@ mod tests {
         );
         assert_eq!(
             classify_input_filename("cohort_sample_metadata.xlsx")
+                .unwrap()
+                .kind,
+            FilenameInputKind::MetadataCandidate
+        );
+        assert_eq!(
+            classify_input_filename("cohort_sample_metadata.tsv")
                 .unwrap()
                 .kind,
             FilenameInputKind::MetadataCandidate

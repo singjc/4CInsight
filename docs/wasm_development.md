@@ -1,8 +1,8 @@
 # 4C Insight web/WASM development
 
-## W1 local-first foundation
+## W2 local-first expression foundation
 
-The old server/upload client is retired. `app/` is a static application and `wasm/` is the browser bridge.
+The old server/upload client is retired. `app/` is a static application and `wasm/` is the browser bridge. W2 adds metadata and gene/transcript expression QC from local file bytes.
 
 ### Build WASM
 
@@ -28,7 +28,7 @@ There is no JavaScript bundling step. The GitHub Pages workflow builds the Rust/
 
 ## Data boundary
 
-Selecting a file does not upload it. Browser `File` objects stay in the page/worker context. W1 uses filename metadata only. Future parsers will transfer or stream bytes to the worker as needed.
+Selecting a file does not upload it. Browser `File` objects stay in the page/worker context. W2 sends one selected metadata or expression file at a time to the worker, where `arrayBuffer()` supplies bytes to the Rust/WASM parser. The worker does not use `fetch` for selected data.
 
 Do not add:
 
@@ -53,3 +53,26 @@ Do not add:
 ## GitHub Pages
 
 The site is deployed directly from `app/` through GitHub Actions. All application URLs are relative so project Pages, user Pages, and custom domains can use the same static tree.
+
+## W2 parity validation
+
+After applying W2, regenerate both Cargo lockfiles because the package version changes and the WASM crate gains `anyhow`, `calamine`, and `csv`:
+
+```bash
+cargo generate-lockfile --offline
+( cd wasm && cargo generate-lockfile --offline )
+```
+
+Then run:
+
+```bash
+cargo fmt --all
+git diff --check
+cargo check --locked
+cargo test --locked
+cargo check --manifest-path wasm/Cargo.toml --locked
+cargo test --manifest-path wasm/Cargo.toml --locked
+node --test app/tests/*.test.mjs
+```
+
+The root test suite includes `tests/w2_portable_parity.rs`. It compares metadata parsing and expression distribution statistics from the byte-oriented parser against the established native path reader on fixed fixtures.

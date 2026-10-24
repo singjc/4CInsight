@@ -30,9 +30,10 @@ export function classifyInputFilename(name) {
   if (rawLower.endsWith('.tsv') && rawLower.includes('merged_transcript_expression')) {
     return { recognized: true, kind: 'merged-transcript-expression', label: 'Merged transcript expression', sampleId: null }
   }
+  const metadataExtension = ['.xlsx', '.xls', '.tsv', '.csv', '.txt'].some((extension) => rawLower.endsWith(extension))
   if (
-    (rawLower.endsWith('.xlsx') || rawLower.endsWith('.xls')) &&
-    rawLower.includes('sample') &&
+    metadataExtension &&
+    (rawLower.includes('sample') || rawLower.includes('cohort')) &&
     (rawLower.includes('submission') || rawLower.includes('metadata'))
   ) {
     return { recognized: true, kind: 'metadata-candidate', label: 'Metadata candidate', sampleId: null }

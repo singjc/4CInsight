@@ -18,45 +18,164 @@ async function loadWasm() {
   return wasmModulePromise
 }
 
+function postError(requestId, error) {
+  self.postMessage({
+    type: 'worker-error',
+    requestId,
+    message: error instanceof Error ? error.message : String(error),
+  })
+}
+
+function postProgress(requestId, completed, total, message) {
+  self.postMessage({
+    type: 'analysis-progress',
+    requestId,
+    completed,
+    total,
+    message,
+  })
+}
+
+async function wasmBytes(file) {
+  const buffer = await file.arrayBuffer()
+  return new Uint8Array(buffer)
+}
+
+async function handlePreflight(request) {
+  const wasm = await loadWasm()
+  const records = request.files.map((file) => {
+    const classification = wasm
+      ? JSON.parse(wasm.classify_filename_json(file.name))
+      : classifyInputFilename(file.name)
+    return {
+      ...file,
+      ...classification,
+      status: classification.recognized ? 'ready' : 'unrecognized',
+    }
+  })
+
+  let engineVersion = null
+  if (wasm) {
+    try {
+      engineVersion = JSON.parse(wasm.engine_info_json()).version ?? null
+    } catch {
+      engineVersion = null
+    }
+  }
+
+  self.postMessage({
+    type: 'preflight-result',
+    requestId: request.requestId,
+    records,
+    engine: wasm ? 'Rust/WASM' : 'JavaScript preflight fallback',
+    wasmReady: Boolean(wasm),
+    engineVersion,
+  })
+}
+
+async function handleMetadataInspection(request) {
+  const wasm = await loadWasm()
+  if (!wasm) throw new Error('Rust/WASM is required to inspect metadata. Build or deploy app/wasm first.')
+  const bytes = await wasmBytes(request.file)
+  const result = JSON.parse(
+    wasm.inspect_metadata_json(request.file.name, bytes, request.idColumn || ''),
+  )
+  self.postMessage({
+    type: 'metadata-inspection-result',
+    requestId: request.requestId,
+    result,
+  })
+}
+
+async function handleExpressionQc(request) {
+  const wasm = await loadWasm()
+  if (!wasm) throw new Error('Rust/WASM is required for expression QC. Build or deploy app/wasm first.')
+
+  const geneFiles = request.gene?.enabled ? request.gene.files || [] : []
+  const transcriptFiles = request.transcript?.enabled ? request.transcript.files || [] : []
+  const total = (request.metadataFile ? 1 : 0) + geneFiles.length + transcriptFiles.length
+  let completed = 0
+  let metadata = null
+  const gene = []
+  const transcript = []
+
+  if (request.metadataFile) {
+    postProgress(request.requestId, completed, total, `Reading metadata: ${request.metadataFile.name}`)
+    const bytes = await wasmBytes(request.metadataFile)
+    metadata = JSON.parse(
+      wasm.inspect_metadata_json(
+        request.metadataFile.name,
+        bytes,
+        request.metadataIdColumn || '',
+      ),
+    )
+    completed += 1
+    postProgress(request.requestId, completed, total, `Metadata ready: ${metadata.rows} rows`)
+  }
+
+  for (const file of geneFiles) {
+    postProgress(request.requestId, completed, total, `Gene expression: ${file.name}`)
+    const bytes = await wasmBytes(file)
+    gene.push(JSON.parse(
+      wasm.summarize_expression_json(
+        file.name,
+        bytes,
+        'gene-expression',
+        request.gene.metric,
+        Boolean(request.ignoreZeros),
+      ),
+    ))
+    completed += 1
+    postProgress(request.requestId, completed, total, `Gene expression ${completed}/${total}`)
+  }
+
+  for (const file of transcriptFiles) {
+    postProgress(request.requestId, completed, total, `Transcript expression: ${file.name}`)
+    const bytes = await wasmBytes(file)
+    transcript.push(JSON.parse(
+      wasm.summarize_expression_json(
+        file.name,
+        bytes,
+        'transcript-expression',
+        request.transcript.metric,
+        Boolean(request.ignoreZeros),
+      ),
+    ))
+    completed += 1
+    postProgress(request.requestId, completed, total, `Transcript expression ${completed}/${total}`)
+  }
+
+  self.postMessage({
+    type: 'expression-qc-result',
+    requestId: request.requestId,
+    result: {
+      metadata,
+      gene,
+      transcript,
+      ignoreZeros: Boolean(request.ignoreZeros),
+      completedAt: new Date().toISOString(),
+      execution: 'local-browser-wasm',
+    },
+  })
+}
+
 self.addEventListener('message', async (event) => {
   const request = event.data
-  if (!request || request.type !== 'preflight') return
+  if (!request?.type || !request.requestId) return
 
   try {
-    const wasm = await loadWasm()
-    const records = request.files.map((file) => {
-      const classification = wasm
-        ? JSON.parse(wasm.classify_filename_json(file.name))
-        : classifyInputFilename(file.name)
-      return {
-        ...file,
-        ...classification,
-        status: classification.recognized ? 'ready' : 'unrecognized',
-      }
-    })
-
-    let engineVersion = null
-    if (wasm) {
-      try {
-        engineVersion = JSON.parse(wasm.engine_info_json()).version ?? null
-      } catch {
-        engineVersion = null
-      }
+    if (request.type === 'preflight') {
+      await handlePreflight(request)
+      return
     }
-
-    self.postMessage({
-      type: 'preflight-result',
-      requestId: request.requestId,
-      records,
-      engine: wasm ? 'Rust/WASM' : 'JavaScript preflight fallback',
-      wasmReady: Boolean(wasm),
-      engineVersion,
-    })
+    if (request.type === 'inspect-metadata') {
+      await handleMetadataInspection(request)
+      return
+    }
+    if (request.type === 'run-expression-qc') {
+      await handleExpressionQc(request)
+    }
   } catch (error) {
-    self.postMessage({
-      type: 'worker-error',
-      requestId: request.requestId,
-      message: error instanceof Error ? error.message : String(error),
-    })
+    postError(request.requestId, error)
   }
 })

@@ -20,7 +20,7 @@ Both HTML report styles and the technical table export are generated from the **
 
 ### 4C Insight WASM migration
 
-From v0.17.0, the primary product is the local-first 4C Insight web application. Users select files from their own computer; the target scientific execution path is Rust/WebAssembly in browser workers, with results saved locally. The existing Rust scientific implementation remains authoritative while each workflow is moved behind browser-safe byte/reader APIs and native/WASM parity tests. See `docs/wasm_architecture.md` and `docs/wasm_development.md`.
+From v0.17.0, the primary product is the local-first 4C Insight web application. In v0.18.0, metadata and gene/transcript expression QC are the first scientific workflows enabled in Rust/WASM. Users select files from their own computer; the target scientific execution path is Rust/WebAssembly in browser workers, with results saved locally. The existing Rust scientific implementation remains authoritative while each workflow is moved behind browser-safe byte/reader APIs and native/WASM parity tests. See `docs/wasm_architecture.md` and `docs/wasm_development.md`.
 
 ### Searchable visual in-app and report documentation
 

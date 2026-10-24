@@ -424,76 +424,20 @@ pub(crate) fn classify_workbook_name(name: &str) -> Option<(CohortModality, Stri
 }
 
 pub fn load_metadata(path: &Path) -> Result<MetadataTable> {
-    let ext = path
-        .extension()
-        .and_then(|x| x.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let (columns, rows) = match ext.as_str() {
-        "xlsx" | "xls" => read_metadata_xlsx(path)?,
-        "csv" => read_metadata_delimited(path, b',')?,
-        "tsv" | "txt" => read_metadata_delimited(path, b'\t')?,
-        _ => bail!("Unsupported metadata file type: {}", path.display()),
-    };
-    if columns.is_empty() {
-        bail!("Metadata file has no header row");
-    }
-    let id_column = ["sample_id", "4C_ID", "Sample_ID", "Sample", "sample"]
-        .iter()
-        .find(|candidate| columns.iter().any(|col| col == **candidate))
-        .map(|x| (*x).to_string())
-        .unwrap_or_else(|| columns[0].clone());
+    let bytes = fs::read(path)
+        .with_context(|| format!("Could not read metadata file {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("metadata.tsv");
+    let parsed = crate::portable_io::parse_metadata_bytes(file_name, &bytes)
+        .with_context(|| format!("Could not parse metadata file {}", path.display()))?;
     Ok(MetadataTable {
         path: path.to_path_buf(),
-        columns,
-        rows,
-        id_column,
+        columns: parsed.columns,
+        rows: parsed.rows,
+        id_column: parsed.id_column,
     })
-}
-
-fn read_metadata_xlsx(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>)> {
-    let mut workbook: Xlsx<_> = open_workbook(path)
-        .with_context(|| format!("Could not open metadata workbook {}", path.display()))?;
-    let sheet_name = workbook
-        .sheet_names()
-        .first()
-        .cloned()
-        .ok_or_else(|| anyhow!("Metadata workbook has no worksheets"))?;
-    let range = workbook
-        .worksheet_range(&sheet_name)
-        .with_context(|| format!("Could not read worksheet '{sheet_name}'"))?;
-    let mut iter = range.rows();
-    let header = iter
-        .next()
-        .ok_or_else(|| anyhow!("Metadata worksheet is empty"))?;
-    let columns: Vec<String> = header.iter().map(cell_text).collect();
-    let rows = iter
-        .map(|row| {
-            (0..columns.len())
-                .map(|i| row.get(i).map(cell_text).unwrap_or_default())
-                .collect::<Vec<_>>()
-        })
-        .filter(|row| row.iter().any(|v| !v.trim().is_empty()))
-        .collect();
-    Ok((columns, rows))
-}
-
-fn read_metadata_delimited(path: &Path, delimiter: u8) -> Result<(Vec<String>, Vec<Vec<String>>)> {
-    let mut reader = ReaderBuilder::new()
-        .delimiter(delimiter)
-        .from_path(path)
-        .with_context(|| format!("Could not open metadata table {}", path.display()))?;
-    let columns = reader
-        .headers()?
-        .iter()
-        .map(|x| x.to_string())
-        .collect::<Vec<_>>();
-    let mut rows = Vec::new();
-    for record in reader.records() {
-        let record = record?;
-        rows.push(record.iter().map(|x| x.to_string()).collect());
-    }
-    Ok((columns, rows))
 }
 
 pub fn build_mapping(scan: &ProjectScan, metadata: &MetadataTable) -> CohortMapping {

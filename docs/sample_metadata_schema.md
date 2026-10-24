@@ -1,6 +1,6 @@
 # Standard multi-omics sample metadata
 
-4C Insight v0.17.0 defines a standard **one-row-per-biological-sample** metadata table. The table is intentionally a plain UTF-8 TSV so it can be edited in Excel/LibreOffice/R/Python or curated with a local metadata editor.
+4C Insight v0.18.0 defines a standard **one-row-per-biological-sample** metadata table. The table is intentionally a plain UTF-8 TSV so it can be edited in Excel/LibreOffice/R/Python or curated with a local metadata editor.
 
 ## Core rules
 

@@ -10,6 +10,7 @@ pub mod input_conventions;
 pub mod longitudinal;
 pub mod metadata;
 pub mod outliers;
+pub mod portable_io;
 pub mod report;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -1261,27 +1262,11 @@ fn quantile_sorted(values: &[f64], probability: f64) -> f64 {
 }
 
 pub fn sample_name(path: &Path) -> String {
-    let stem = path
-        .file_stem()
-        .and_then(|x| x.to_str())
-        .unwrap_or("sample")
-        .to_string();
-
-    const SUFFIXES: &[&str] = &[
-        "_tumor_rna_gene_expression_report",
-        "_tumor_rna_transcript_expression_report",
-        "_rna_gene_expression_report",
-        "_rna_transcript_expression_report",
-        "_gene_expression_report",
-        "_transcript_expression_report",
-    ];
-
-    for suffix in SUFFIXES {
-        if let Some(trimmed) = stem.strip_suffix(suffix) {
-            return trimmed.to_string();
-        }
-    }
-    stem
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("sample");
+    portable_io::sample_name_from_filename(file_name)
 }
 
 fn normalize_id(cell: &Data) -> String {

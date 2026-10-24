@@ -1,0 +1,4 @@
+sample_id	subject_id	analysis_group	timepoint	qc_review_status
+S1	P1	Case	T0	Include
+S2	P1	Case	T1	Include
+S3	P2	Control	T0	Failed

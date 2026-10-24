@@ -8,6 +8,7 @@ on:
       - 'app/**'
       - 'wasm/**'
       - 'src/input_conventions.rs'
+      - 'src/portable_io.rs'
       - '.github/workflows/pages.yml'
 
 permissions:
