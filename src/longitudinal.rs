@@ -5,22 +5,31 @@
 //! same configured person/patient remain more similar to one another than to
 //! observations from other people, and compares that signal across modalities.
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::analysis::CohortModalitySelection;
-use crate::cohort::{CohortModality, MetadataTable, ProjectScan, normalize_sample_id};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cohort::{CohortModality, ProjectScan};
+use crate::cohort::{MetadataTable, normalize_sample_id};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::corrected::{
-    CorrectedModelSpec, DendrogramResult, UnsupervisedDistanceMatrix,
-    average_linkage_dendrogram_for_samples, run_unsupervised_expression_distance,
-    run_unsupervised_immune_distance, run_unsupervised_isotype_distance,
-    run_unsupervised_repertoire_distance, write_dendrogram,
+    CorrectedModelSpec, run_unsupervised_expression_distance, run_unsupervised_immune_distance,
+    run_unsupervised_isotype_distance, run_unsupervised_repertoire_distance, write_dendrogram,
+};
+use crate::corrected::{
+    DendrogramResult, UnsupervisedDistanceMatrix, average_linkage_dendrogram_for_samples,
 };
 use crate::metadata::MODALITY_ALIAS_COLUMNS;
 use anyhow::{Result, anyhow, bail};
+#[cfg(not(target_arch = "wasm32"))]
 use csv::WriterBuilder;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LongitudinalClusteringConfig {
     /// Metadata column containing the biological observation/sample identifier
     /// used by filenames or merged expression columns.
@@ -36,14 +45,14 @@ pub struct LongitudinalClusteringConfig {
     pub excluded_qc_values: BTreeSet<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LongitudinalExcludedRow {
     pub observation_id: String,
     pub patient_id: String,
     pub qc_value: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LongitudinalSampleAnnotation {
     pub sample_id: String,
     pub observation_id: String,
@@ -52,7 +61,7 @@ pub struct LongitudinalSampleAnnotation {
     pub qc_value: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LongitudinalPairDistance {
     pub sample_a: String,
     pub sample_b: String,
@@ -66,7 +75,7 @@ pub struct LongitudinalPairDistance {
     pub distance: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LongitudinalModalityResult {
     pub modality: String,
     pub distance_label: String,
@@ -91,13 +100,13 @@ pub struct LongitudinalModalityResult {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LongitudinalModalityError {
     pub modality: String,
     pub error: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LongitudinalAnalysisResult {
     pub config: LongitudinalClusteringConfig,
     pub metadata_rows: usize,
@@ -112,7 +121,7 @@ pub struct LongitudinalAnalysisResult {
 }
 
 #[derive(Debug, Clone)]
-struct MetadataObservation {
+pub(crate) struct MetadataObservation {
     observation_id: String,
     patient_id: String,
     patient_key: String,
@@ -122,15 +131,15 @@ struct MetadataObservation {
 }
 
 #[derive(Debug)]
-struct LongitudinalMetadataIndex {
-    eligible_ids: HashSet<String>,
+pub(crate) struct LongitudinalMetadataIndex {
+    pub(crate) eligible_ids: HashSet<String>,
     by_key: HashMap<String, MetadataObservation>,
-    eligible_rows: usize,
-    qc_excluded_rows: usize,
-    missing_identifier_rows: usize,
-    ambiguous_keys: usize,
-    excluded_rows: Vec<LongitudinalExcludedRow>,
-    warnings: Vec<String>,
+    pub(crate) eligible_rows: usize,
+    pub(crate) qc_excluded_rows: usize,
+    pub(crate) missing_identifier_rows: usize,
+    pub(crate) ambiguous_keys: usize,
+    pub(crate) excluded_rows: Vec<LongitudinalExcludedRow>,
+    pub(crate) warnings: Vec<String>,
 }
 
 pub fn suggested_observation_id_column(metadata: &MetadataTable) -> Option<String> {
@@ -216,7 +225,7 @@ fn normalized_exclusion_values(config: &LongitudinalClusteringConfig) -> HashSet
         .collect()
 }
 
-fn build_metadata_index(
+pub(crate) fn build_metadata_index(
     metadata: &MetadataTable,
     config: &LongitudinalClusteringConfig,
 ) -> Result<LongitudinalMetadataIndex> {
@@ -356,6 +365,7 @@ fn build_metadata_index(
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_longitudinal_analysis<F>(
     scan: &ProjectScan,
     metadata: &MetadataTable,
@@ -395,15 +405,13 @@ where
                 let base = stage;
                 let raw = $expr;
                 match raw {
-                    Ok(matrix) => {
-                        match summarize_modality(&label, matrix, &index.by_key, &config) {
-                            Ok(result) => modalities.push(result),
-                            Err(error) => modality_errors.push(LongitudinalModalityError {
-                                modality: label.clone(),
-                                error: format!("{error:#}"),
-                            }),
-                        }
-                    }
+                    Ok(matrix) => match summarize_modality(&label, matrix, &index, &config) {
+                        Ok(result) => modalities.push(result),
+                        Err(error) => modality_errors.push(LongitudinalModalityError {
+                            modality: label.clone(),
+                            error: format!("{error:#}"),
+                        }),
+                    },
                     Err(error) => modality_errors.push(LongitudinalModalityError {
                         modality: label.clone(),
                         error: format!("{error:#}"),
@@ -588,12 +596,13 @@ where
     })
 }
 
-fn summarize_modality(
+pub(crate) fn summarize_modality(
     modality: &str,
     raw: UnsupervisedDistanceMatrix,
-    metadata_by_key: &HashMap<String, MetadataObservation>,
+    metadata_index: &LongitudinalMetadataIndex,
     config: &LongitudinalClusteringConfig,
 ) -> Result<LongitudinalModalityResult> {
+    let metadata_by_key = &metadata_index.by_key;
     if raw.sample_ids.len() != raw.distances.len()
         || raw
             .distances
@@ -862,6 +871,7 @@ fn nearest_neighbor_accuracy(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn write_longitudinal_analysis_tables(
     parent: &Path,
     result: &LongitudinalAnalysisResult,

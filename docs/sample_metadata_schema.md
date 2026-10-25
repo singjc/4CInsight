@@ -89,3 +89,15 @@ The browser does not require literal column names such as `sample_id` or `subjec
 - optional metadata exclusion columns and values.
 
 This supports cohorts where a column named `subject_id` is actually the longitudinal observation ID and a column named `sample_id` is the patient ID, or any other project-specific naming convention. The role selection is authoritative for the analysis.
+
+
+## Longitudinal role mapping in 4C Insight W4
+
+The browser does not require literal `sample_id` or `subject_id` names. The user selects:
+
+- **Observation / longitudinal sample ID**: the identifier that matches expression-table sample columns;
+- **Patient / person ID**: the stable identifier shared by repeated visits;
+- optional **Collection date / timepoint / visit**;
+- optional metadata exclusion column and values.
+
+This means a collaborator table in which `subject_id` is the observation identifier and `sample_id` is the patient identifier is supported directly.

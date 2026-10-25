@@ -20,7 +20,7 @@ Long-running work runs outside the UI thread. Worker messages use explicit versi
 
 ### 3. Rust/WASM bridge
 
-`wasm/` exposes browser-safe functions. W1 added input preflight classification. W2 adds metadata parsing and gene/transcript expression distribution QC from local bytes. Later phases add expression comparison models, repertoire analyses, longitudinal analysis, significant-hit structure, and report generation.
+`wasm/` exposes browser-safe functions. W1 added input preflight classification, W2 added metadata and expression QC, W3 added corrected expression group comparison, and W4 adds gene/transcript longitudinal patient-signature analysis. Later phases add repertoire/immune longitudinal analysis, significant-hit structure, and report generation.
 
 ### 4. Shared Rust science
 

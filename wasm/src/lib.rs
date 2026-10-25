@@ -1,6 +1,23 @@
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
+// Host-side unit tests compile shared longitudinal.rs outside wasm32. The
+// production wasm32 build excludes native orchestration, but the host parser
+// still needs the small selection shape referenced by that excluded workflow.
+#[cfg(not(target_arch = "wasm32"))]
+mod analysis {
+    pub struct CohortModalitySelection {
+        pub gene: bool,
+        pub transcript: bool,
+        pub bcr: bool,
+        pub bcr_isotype: bool,
+        pub tcr_alpha: bool,
+        pub tcr_beta: bool,
+        pub immune: bool,
+        pub pathway: bool,
+    }
+}
+
 #[path = "../../src/input_conventions.rs"]
 mod input_conventions;
 #[allow(dead_code)]
@@ -15,12 +32,20 @@ mod corrected;
 #[allow(dead_code)]
 #[path = "../../src/portable_io.rs"]
 mod portable_io;
+#[allow(dead_code)]
+#[path = "../../src/longitudinal.rs"]
+mod longitudinal;
 #[path = "../../src/portable_compare.rs"]
 mod portable_compare;
+#[path = "../../src/portable_longitudinal.rs"]
+mod portable_longitudinal;
 
 use input_conventions::{FilenameInputKind, classify_input_filename};
 use portable_compare::{
     PortableExpressionComparisonConfig, run_portable_expression_comparison,
+};
+use portable_longitudinal::{
+    PortableLongitudinalConfig, run_portable_expression_longitudinal,
 };
 use portable_io::{
     PortableExpressionKind, PortableExpressionMetric, inspect_metadata_bytes,
@@ -33,7 +58,7 @@ struct EngineInfo<'a> {
     package: &'a str,
     version: &'a str,
     execution: &'a str,
-    capabilities: [&'a str; 5],
+    capabilities: [&'a str; 6],
 }
 
 #[derive(Serialize)]
@@ -77,6 +102,7 @@ pub fn engine_info_json() -> String {
             "expression-qc",
             "metadata-grouping",
             "corrected-expression-comparison",
+            "longitudinal-expression-signature",
         ],
     })
     .expect("engine info serialization is infallible")
@@ -184,6 +210,46 @@ pub fn run_expression_comparison_json(
     .map_err(js_error)
 }
 
+
+fn run_expression_longitudinal_json_core(
+    metadata_file_name: &str,
+    metadata_bytes: &[u8],
+    merged_file_name: &str,
+    merged_bytes: &[u8],
+    config_json: &str,
+) -> Result<String, String> {
+    let config: PortableLongitudinalConfig =
+        serde_json::from_str(config_json).map_err(|error| error.to_string())?;
+    let result = run_portable_expression_longitudinal(
+        metadata_file_name,
+        metadata_bytes,
+        merged_file_name,
+        merged_bytes,
+        &config,
+        |_done, _total, _message| {},
+    )
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string(&result).map_err(|error| error.to_string())
+}
+
+#[wasm_bindgen]
+pub fn run_expression_longitudinal_json(
+    metadata_file_name: &str,
+    metadata_bytes: &[u8],
+    merged_file_name: &str,
+    merged_bytes: &[u8],
+    config_json: &str,
+) -> Result<String, JsValue> {
+    run_expression_longitudinal_json_core(
+        metadata_file_name,
+        metadata_bytes,
+        merged_file_name,
+        merged_bytes,
+        config_json,
+    )
+    .map_err(js_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,4 +327,33 @@ mod tests {
         assert!(json.contains("\"n_model_samples\":7"));
         assert!(json.contains("\"feature_label\":\"Gene\""));
     }
+
+    #[test]
+    fn w4_longitudinal_gene_signature_runs_through_wasm_bridge() {
+        let metadata = include_bytes!("../../tests/fixtures/w4_metadata.tsv");
+        let merged = include_bytes!("../../tests/fixtures/w3_merged_gene_expression.tsv");
+        let config = serde_json::json!({
+            "kind": "gene-expression",
+            "observationIdColumn": "sample_id",
+            "patientIdColumn": "patient_id",
+            "timeColumn": "visit",
+            "exclusionEnabled": true,
+            "exclusionColumn": "qc_review_status",
+            "exclusionValues": ["Failed"],
+            "minCount": 10.0,
+            "minFractionSamples": 0.20
+        });
+        let json = run_expression_longitudinal_json_core(
+            "w4_metadata.tsv",
+            metadata,
+            "w3_merged_gene_expression.tsv",
+            merged,
+            &config.to_string(),
+        )
+        .unwrap();
+        assert!(json.contains("\"qc_excluded_rows\":1"));
+        assert!(json.contains("\"longitudinal_patients\":3"));
+        assert!(json.contains("\"samples\":7"));
+    }
+
 }

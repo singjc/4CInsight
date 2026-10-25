@@ -10,6 +10,8 @@ on:
       - 'src/input_conventions.rs'
       - 'src/portable_io.rs'
       - 'src/portable_compare.rs'
+      - 'src/portable_longitudinal.rs'
+      - 'src/longitudinal.rs'
       - 'src/corrected.rs'
       - 'src/cohort.rs'
       - 'src/metadata.rs'

@@ -12,6 +12,7 @@ pub mod metadata;
 pub mod outliers;
 pub mod portable_compare;
 pub mod portable_io;
+pub mod portable_longitudinal;
 pub mod report;
 
 use anyhow::{Context, Result, anyhow, bail};

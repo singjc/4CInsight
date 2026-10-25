@@ -42,6 +42,22 @@ const state = {
   qcResult: null,
   compareProgress: null,
   compareResult: null,
+  longitudinalProgress: null,
+  longitudinalResult: null,
+  longitudinalConfig: {
+    observationIdColumn: '',
+    patientIdColumn: '',
+    timeColumn: '',
+    exclusionEnabled: false,
+    exclusionColumn: '',
+    exclusionValues: [],
+    geneEnabled: true,
+    geneMergedId: '',
+    transcriptEnabled: true,
+    transcriptMergedId: '',
+    minCount: 10,
+    minFractionSamples: 0.20,
+  },
   compareConfig: {
     groupColumn: '',
     caseValues: [],
@@ -172,6 +188,8 @@ function resetQcStateAfterInputsChange() {
   state.qcProgress = null
   state.compareResult = null
   state.compareProgress = null
+  state.longitudinalResult = null
+  state.longitudinalProgress = null
 
   const geneMerged = recordsOfKind('merged-gene-expression')
   const transcriptMerged = recordsOfKind('merged-transcript-expression')
@@ -181,6 +199,18 @@ function resetQcStateAfterInputsChange() {
   if (!transcriptMerged.some((record) => record.id === state.compareConfig.transcriptMergedId)) {
     state.compareConfig.transcriptMergedId = transcriptMerged[0]?.id || ''
   }
+  if (!geneMerged.some((record) => record.id === state.longitudinalConfig.geneMergedId)) {
+    state.longitudinalConfig.geneMergedId = geneMerged[0]?.id || ''
+  }
+  if (!transcriptMerged.some((record) => record.id === state.longitudinalConfig.transcriptMergedId)) {
+    state.longitudinalConfig.transcriptMergedId = transcriptMerged[0]?.id || ''
+  }
+  state.longitudinalConfig.observationIdColumn = ''
+  state.longitudinalConfig.patientIdColumn = ''
+  state.longitudinalConfig.timeColumn = ''
+  state.longitudinalConfig.exclusionEnabled = false
+  state.longitudinalConfig.exclusionColumn = ''
+  state.longitudinalConfig.exclusionValues = []
   state.compareConfig.groupColumn = ''
   state.compareConfig.caseValues = []
   state.compareConfig.controlValues = []
@@ -241,6 +271,8 @@ function clearProject() {
   state.qcProgress = null
   state.compareResult = null
   state.compareProgress = null
+  state.longitudinalResult = null
+  state.longitudinalProgress = null
   state.qcConfig.metadataId = ''
   state.qcConfig.metadataIdColumn = ''
   state.compareConfig.groupColumn = ''
@@ -250,6 +282,14 @@ function clearProject() {
   state.compareConfig.covariates = []
   state.compareConfig.geneMergedId = ''
   state.compareConfig.transcriptMergedId = ''
+  state.longitudinalConfig.observationIdColumn = ''
+  state.longitudinalConfig.patientIdColumn = ''
+  state.longitudinalConfig.timeColumn = ''
+  state.longitudinalConfig.exclusionEnabled = false
+  state.longitudinalConfig.exclusionColumn = ''
+  state.longitudinalConfig.exclusionValues = []
+  state.longitudinalConfig.geneMergedId = ''
+  state.longitudinalConfig.transcriptMergedId = ''
   render()
 }
 
@@ -289,6 +329,19 @@ async function exportCompareResult() {
     result: state.compareResult,
   }
   await saveTextFile('4c-insight-compare-groups-expression.json', `${JSON.stringify(payload, null, 2)}\n`)
+}
+
+
+async function exportLongitudinalResult() {
+  if (!state.longitudinalResult) return
+  const payload = {
+    product: '4C Insight',
+    schemaVersion: 1,
+    workflow: 'longitudinal-patient-signature-expression',
+    config: state.longitudinalConfig,
+    result: state.longitudinalResult,
+  }
+  await saveTextFile('4c-insight-longitudinal-patient-signature.json', `${JSON.stringify(payload, null, 2)}\n`)
 }
 
 function selectedValues(select) {
@@ -800,6 +853,260 @@ function compareView() {
   ${state.compareResult ? `<div class="result-heading"><div><span class="eyebrow">Corrected expression result</span><h3>${escapeHtml(state.compareResult.comparisonName)}</h3><p>Generated entirely on this device. PCA and clustering use global top-variable normalized features, not significant-hit selection.</p></div><button id="export-comparison" class="secondary-button">Save comparison JSON</button></div>${comparisonResultSection('Gene expression', state.compareResult.gene)}${comparisonResultSection('Transcript expression', state.compareResult.transcript)}` : ''}`
 }
 
+
+function ensureLongitudinalDefaults() {
+  const metadata = state.metadataInspection
+  const cfg = state.longitudinalConfig
+  const columns = metadata?.columns || []
+  if (!columns.length) return
+
+  if (!cfg.observationIdColumn || !columns.includes(cfg.observationIdColumn)) {
+    cfg.observationIdColumn = columns.includes(state.qcConfig.metadataIdColumn)
+      ? state.qcConfig.metadataIdColumn
+      : (metadata.id_column || columns[0] || '')
+  }
+  if (!cfg.patientIdColumn || !columns.includes(cfg.patientIdColumn) || cfg.patientIdColumn === cfg.observationIdColumn) {
+    cfg.patientIdColumn = ['patient_id', 'sample_id', 'subject_id', 'participant_id']
+      .find((column) => column !== cfg.observationIdColumn && columns.includes(column))
+      || columns.find((column) => column !== cfg.observationIdColumn)
+      || ''
+  }
+  if (cfg.timeColumn && (!columns.includes(cfg.timeColumn) || cfg.timeColumn === cfg.observationIdColumn || cfg.timeColumn === cfg.patientIdColumn)) cfg.timeColumn = ''
+  if (!cfg.timeColumn) {
+    cfg.timeColumn = ['Collection_Date_(mm-dd-yy)', 'Collection_Date', 'collection_date', 'timepoint', 'visit', 'visit_date']
+      .find((column) => columns.includes(column) && column !== cfg.observationIdColumn && column !== cfg.patientIdColumn)
+      || columns.find((column) => column !== cfg.observationIdColumn && column !== cfg.patientIdColumn && /date|timepoint|visit/i.test(column))
+      || ''
+  }
+  if (cfg.exclusionColumn && !columns.includes(cfg.exclusionColumn)) {
+    cfg.exclusionColumn = ''
+    cfg.exclusionValues = []
+  }
+  if (!cfg.exclusionColumn) {
+    cfg.exclusionColumn = ['qc_review_status', 'qc_status', 'review_status', 'status']
+      .find((column) => columns.includes(column)) || ''
+  }
+
+  const geneMerged = recordsOfKind('merged-gene-expression')
+  const transcriptMerged = recordsOfKind('merged-transcript-expression')
+  if (!geneMerged.some((record) => record.id === cfg.geneMergedId)) cfg.geneMergedId = geneMerged[0]?.id || ''
+  if (!transcriptMerged.some((record) => record.id === cfg.transcriptMergedId)) cfg.transcriptMergedId = transcriptMerged[0]?.id || ''
+}
+
+function patientColor(patient) {
+  let hash = 0
+  for (const char of String(patient || '')) hash = ((hash * 31) + char.charCodeAt(0)) >>> 0
+  return `hsl(${hash % 360} 58% 44%)`
+}
+
+function longitudinalDendrogramSvg(tree, annotations) {
+  const leaves = tree?.leaves || []
+  const segments = tree?.segments || []
+  if (!leaves.length || !segments.length) return '<div class="plot-empty">Hierarchical clustering is not available for this result.</div>'
+  const annotationMap = new Map((annotations || []).map((row) => [String(row.sample_id), row]))
+  const width = 1080
+  const height = Math.max(360, 70 + leaves.length * 18)
+  const left = 300; const right = 30; const top = 28; const bottom = 30
+  const maxDistance = Math.max(1e-12, ...segments.flatMap((segment) => [Number(segment.x1), Number(segment.x2)]).filter(Number.isFinite))
+  const maxPosition = Math.max(1, ...leaves.map((leaf) => Number(leaf.position)).filter(Number.isFinite))
+  const sx = (x) => left + (Number(x) / maxDistance) * (width - left - right)
+  const sy = (y) => top + (Number(y) / maxPosition) * (height - top - bottom)
+  const lines = segments.map((segment) => `<line class="dendro-line" x1="${sx(segment.x1).toFixed(2)}" y1="${sy(segment.y1).toFixed(2)}" x2="${sx(segment.x2).toFixed(2)}" y2="${sy(segment.y2).toFixed(2)}"/>`).join('')
+  const leafMarks = leaves.map((leaf) => {
+    const annotation = annotationMap.get(String(leaf.sample_id)) || {}
+    const patient = annotation.patient_id || leaf.subject || 'Unknown patient'
+    const time = annotation.time_value || leaf.group || ''
+    const label = [leaf.sample_id, patient, time].filter(Boolean).join(' · ')
+    const y = sy(leaf.position)
+    const color = patientColor(patient)
+    return `<text class="dendro-label longitudinal-leaf-label" x="${left-14}" y="${(y+3).toFixed(2)}" text-anchor="end">${escapeHtml(label)}</text><circle cx="${left}" cy="${y.toFixed(2)}" r="4" style="fill:${color};stroke:#fff;stroke-width:1"><title>${escapeHtml(label)}</title></circle>`
+  }).join('')
+  return `<div class="longitudinal-tree-note">Colored dot = patient identity · leaf text = data sample · patient · time/visit</div><div class="plot-scroll longitudinal-dendrogram-scroll"><svg class="science-plot longitudinal-dendrogram" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(tree.name)}">${lines}${leafMarks}<text class="plot-label" x="${(left+width-right)/2}" y="${height-7}" text-anchor="middle">${escapeHtml(tree.distance_label)} · ${escapeHtml(tree.linkage)}</text></svg></div>`
+}
+
+function longitudinalRankingTable(result) {
+  const rows = [['Gene expression', result?.gene], ['Transcript expression', result?.transcript]]
+    .filter(([, entry]) => entry?.modality)
+    .map(([label, entry]) => ({ label, modality: entry.modality }))
+    .sort((a, b) => Number(b.modality.identity_auc || -1) - Number(a.modality.identity_auc || -1))
+  if (!rows.length) return ''
+  return `<section class="card"><div class="card-heading"><div><h3>Cross-modality patient-signature ranking</h3><p>Higher identity AUC and nearest-neighbour accuracy, together with a lower within/between distance ratio, indicate stronger patient-specific stability.</p></div><span class="tag success">Unsupervised</span></div><div class="table-scroll"><table><thead><tr><th>Data type</th><th>Samples</th><th>Longitudinal patients</th><th>Identity AUC</th><th>NN patient accuracy</th><th>Within / between distance</th></tr></thead><tbody>${rows.map(({ label, modality }) => `<tr><td><strong>${escapeHtml(label)}</strong></td><td>${modality.samples}</td><td>${modality.longitudinal_patients}</td><td>${formatNumber(modality.identity_auc)}</td><td>${Number.isFinite(Number(modality.nearest_neighbor_accuracy)) ? `${(Number(modality.nearest_neighbor_accuracy) * 100).toFixed(1)}%` : '—'}</td><td>${formatNumber(modality.within_between_ratio)}</td></tr>`).join('')}</tbody></table></div></section>`
+}
+
+function longitudinalResultSection(title, result) {
+  if (!result?.modality) return ''
+  const modality = result.modality
+  const warnings = [...new Set([...(result.warnings || []), ...(modality.warnings || [])])]
+  return `<section class="card comparison-result longitudinal-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(modality.distance_label)} · patient identity is not used to construct the distance matrix.</p></div><span class="tag success">Rust/WASM</span></div>
+    <div class="summary-grid compact-grid">
+      ${summaryCard('Samples', modality.samples, `${modality.patients} patient/person IDs`)}
+      ${summaryCard('Longitudinal patients', modality.longitudinal_patients, `${modality.longitudinal_samples} samples from patients with ≥2 observations`)}
+      ${summaryCard('Patient identity AUC', formatNumber(modality.identity_auc), '0.5 ≈ no ranking signal; 1.0 = same-patient pairs always closer')}
+      ${summaryCard('Nearest-neighbour accuracy', Number.isFinite(Number(modality.nearest_neighbor_accuracy)) ? `${(Number(modality.nearest_neighbor_accuracy) * 100).toFixed(1)}%` : '—', 'Nearest other sample belongs to the same patient')}
+      ${summaryCard('Median within-patient', formatNumber(modality.median_within_patient_distance), `${modality.within_patient_pairs} same-patient pairs`)}
+      ${summaryCard('Median between-patient', formatNumber(modality.median_between_patient_distance), `${modality.between_patient_pairs} different-patient pairs`)}
+      ${summaryCard('Within / between ratio', formatNumber(modality.within_between_ratio), 'Lower than 1 means repeated patient samples are closer')}
+      ${summaryCard('QC-excluded rows', result.qc_excluded_rows, `${result.eligible_metadata_rows} metadata observations retained`)}
+    </div>
+    ${warnings.length ? `<div class="analysis-warnings">${warnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join('')}</div>` : ''}
+    <article class="plot-card longitudinal-tree-card"><div class="plot-heading"><strong>Patient-specific hierarchical clustering</strong><span>Average linkage. Same-patient observations should appear close together when this modality preserves a stable patient signature.</span></div>${longitudinalDendrogramSvg(modality.dendrogram, modality.annotations)}</article>
+    <details class="details-block result-details"><summary>Sample annotations (${modality.annotations.length})</summary><div class="table-scroll longitudinal-table"><table><thead><tr><th>Data sample</th><th>Metadata observation</th><th>Patient/person</th><th>Time / visit</th><th>QC value</th></tr></thead><tbody>${modality.annotations.slice(0, 500).map((row) => `<tr><td>${escapeHtml(row.sample_id)}</td><td>${escapeHtml(row.observation_id)}</td><td><strong>${escapeHtml(row.patient_id)}</strong></td><td>${escapeHtml(row.time_value || '—')}</td><td>${escapeHtml(row.qc_value || '—')}</td></tr>`).join('')}</tbody></table></div></details>
+  </section>`
+}
+
+function longitudinalView() {
+  ensureLongitudinalDefaults()
+  const metadataRecords = recordsOfKind('metadata-candidate')
+  const geneMerged = recordsOfKind('merged-gene-expression')
+  const transcriptMerged = recordsOfKind('merged-transcript-expression')
+  const metadata = state.metadataInspection
+  const columns = metadata?.columns || []
+  const cfg = state.longitudinalConfig
+  const exclusionValues = cachedMetadataValues(cfg.exclusionColumn)
+  const rolesReady = Boolean(metadata && cfg.observationIdColumn && cfg.patientIdColumn && cfg.observationIdColumn !== cfg.patientIdColumn)
+  const modalityReady = (cfg.geneEnabled && cfg.geneMergedId) || (cfg.transcriptEnabled && cfg.transcriptMergedId)
+  const exclusionReady = !cfg.exclusionEnabled || (Boolean(cfg.exclusionColumn) && cfg.exclusionValues.length > 0)
+  const runnable = state.wasmReady && !state.busy && rolesReady && modalityReady && exclusionReady
+  const incompleteExclusion = cfg.exclusionEnabled && !cfg.exclusionColumn
+    ? 'The longitudinal exclusion is enabled. Select a metadata column and at least one value, or turn it off.'
+    : cfg.exclusionEnabled && !cfg.exclusionValues.length
+      ? 'The longitudinal exclusion is enabled. Select at least one value to exclude, or turn it off.'
+      : ''
+
+  return `<section class="page-heading"><div><span class="eyebrow">Longitudinal · W4</span><h2>Which data type preserves patient identity over time?</h2><p>Map the observation and patient identifiers explicitly. 4C Insight then clusters all eligible observations without using Case/Control labels and measures whether repeated samples from the same patient remain closer than the rest of the cohort.</p></div><div class="local-card"><strong>Unsupervised and local</strong><span>Patient identity is used only to score the finished distance matrix, not to construct it.</span></div></section>
+  ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
+  ${!metadataRecords.length ? '<div class="notice-banner"><strong>Metadata required.</strong><span>Select the cohort files/folder in Project first.</span></div>' : ''}
+  ${cfg.observationIdColumn && cfg.observationIdColumn === cfg.patientIdColumn ? '<div class="notice-banner"><strong>Choose two different identifier roles.</strong><span>The observation/sample ID identifies each longitudinal specimen. The patient/person ID must be the stable identifier shared across visits.</span></div>' : ''}
+  ${incompleteExclusion ? `<div class="notice-banner"><strong>Finish or disable the optional exclusion.</strong><span>${escapeHtml(incompleteExclusion)}</span></div>` : ''}
+  <section class="card"><div class="card-heading"><div><h3>1. Map longitudinal metadata roles</h3><p>Column names are not assumed. This supports sheets where, for example, subject_id is the longitudinal sample and sample_id is the patient.</p></div><span class="tag neutral">W4</span></div><div class="config-grid longitudinal-role-grid">
+    <div class="config-block stacked"><label><span>Metadata file</span><select id="longitudinal-metadata-file">${metadataRecords.map((record) => `<option value="${escapeHtml(record.id)}" ${state.qcConfig.metadataId === record.id ? 'selected' : ''}>${escapeHtml(record.name)}</option>`).join('')}</select></label><label><span>Observation / longitudinal sample ID</span><select id="longitudinal-observation-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns, cfg.observationIdColumn) : '<option>Read metadata first</option>'}</select></label></div>
+    <div class="config-block stacked"><label><span>Patient / person ID</span><select id="longitudinal-patient-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns.filter((column) => column !== cfg.observationIdColumn), cfg.patientIdColumn) : '<option>Read metadata first</option>'}</select></label><label><span>Collection date / timepoint / visit</span><select id="longitudinal-time-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns.filter((column) => column !== cfg.observationIdColumn && column !== cfg.patientIdColumn), cfg.timeColumn, true) : '<option>Read metadata first</option>'}</select></label></div>
+  </div></section>
+  <section class="card"><div class="card-heading"><div><h3>2. Optional metadata exclusion</h3><p>Use any metadata column/value rule, for example qc_review_status = Failed. Exclusion occurs before clustering.</p></div></div><div class="config-grid exclusion-grid"><div class="config-block stacked"><div class="config-heading"><label class="check-label"><input id="longitudinal-exclusion-enabled" type="checkbox" ${cfg.exclusionEnabled ? 'checked' : ''}/><span><strong>Exclude metadata rows</strong><small>Independent of automatic outlier analysis.</small></span></label><span class="tag ${cfg.exclusionEnabled ? 'warning' : 'neutral'}">${cfg.exclusionEnabled ? (exclusionReady ? 'Active' : 'Needs input') : 'Optional'}</span></div><label><span>Metadata column</span><select id="longitudinal-exclusion-column" ${cfg.exclusionEnabled ? '' : 'disabled'}>${columnOptions(columns, cfg.exclusionColumn, true)}</select></label><label><span>Exclude these values</span><select id="longitudinal-exclusion-values" class="multi-select" multiple size="5" ${cfg.exclusionEnabled && cfg.exclusionColumn ? '' : 'disabled'}>${exclusionValues.length ? metadataValueOptions(exclusionValues, cfg.exclusionValues) : '<option disabled>Choose a column to load values</option>'}</select></label></div></div></section>
+  <section class="card"><div class="card-heading"><div><h3>3. Expression data types</h3><p>W4 uses the same merged count tables and normalization geometry already validated in W3.</p></div></div><div class="config-grid expression-source-grid">
+    <div class="config-block stacked ${geneMerged.length ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="longitudinal-gene-enabled" type="checkbox" ${cfg.geneEnabled && geneMerged.length ? 'checked' : ''} ${geneMerged.length ? '' : 'disabled'}/><span><strong>Gene expression</strong><small>Raw Count · normalized log2 top-variable feature distance</small></span></label><span class="tag ${geneMerged.length ? 'success' : 'neutral'}">${geneMerged.length ? 'Available' : 'Unavailable'}</span></div><label><span>Merged gene table</span><select id="longitudinal-gene-file" ${cfg.geneEnabled && geneMerged.length ? '' : 'disabled'}>${mergedFileOptions(geneMerged, cfg.geneMergedId)}</select></label></div>
+    <div class="config-block stacked ${transcriptMerged.length ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="longitudinal-transcript-enabled" type="checkbox" ${cfg.transcriptEnabled && transcriptMerged.length ? 'checked' : ''} ${transcriptMerged.length ? '' : 'disabled'}/><span><strong>Transcript / isoform expression</strong><small>Total Reads · normalized log2 top-variable feature distance</small></span></label><span class="tag ${transcriptMerged.length ? 'success' : 'neutral'}">${transcriptMerged.length ? 'Available' : 'Unavailable'}</span></div><label><span>Merged transcript table</span><select id="longitudinal-transcript-file" ${cfg.transcriptEnabled && transcriptMerged.length ? '' : 'disabled'}>${mergedFileOptions(transcriptMerged, cfg.transcriptMergedId)}</select></label></div>
+  </div><details class="advanced-settings"><summary>Advanced feature-support settings</summary><div class="form-grid advanced-grid"><label><span>Minimum count</span><input id="longitudinal-min-count" type="number" min="0" step="1" value="${cfg.minCount}"/></label><label><span>Minimum fraction of samples</span><input id="longitudinal-min-fraction" type="number" min="0" max="1" step="0.01" value="${cfg.minFractionSamples}"/></label></div><p>Defaults match the established expression clustering support filter.</p></details>
+  <div class="run-row"><div><strong>${cfg.observationIdColumn && cfg.patientIdColumn ? `${escapeHtml(cfg.observationIdColumn)} observations → ${escapeHtml(cfg.patientIdColumn)} patients` : 'Select observation and patient roles'}</strong><span>The same patient labels are used only after the unsupervised distance matrix is complete.</span></div><button id="run-longitudinal" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run longitudinal analysis'}</button></div></section>
+  ${state.longitudinalProgress ? `<div class="progress-card" role="status"><div class="progress-copy"><strong>${escapeHtml(state.longitudinalProgress.message)}</strong><span>${state.longitudinalProgress.completed} of ${state.longitudinalProgress.total} modality steps complete</span></div><progress max="${Math.max(1, state.longitudinalProgress.total)}" value="${state.longitudinalProgress.completed}"></progress></div>` : ''}
+  ${state.longitudinalResult ? `<div class="result-heading"><div><span class="eyebrow">Longitudinal patient-signature result</span><h3>Patient identity over repeated observations</h3><p>Generated entirely on this device. Metrics compare same-patient against different-patient distances after unsupervised clustering.</p></div><button id="export-longitudinal" class="secondary-button">Save longitudinal JSON</button></div>${longitudinalRankingTable(state.longitudinalResult)}${longitudinalResultSection('Gene expression', state.longitudinalResult.gene)}${longitudinalResultSection('Transcript / isoform expression', state.longitudinalResult.transcript)}` : ''}`
+}
+
+async function runLongitudinalAnalysis() {
+  const cfg = state.longitudinalConfig
+  const metadataFile = selectedFile(state.qcConfig.metadataId)
+  const geneFile = selectedFile(cfg.geneMergedId)
+  const transcriptFile = selectedFile(cfg.transcriptMergedId)
+  if (!metadataFile) {
+    state.error = 'Select a metadata file before running longitudinal analysis.'
+    render()
+    return
+  }
+  const portableConfig = {
+    observationIdColumn: cfg.observationIdColumn,
+    patientIdColumn: cfg.patientIdColumn,
+    timeColumn: cfg.timeColumn || null,
+    exclusionEnabled: cfg.exclusionEnabled,
+    exclusionColumn: cfg.exclusionEnabled ? (cfg.exclusionColumn || null) : null,
+    exclusionValues: cfg.exclusionEnabled ? cfg.exclusionValues : [],
+    minCount: Number(cfg.minCount),
+    minFractionSamples: Number(cfg.minFractionSamples),
+  }
+  state.busy = true
+  state.error = null
+  state.longitudinalResult = null
+  state.longitudinalProgress = { completed: 0, total: Number(Boolean(cfg.geneEnabled && geneFile)) + Number(Boolean(cfg.transcriptEnabled && transcriptFile)), message: 'Starting longitudinal analysis' }
+  render()
+  try {
+    const response = await workerRequest('run-longitudinal-expression', {
+      metadataFile,
+      config: portableConfig,
+      gene: { enabled: Boolean(cfg.geneEnabled && geneFile), file: cfg.geneEnabled ? geneFile : null },
+      transcript: { enabled: Boolean(cfg.transcriptEnabled && transcriptFile), file: cfg.transcriptEnabled ? transcriptFile : null },
+    }, (progress) => {
+      state.longitudinalProgress = progress
+      render()
+    })
+    state.longitudinalResult = response.result
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    state.busy = false
+    state.longitudinalProgress = null
+    render()
+  }
+}
+
+function bindLongitudinalEvents() {
+  const cfg = state.longitudinalConfig
+  const rerender = () => render()
+  document.querySelector('#longitudinal-metadata-file')?.addEventListener('change', (event) => {
+    state.qcConfig.metadataId = event.currentTarget.value
+    state.qcConfig.metadataIdColumn = ''
+    state.metadataInspection = null
+    state.metadataInspectionFileId = null
+    state.metadataValueCache.clear()
+    cfg.observationIdColumn = ''
+    cfg.patientIdColumn = ''
+    cfg.timeColumn = ''
+    cfg.exclusionColumn = ''
+    cfg.exclusionValues = []
+    state.longitudinalResult = null
+    rerender()
+  })
+  document.querySelector('#longitudinal-observation-column')?.addEventListener('change', (event) => {
+    cfg.observationIdColumn = event.currentTarget.value
+    if (cfg.patientIdColumn === cfg.observationIdColumn) cfg.patientIdColumn = ''
+    state.longitudinalResult = null
+    rerender()
+  })
+  document.querySelector('#longitudinal-patient-column')?.addEventListener('change', (event) => {
+    cfg.patientIdColumn = event.currentTarget.value
+    state.longitudinalResult = null
+    rerender()
+  })
+  document.querySelector('#longitudinal-time-column')?.addEventListener('change', (event) => {
+    cfg.timeColumn = event.currentTarget.value
+    state.longitudinalResult = null
+  })
+  document.querySelector('#longitudinal-exclusion-enabled')?.addEventListener('change', (event) => {
+    cfg.exclusionEnabled = event.currentTarget.checked
+    state.longitudinalResult = null
+    rerender()
+  })
+  document.querySelector('#longitudinal-exclusion-column')?.addEventListener('change', (event) => {
+    cfg.exclusionColumn = event.currentTarget.value
+    cfg.exclusionValues = []
+    state.longitudinalResult = null
+    if (cfg.exclusionColumn) void loadMetadataValues(cfg.exclusionColumn).finally(rerender)
+    else rerender()
+  })
+  document.querySelector('#longitudinal-exclusion-values')?.addEventListener('change', (event) => {
+    cfg.exclusionValues = selectedValues(event.currentTarget)
+    state.longitudinalResult = null
+    rerender()
+  })
+  document.querySelector('#longitudinal-gene-enabled')?.addEventListener('change', (event) => { cfg.geneEnabled = event.currentTarget.checked; state.longitudinalResult = null; rerender() })
+  document.querySelector('#longitudinal-gene-file')?.addEventListener('change', (event) => { cfg.geneMergedId = event.currentTarget.value; state.longitudinalResult = null })
+  document.querySelector('#longitudinal-transcript-enabled')?.addEventListener('change', (event) => { cfg.transcriptEnabled = event.currentTarget.checked; state.longitudinalResult = null; rerender() })
+  document.querySelector('#longitudinal-transcript-file')?.addEventListener('change', (event) => { cfg.transcriptMergedId = event.currentTarget.value; state.longitudinalResult = null })
+  document.querySelector('#longitudinal-min-count')?.addEventListener('change', (event) => { cfg.minCount = Number(event.currentTarget.value); state.longitudinalResult = null })
+  document.querySelector('#longitudinal-min-fraction')?.addEventListener('change', (event) => { cfg.minFractionSamples = Number(event.currentTarget.value); state.longitudinalResult = null })
+  document.querySelector('#run-longitudinal')?.addEventListener('click', () => void runLongitudinalAnalysis())
+  document.querySelector('#export-longitudinal')?.addEventListener('click', () => void exportLongitudinalResult())
+
+  if (state.qcConfig.metadataId && state.wasmReady && !state.metadataInspectBusy && state.metadataInspectionFileId !== state.qcConfig.metadataId) {
+    void inspectSelectedMetadata()
+    return
+  }
+  if (cfg.exclusionEnabled && cfg.exclusionColumn && !state.metadataValueCache.has(metadataValueKey(cfg.exclusionColumn))) {
+    void loadMetadataValues(cfg.exclusionColumn).then(rerender).catch((error) => {
+      state.error = error instanceof Error ? error.message : String(error)
+      rerender()
+    })
+  }
+}
+
 function migrationView(title, step) {
   const records = recognizedCount()
   return `<section class="page-heading"><div><span class="eyebrow">${title}</span><h2>${title}</h2><p>This workflow is being moved to the shared Rust/WASM engine.</p></div></section>
@@ -816,6 +1123,11 @@ function resultsView() {
     const transcriptSamples = state.compareResult.transcript?.analysis?.n_model_samples || 0
     cards.push(`<section class="card result-card"><div><span class="tag success">Completed</span><h3>Compare Groups · corrected expression</h3><p>${escapeHtml(state.compareResult.comparisonName)} · ${geneSamples ? `${geneSamples} gene model samples` : 'gene disabled'} · ${transcriptSamples ? `${transcriptSamples} transcript model samples` : 'transcript disabled'}.</p></div><div class="button-row"><button id="results-open-compare" class="secondary-button">View comparison</button><button id="results-export-compare" class="primary-button">Save comparison JSON</button></div></section>`)
   }
+  if (state.longitudinalResult) {
+    const modalities = [state.longitudinalResult.gene?.modality, state.longitudinalResult.transcript?.modality].filter(Boolean)
+    const best = modalities.slice().sort((a, b) => Number(b.identity_auc || -1) - Number(a.identity_auc || -1))[0]
+    cards.push(`<section class="card result-card"><div><span class="tag success">Completed</span><h3>Longitudinal · patient-specific signature</h3><p>${modalities.length} expression data type${modalities.length === 1 ? '' : 's'} analyzed${best ? ` · best identity AUC ${formatNumber(best.identity_auc)}` : ''}.</p></div><div class="button-row"><button id="results-open-longitudinal" class="secondary-button">View longitudinal</button><button id="results-export-longitudinal" class="primary-button">Save longitudinal JSON</button></div></section>`)
+  }
   if (!cards.length) {
     return `<section class="page-heading"><div><span class="eyebrow">Results</span><h2>Results stay with the project on this computer</h2><p>Completed workflows appear here with local exports.</p></div></section><section class="card empty-results"><div class="empty-icon" aria-hidden="true">↧</div><h3>No WASM analysis has completed yet</h3><p>${state.records.length ? 'Your local inputs are selected. Run Explore & QC or Compare Groups to create a browser result.' : 'Select project inputs first.'}</p></section>`
   }
@@ -823,7 +1135,7 @@ function resultsView() {
 }
 
 function docsView() {
-  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods and interpretation</h2><p>4C Insight keeps analysis assumptions and limitations visible next to the workflows that use them.</p></div></section><div class="docs-grid"><article class="card"><h3>Local-first execution</h3><p>Selected files remain on the user's computer. Browser workers and Rust/WebAssembly perform analysis locally. Results are saved only when the user chooses an export.</p></article><article class="card"><h3>Expression QC</h3><p>Metadata tables and gene/transcript workbooks are parsed from bytes in Rust. Expression workbooks are processed one at a time so the browser does not retain the complete cohort in source-file buffers.</p></article><article class="card"><h3>W3 corrected group comparison</h3><p>Gene analysis uses Raw Count columns. Transcript analysis uses Total Reads columns. Positive-count median-ratio size factors are followed by the established negative-binomial log-link group model. A selected patient/subject column enables subject-clustered sandwich standard errors for repeated measurements. Selected covariates are added to the same model.</p></article><article class="card"><h3>PCA and hierarchical clustering</h3><p>Global PCA and the dendrogram use top-variable normalized features. Case/Control labels do not select those features. The dendrogram uses average linkage with Euclidean distance. These plots describe cohort structure and are distinct from post-selection significant-hit plots.</p></article><article class="card"><h3>Sample exclusions</h3><p>Reviewed-QC and custom metadata rules are optional and independent. Each rule uses a user-selected metadata column and one or more exact observed values. Matching metadata rows are removed before Case/Control construction and model fitting, and the exact rule and excluded sample IDs are stored in the result.</p></article><article class="card"><h3>Transcript usage</h3><p>The transcript workflow also runs the existing differential transcript-usage screen. It aggregates transcript proportions within genes, applies the established CLR-based transcript-usage model, and reports BH-adjusted gene and transcript results.</p></article><article class="card"><h3>Scientific parity</h3><p>W3 fixtures run the same merged expression tables through native filesystem APIs and browser-safe byte APIs. The enabled workflow must match for size factors, differential tests, PCA, dendrograms, and transcript DTU outputs.</p></article><article class="card"><h3>Longitudinal and significant hits</h3><p>These remain separate workflows. Longitudinal analysis asks whether repeated samples preserve patient identity. Significant-hit PCA and clustering are post-selection descriptions and do not provide independent predictive validation.</p></article></div>`
+  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods and interpretation</h2><p>4C Insight keeps analysis assumptions and limitations visible next to the workflows that use them.</p></div></section><div class="docs-grid"><article class="card"><h3>Local-first execution</h3><p>Selected files remain on the user's computer. Browser workers and Rust/WebAssembly perform analysis locally. Results are saved only when the user chooses an export.</p></article><article class="card"><h3>Expression QC</h3><p>Metadata tables and gene/transcript workbooks are parsed from bytes in Rust. Expression workbooks are processed one at a time so the browser does not retain the complete cohort in source-file buffers.</p></article><article class="card"><h3>W3 corrected group comparison</h3><p>Gene analysis uses Raw Count columns. Transcript analysis uses Total Reads columns. Positive-count median-ratio size factors are followed by the established negative-binomial log-link group model. A selected patient/subject column enables subject-clustered sandwich standard errors for repeated measurements. Selected covariates are added to the same model.</p></article><article class="card"><h3>PCA and hierarchical clustering</h3><p>Global PCA and the dendrogram use top-variable normalized features. Case/Control labels do not select those features. The dendrogram uses average linkage with Euclidean distance. These plots describe cohort structure and are distinct from post-selection significant-hit plots.</p></article><article class="card"><h3>Sample exclusions</h3><p>Reviewed-QC and custom metadata rules are optional and independent. Each rule uses a user-selected metadata column and one or more exact observed values. Matching metadata rows are removed before Case/Control construction and model fitting, and the exact rule and excluded sample IDs are stored in the result.</p></article><article class="card"><h3>Transcript usage</h3><p>The transcript workflow also runs the existing differential transcript-usage screen. It aggregates transcript proportions within genes, applies the established CLR-based transcript-usage model, and reports BH-adjusted gene and transcript results.</p></article><article class="card"><h3>Scientific parity</h3><p>W3 fixtures run the same merged expression tables through native filesystem APIs and browser-safe byte APIs. The enabled workflow must match for size factors, differential tests, PCA, dendrograms, and transcript DTU outputs.</p></article><article class="card"><h3>W4 longitudinal patient signature</h3><p>Longitudinal analysis is unsupervised. Expression distances are built from top-variable normalized log2 counts without using patient identity. Patient labels are applied afterward to measure identity AUC, nearest-neighbour patient accuracy, same-patient versus different-patient distance, and to annotate the average-linkage dendrogram. Observation ID, patient ID, time/visit, and exclusions are user-selected metadata roles.</p></article><article class="card"><h3>Significant hits</h3><p>Significant-hit PCA and clustering remain a separate post-selection workflow. Those plots describe the coherence of features selected by the same Case/Control comparison and do not provide independent predictive validation.</p></article></div>`
 }
 
 async function inspectSelectedMetadata() {
@@ -1147,6 +1459,8 @@ function bindResultsEvents() {
   document.querySelector('#results-export-qc')?.addEventListener('click', () => void exportQcResult())
   document.querySelector('#results-open-compare')?.addEventListener('click', () => { state.tab = 'compare'; render() })
   document.querySelector('#results-export-compare')?.addEventListener('click', () => void exportCompareResult())
+  document.querySelector('#results-open-longitudinal')?.addEventListener('click', () => { state.tab = 'longitudinal'; render() })
+  document.querySelector('#results-export-longitudinal')?.addEventListener('click', () => void exportLongitudinalResult())
 }
 
 function render() {
@@ -1156,8 +1470,8 @@ function render() {
     project: projectView(),
     qc: qcView(),
     compare: compareView(),
-    longitudinal: migrationView('Longitudinal', 'W3'),
-    hits: migrationView('Significant Hits', 'W3'),
+    longitudinal: longitudinalView(),
+    hits: migrationView('Significant Hits', 'W5'),
     results: resultsView(),
     docs: docsView(),
   }
@@ -1165,6 +1479,7 @@ function render() {
   if (state.tab === 'project') bindProjectEvents()
   if (state.tab === 'qc') bindQcEvents()
   if (state.tab === 'compare') bindCompareEvents()
+  if (state.tab === 'longitudinal') bindLongitudinalEvents()
   if (state.tab === 'results') bindResultsEvents()
 }
 

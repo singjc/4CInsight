@@ -267,3 +267,16 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
   .plot-toolbar-hint { width: 100%; margin-left: 0; }
   .plot-tool-button, .plot-legend-button { min-height: 36px; }
 }
+
+/* W4 longitudinal patient-signature workflow */
+.longitudinal-role-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.longitudinal-result { margin-bottom: 20px; }
+.longitudinal-tree-card { margin: 14px 0; }
+.longitudinal-tree-note { padding: 8px 12px; border-bottom: 1px solid #eaecf0; background: #fff; color: #667085; font-size: 9.5px; }
+.longitudinal-dendrogram-scroll { max-height: 680px; overflow: auto; background: #fff; }
+.science-plot.longitudinal-dendrogram { width: auto; min-width: 980px; height: auto; }
+.longitudinal-leaf-label { font-size: 9px; }
+.longitudinal-table { max-height: 520px; }
+@media (max-width: 720px) {
+  .longitudinal-role-grid { grid-template-columns: 1fr; }
+}

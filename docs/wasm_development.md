@@ -124,3 +124,10 @@ node --test app/tests/*.test.mjs
 ```
 
 `tests/w3_expression_compare_parity.rs` compares native path input and byte input for gene and transcript corrected analyses. It covers size factors, adjusted feature tests, PCA coordinates, dendrogram structure, transcript DTU output, and metadata-defined exclusion before model fitting.
+
+
+## W4 longitudinal parity
+
+W4 adds `src/portable_longitudinal.rs` and a byte-based expression-distance entry point in `src/corrected.rs`. `tests/w4_longitudinal_parity.rs` runs the same fixed metadata and merged gene/transcript tables through the native filesystem longitudinal workflow and the byte/WASM orchestration, then compares patient counts, identity metrics, pairwise distances, and dendrogram structure.
+
+The browser worker reads the selected metadata file once, then one selected merged expression table per enabled modality. It does not load the original per-sample expression workbooks for longitudinal analysis.

@@ -22,9 +22,9 @@ HTML / TSV / ZIP / JSON saved locally
 
 The existing Rust scientific modules remain the reference implementation while they are migrated to browser-safe byte/reader APIs. Each migrated workflow must pass native/WASM parity tests before the UI enables it as production analysis.
 
-## Current W3 status
+## Current W4 status
 
-W1 established the static, local-first browser shell and W2 added metadata/expression QC. W3 bumps the source version to **v0.19.0** and enables metadata-defined gene/transcript group comparison in local Rust/WASM:
+W1 established the static, local-first browser shell, W2 added metadata/expression QC, and W3 added corrected gene/transcript group comparison. W4 bumps the source version to **v0.20.0** and enables longitudinal patient-signature analysis for gene and transcript expression in local Rust/WASM:
 
 - W2 metadata and per-sample gene/transcript expression QC remain available;
 - the sample/expression ID, patient/subject ID, grouping column, and adjustment covariates are selected by role rather than hardcoded names;
@@ -38,7 +38,17 @@ W1 established the static, local-first browser shell and W2 added metadata/expre
 - comparison results can be saved locally as JSON;
 - fixed W3 fixtures compare the native filesystem path with the byte/WASM path for differential tests, normalization, PCA, dendrograms, exclusions, and transcript DTU.
 
-W3 does **not** yet enable repertoire comparison, immune-infiltration analysis, longitudinal patient-signature analysis, significant-hit structure, or full report generation in the browser. Those workflows remain gated until their own Rust/WASM parity work is complete.
+W4 adds:
+
+- flexible observation/sample ID and stable patient/person ID metadata roles;
+- optional collection-date/timepoint/visit annotation;
+- optional metadata column/value exclusion before clustering;
+- gene Raw Count and transcript Total Reads longitudinal distances using the same normalized top-variable expression geometry as the native implementation;
+- patient-identity AUC, nearest-neighbour patient accuracy, within-versus-between patient distance summaries, and average-linkage dendrograms;
+- cross-modality ranking of gene versus transcript patient-specific stability;
+- native filesystem versus byte/WASM parity fixtures for the longitudinal workflow.
+
+W4 does **not** yet enable BCR/TCR or immune-infiltration longitudinal analysis, significant-hit structure, or full report generation in the browser. Those workflows remain gated until their own byte/WASM parity work is complete.
 
 ## Repository layout
 

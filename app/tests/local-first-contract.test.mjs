@@ -47,3 +47,15 @@ test('W3 corrected group comparison stays inside the worker and shared Rust/WASM
   assert.match(main, /Needs input/)
   assert.equal(worker.includes('fetch('), false, 'W3 analysis worker must not send selected data over the network')
 })
+
+test('W4 longitudinal expression signature stays inside the worker and Rust/WASM engine', async () => {
+  const main = await readFile(new URL('../main.js', import.meta.url), 'utf8')
+  const worker = await readFile(new URL('../analysis-worker.js', import.meta.url), 'utf8')
+  assert.match(main, /run-longitudinal-expression/)
+  assert.match(main, /Observation \/ longitudinal sample ID/)
+  assert.match(main, /Patient \/ person ID/)
+  assert.match(main, /Patient identity AUC/)
+  assert.match(main, /Nearest-neighbour accuracy/)
+  assert.match(worker, /run_expression_longitudinal_json/)
+  assert.equal(worker.includes('fetch('), false, 'W4 analysis worker must not send selected data over the network')
+})

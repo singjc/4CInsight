@@ -20,7 +20,7 @@ Both HTML report styles and the technical table export are generated from the **
 
 ### 4C Insight WASM migration
 
-From v0.17.0, the primary product is the local-first 4C Insight web application. In v0.18.0, metadata and gene/transcript expression QC are the first scientific workflows enabled in Rust/WASM. Users select files from their own computer; the target scientific execution path is Rust/WebAssembly in browser workers, with results saved locally. The existing Rust scientific implementation remains authoritative while each workflow is moved behind browser-safe byte/reader APIs and native/WASM parity tests. See `docs/wasm_architecture.md` and `docs/wasm_development.md`.
+From v0.17.0, the primary product is the local-first 4C Insight web application. W2 enabled metadata and gene/transcript expression QC, W3 enabled corrected gene/transcript Case/Control comparison, and W4 enables gene/transcript longitudinal patient-signature analysis. Users select files from their own computer; scientific execution runs in Rust/WebAssembly browser workers, with results saved locally. The existing Rust implementation remains authoritative while each workflow is moved behind browser-safe byte/reader APIs and native/WASM parity tests. See `docs/wasm_architecture.md` and `docs/wasm_development.md`.
 
 ### Searchable visual in-app and report documentation
 
@@ -533,3 +533,20 @@ Case and Control can each contain one or more values from a selected metadata co
 Gene expression uses Raw Count columns. Transcript expression uses Total Reads columns. The corrected engine uses positive-count median-ratio size factors and the established negative-binomial group model. If a patient/subject column is selected, repeated observations use subject-clustered sandwich standard errors. Selected covariates are included in the same model.
 
 The PCA and hierarchical dendrogram are global cohort-structure views. They use top-variable normalized features and do not select features based on the Case/Control differential result. The dendrogram uses average linkage on Euclidean distance. Significant-hit PCA/clustering remains a separate post-selection workflow.
+
+
+## W4 browser longitudinal patient-signature workflow
+
+The **Longitudinal** workflow is independent of the active Case/Control comparison. The user explicitly maps four metadata roles: the observation/sample identifier used by expression columns, the stable patient/person identifier shared across repeated observations, an optional collection-date/timepoint/visit column, and an optional metadata exclusion column/value rule. Literal column names are not assumed.
+
+For gene expression the browser uses merged **Raw Count** columns; for transcript/isoform expression it uses merged **Total Reads** columns. The same positive-count median-ratio normalization, support filter, log2 transformation, top-variable feature selection, Euclidean distance, and average-linkage clustering used by the native longitudinal implementation are called from byte/WASM APIs.
+
+Patient identity is not used to construct the expression distance matrix. It is applied afterward to calculate:
+
+- **patient identity AUC**: the probability that a same-patient pair ranks closer than a different-patient pair (0.5 ≈ no ranking signal; 1.0 = perfect ranking);
+- **nearest-neighbour patient accuracy**: among observations from patients with repeated samples, the fraction whose nearest other sample belongs to the same patient, with fractional credit for exact ties;
+- median within-patient and between-patient distances;
+- the within/between median-distance ratio;
+- a patient-annotated average-linkage dendrogram.
+
+These statistics address whether a modality captures a stable patient-specific signature over time. They do not test Case/Control separation and they do not establish predictive performance.

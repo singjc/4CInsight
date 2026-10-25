@@ -3229,7 +3229,7 @@ pub(crate) fn run_unsupervised_expression_distance<F>(
     source_metric: &str,
     feature_label: &str,
     spec: &CorrectedModelSpec,
-    mut progress: F,
+    progress: F,
 ) -> Result<UnsupervisedDistanceMatrix>
 where
     F: FnMut(usize, usize, &str),
@@ -3240,6 +3240,89 @@ where
         .from_path(merged_tsv)
         .with_context(|| format!("Could not open {}", merged_tsv.display()))?;
     let headers = header_reader.headers()?.clone();
+    let file_bytes = fs::metadata(merged_tsv)
+        .with_context(|| format!("Could not stat {}", merged_tsv.display()))?
+        .len()
+        .max(1);
+    let units = usize::try_from(file_bytes).unwrap_or(usize::MAX / 4).max(1);
+    let pass1 = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .flexible(true)
+        .from_path(merged_tsv)?;
+    let pass2 = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .flexible(true)
+        .from_path(merged_tsv)?;
+    run_unsupervised_expression_distance_from_readers(
+        headers,
+        pass1,
+        pass2,
+        units,
+        eligible_ids,
+        source_metric,
+        feature_label,
+        spec,
+        progress,
+    )
+}
+
+/// Browser-safe byte equivalent of `run_unsupervised_expression_distance`.
+/// The normalization, feature filtering, top-variable selection, and distance
+/// calculation are delegated to the same reader-generic implementation.
+pub(crate) fn run_unsupervised_expression_distance_bytes<F>(
+    merged_bytes: &[u8],
+    eligible_ids: &HashSet<String>,
+    source_metric: &str,
+    feature_label: &str,
+    spec: &CorrectedModelSpec,
+    progress: F,
+) -> Result<UnsupervisedDistanceMatrix>
+where
+    F: FnMut(usize, usize, &str),
+{
+    let mut header_reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .flexible(true)
+        .from_reader(Cursor::new(merged_bytes));
+    let headers = header_reader.headers()?.clone();
+    let units = merged_bytes.len().max(1);
+    let pass1 = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .flexible(true)
+        .from_reader(Cursor::new(merged_bytes));
+    let pass2 = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .flexible(true)
+        .from_reader(Cursor::new(merged_bytes));
+    run_unsupervised_expression_distance_from_readers(
+        headers,
+        pass1,
+        pass2,
+        units,
+        eligible_ids,
+        source_metric,
+        feature_label,
+        spec,
+        progress,
+    )
+}
+
+fn run_unsupervised_expression_distance_from_readers<R1, R2, F>(
+    headers: csv::StringRecord,
+    mut pass1: csv::Reader<R1>,
+    mut pass2: csv::Reader<R2>,
+    units: usize,
+    eligible_ids: &HashSet<String>,
+    source_metric: &str,
+    feature_label: &str,
+    spec: &CorrectedModelSpec,
+    mut progress: F,
+) -> Result<UnsupervisedDistanceMatrix>
+where
+    R1: Read,
+    R2: Read,
+    F: FnMut(usize, usize, &str),
+{
     let suffix = format!(" {source_metric}");
     let mut header_cols: BTreeMap<String, (String, usize)> = BTreeMap::new();
     let mut warnings = Vec::new();
@@ -3272,11 +3355,6 @@ where
         .values()
         .map(|(_, idx)| *idx)
         .collect::<Vec<_>>();
-    let file_bytes = fs::metadata(merged_tsv)
-        .with_context(|| format!("Could not stat {}", merged_tsv.display()))?
-        .len()
-        .max(1);
-    let units = usize::try_from(file_bytes).unwrap_or(usize::MAX / 4).max(1);
     let total_work = units.saturating_mul(2).max(1);
 
     progress(
@@ -3285,10 +3363,6 @@ where
         &format!("{feature_label}: estimating count size factors"),
     );
     let mut medians = vec![P2Median::new(); columns.len()];
-    let mut pass1 = ReaderBuilder::new()
-        .delimiter(b'\t')
-        .flexible(true)
-        .from_path(merged_tsv)?;
     let mut record = csv::StringRecord::new();
     let mut rows_seen = 0usize;
     while pass1.read_record(&mut record)? {
@@ -3350,10 +3424,6 @@ where
         .max(3)
         .min(sample_ids.len());
     let mut top_variable = Vec::<VariableRow>::new();
-    let mut pass2 = ReaderBuilder::new()
-        .delimiter(b'\t')
-        .flexible(true)
-        .from_path(merged_tsv)?;
     let mut retained_rows = 0usize;
     let mut filtered_rows = 0usize;
     let mut record = csv::StringRecord::new();
