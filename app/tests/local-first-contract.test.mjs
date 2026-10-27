@@ -6,6 +6,7 @@ const clientFiles = [
   new URL('../main.js', import.meta.url),
   new URL('../analysis-worker.js', import.meta.url),
   new URL('../save.js', import.meta.url),
+  new URL('../persistence.js', import.meta.url),
 ]
 
 test('primary browser client has no analysis API endpoint', async () => {

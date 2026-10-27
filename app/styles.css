@@ -308,3 +308,38 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 @media (max-width: 620px) {
   .hit-settings-grid { grid-template-columns: 1fr; }
 }
+
+/* UX1 local project persistence, drag/drop, and browser History */
+.project-heading-actions { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.project-heading-actions .local-card { flex-basis: 260px; }
+.state-actions { justify-content: flex-end; }
+.input-drop-zone { transition: border-color .15s ease, background .15s ease, box-shadow .15s ease; }
+.input-drop-zone.is-dragover { border-color: #3159d9; background: #f5f7ff; box-shadow: 0 0 0 3px rgba(49,89,217,.10); }
+.drop-hint { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 58px; margin: 0 0 12px; border: 1px dashed #c9d2e1; border-radius: 9px; background: #fbfcfe; color: #667085; pointer-events: none; }
+.drop-hint-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: #eef2ff; color: #3159d9; font-size: 16px; font-weight: 800; }
+.drop-hint strong, .drop-hint span { display: block; }
+.drop-hint strong { color: #344054; font-size: 11px; }
+.drop-hint span { margin-top: 2px; color: #98a2b3; font-size: 9.5px; }
+.history-card { padding-bottom: 10px; }
+.history-list { display: grid; }
+.history-entry { display: flex; align-items: center; gap: 18px; padding: 14px 2px; border-top: 1px solid #eaecf0; }
+.history-entry:first-child { border-top: 0; }
+.history-entry-main { min-width: 0; flex: 1; }
+.history-entry-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.history-entry-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #344054; font-size: 12px; }
+.history-entry-main > span, .history-entry-main > small { display: block; margin-top: 4px; color: #667085; font-size: 10.5px; line-height: 1.4; }
+.history-entry-main > small { color: #98a2b3; font-size: 9.5px; }
+.history-entry-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 760px) {
+  .project-heading-actions { justify-content: flex-start; }
+  .state-actions { justify-content: flex-start; }
+  .history-entry { align-items: flex-start; flex-direction: column; }
+  .history-entry-actions { width: 100%; justify-content: flex-start; }
+}
+
+/* Coordinate-aware scientific plot interaction. */
+.coordinate-plot { overflow: hidden; }
+.coordinate-plot .science-plot { min-width: 0; }
+.plot-grid-line { stroke: #eef1f5; stroke-width: 1; }
+.plot-tick { fill: #7b8798; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 8.5px; }
+.coordinate-plot.is-dragging { cursor: grabbing; }

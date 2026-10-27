@@ -1,4 +1,15 @@
 import { saveTextFile } from './save.js'
+import {
+  clearHistoryEntries,
+  deleteHistoryEntry,
+  listHistoryEntries,
+  loadHistorySnapshot,
+  saveHistoryEntry,
+  storageEstimate,
+} from './persistence.js'
+
+const APP_VERSION = '0.21.0-ux1'
+const APP_STATE_SCHEMA = 1
 
 const tabs = [
   ['project', 'Project', '1'],
@@ -7,6 +18,7 @@ const tabs = [
   ['longitudinal', 'Longitudinal', '4'],
   ['hits', 'Significant Hits', '5'],
   ['results', 'Results', '6'],
+  ['history', 'History', 'H'],
   ['docs', 'Docs', '?'],
 ]
 
@@ -32,6 +44,7 @@ const state = {
   records: [],
   busy: false,
   error: null,
+  projectMessage: '',
   engine: 'Waiting for local inputs',
   wasmReady: false,
   metadataInspectBusy: false,
@@ -46,6 +59,15 @@ const state = {
   longitudinalResult: null,
   hitProgress: null,
   hitResult: null,
+  historyEntries: [],
+  historyLoaded: false,
+  historyBusy: false,
+  historyMessage: '',
+  historySelectedId: '',
+  historySelectedSnapshot: null,
+  storageEstimate: null,
+  loadedStateManifest: null,
+  pendingStateConfig: null,
   hitConfig: {
     qThreshold: 0.05,
     minAbsEffect: 0.0,
@@ -249,6 +271,7 @@ async function refreshFiles(nextFiles) {
       ? `Rust/WASM ${response.engineVersion || ''}`.trim()
       : 'JavaScript preflight fallback'
     resetQcStateAfterInputsChange()
+    applyPendingStateConfig()
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
   } finally {
@@ -274,6 +297,9 @@ function clearProject() {
   state.files = new Map()
   state.records = []
   state.error = null
+  state.projectMessage = ''
+  state.loadedStateManifest = null
+  state.pendingStateConfig = null
   state.engine = 'Waiting for local inputs'
   state.wasmReady = false
   state.metadataInspection = null
@@ -374,6 +400,301 @@ async function exportHitResult() {
   await saveTextFile('4c-insight-significant-hit-structure.json', `${JSON.stringify(payload, null, 2)}\n`)
 }
 
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+function projectFileRef(id) {
+  const record = state.records.find((candidate) => candidate.id === id)
+  if (!record) return null
+  return {
+    name: record.name,
+    relativePath: record.relativePath || record.name,
+    size: record.size,
+    lastModified: record.lastModified,
+    kind: record.kind,
+    label: record.label,
+  }
+}
+
+function savedProjectManifest() {
+  return state.records.map((record) => ({
+    name: record.name,
+    relativePath: record.relativePath || record.name,
+    size: record.size,
+    lastModified: record.lastModified,
+    kind: record.kind,
+    label: record.label,
+    recognized: Boolean(record.recognized),
+  }))
+}
+
+function configSnapshot() {
+  const qc = cloneJson(state.qcConfig)
+  const compare = cloneJson(state.compareConfig)
+  const longitudinal = cloneJson(state.longitudinalConfig)
+  const hit = cloneJson(state.hitConfig)
+  const pendingRefs = state.pendingStateConfig?.fileRefs || {}
+  const fileRefs = {
+    metadata: projectFileRef(qc.metadataId) || pendingRefs.metadata || null,
+    compareGene: projectFileRef(compare.geneMergedId) || pendingRefs.compareGene || null,
+    compareTranscript: projectFileRef(compare.transcriptMergedId) || pendingRefs.compareTranscript || null,
+    longitudinalGene: projectFileRef(longitudinal.geneMergedId) || pendingRefs.longitudinalGene || null,
+    longitudinalTranscript: projectFileRef(longitudinal.transcriptMergedId) || pendingRefs.longitudinalTranscript || null,
+  }
+  delete qc.metadataId
+  delete compare.geneMergedId
+  delete compare.transcriptMergedId
+  delete longitudinal.geneMergedId
+  delete longitudinal.transcriptMergedId
+  return { qc, compare, longitudinal, hit, fileRefs }
+}
+
+function applicationStatePayload() {
+  return {
+    product: '4C Insight',
+    kind: 'application-state',
+    schemaVersion: APP_STATE_SCHEMA,
+    appVersion: APP_VERSION,
+    createdAt: new Date().toISOString(),
+    activeTab: state.tab,
+    project: {
+      files: savedProjectManifest(),
+      note: 'File metadata only. Raw cohort bytes are not embedded in this state.',
+    },
+    configs: configSnapshot(),
+  }
+}
+
+function historyStatePayload(workflow) {
+  const results = {}
+  if (workflow === 'explore-qc-expression') results.qc = cloneJson(state.qcResult)
+  if (workflow === 'compare-groups-expression') results.compare = cloneJson(state.compareResult)
+  if (workflow === 'longitudinal-patient-signature-expression') results.longitudinal = cloneJson(state.longitudinalResult)
+  if (workflow === 'significant-hit-structure-expression') {
+    results.compare = cloneJson(state.compareResult)
+    results.hits = cloneJson(state.hitResult)
+  }
+  return {
+    product: '4C Insight',
+    kind: 'history-snapshot',
+    schemaVersion: APP_STATE_SCHEMA,
+    appVersion: APP_VERSION,
+    createdAt: new Date().toISOString(),
+    workflow,
+    project: {
+      files: savedProjectManifest(),
+      note: 'File metadata only. Raw cohort bytes are not stored in History.',
+    },
+    configs: configSnapshot(),
+    results,
+  }
+}
+
+function resolveSavedFileRef(reference) {
+  if (!reference) return ''
+  const exact = state.records.find((record) =>
+    (record.relativePath || record.name) === reference.relativePath &&
+    Number(record.size) === Number(reference.size)
+  )
+  if (exact) return exact.id
+  const candidates = state.records.filter((record) => record.name === reference.name && Number(record.size) === Number(reference.size))
+  return candidates.length === 1 ? candidates[0].id : ''
+}
+
+function applyConfigSnapshot(configs) {
+  if (!configs || typeof configs !== 'object') return
+  const refs = configs.fileRefs || {}
+  state.qcConfig = { ...state.qcConfig, ...(configs.qc || {}), metadataId: resolveSavedFileRef(refs.metadata) }
+  state.compareConfig = {
+    ...state.compareConfig,
+    ...(configs.compare || {}),
+    geneMergedId: resolveSavedFileRef(refs.compareGene),
+    transcriptMergedId: resolveSavedFileRef(refs.compareTranscript),
+  }
+  state.longitudinalConfig = {
+    ...state.longitudinalConfig,
+    ...(configs.longitudinal || {}),
+    geneMergedId: resolveSavedFileRef(refs.longitudinalGene),
+    transcriptMergedId: resolveSavedFileRef(refs.longitudinalTranscript),
+  }
+  state.hitConfig = { ...state.hitConfig, ...(configs.hit || {}) }
+
+  const required = Object.values(refs).filter(Boolean)
+  const resolved = required.filter((reference) => resolveSavedFileRef(reference)).length
+  if (required.length && resolved < required.length) state.pendingStateConfig = cloneJson(configs)
+  else state.pendingStateConfig = null
+}
+
+function applyPendingStateConfig() {
+  if (!state.pendingStateConfig) return
+  const pending = cloneJson(state.pendingStateConfig)
+  applyConfigSnapshot(pending)
+}
+
+async function saveApplicationState() {
+  const payload = applicationStatePayload()
+  await saveTextFile('4c-insight-state.4cstate.json', `${JSON.stringify(payload, null, 2)}\n`)
+  state.projectMessage = `Application state saved. It contains settings and ${payload.project.files.length.toLocaleString()} file references, not raw cohort data.`
+  render()
+}
+
+async function loadApplicationState(file) {
+  if (!file) return
+  state.error = null
+  try {
+    if (file.size > 10 * 1024 * 1024) throw new Error('State file exceeds 10 MiB.')
+    const payload = JSON.parse(await file.text())
+    if (payload?.product !== '4C Insight' || payload?.kind !== 'application-state' || payload?.schemaVersion !== APP_STATE_SCHEMA) {
+      throw new Error('This is not a compatible 4C Insight application state.')
+    }
+    state.loadedStateManifest = Array.isArray(payload.project?.files) ? payload.project.files : []
+    state.pendingStateConfig = cloneJson(payload.configs || {})
+    applyPendingStateConfig()
+    state.qcResult = null
+    state.compareResult = null
+    state.longitudinalResult = null
+    state.hitResult = null
+    const expected = state.loadedStateManifest.length
+    const selected = state.records.length
+    state.projectMessage = expected
+      ? `Loaded settings for ${expected.toLocaleString()} referenced files. ${selected ? 'Current local files were matched where possible.' : 'Select the same local files or folder to reactivate analysis. No raw data were stored in the state file.'}`
+      : 'Loaded application settings. This state does not contain raw cohort files.'
+    state.tab = 'project'
+  } catch (error) {
+    state.error = `Load state: ${error instanceof Error ? error.message : String(error)}`
+  }
+  render()
+}
+
+function historySummary(workflow) {
+  if (workflow === 'explore-qc-expression') {
+    return `${state.qcResult?.gene?.length || 0} gene and ${state.qcResult?.transcript?.length || 0} transcript samples`
+  }
+  if (workflow === 'compare-groups-expression') {
+    return state.compareResult?.comparisonName || 'Corrected group comparison'
+  }
+  if (workflow === 'longitudinal-patient-signature-expression') {
+    const count = Number(Boolean(state.longitudinalResult?.gene)) + Number(Boolean(state.longitudinalResult?.transcript))
+    return `${count} longitudinal expression data type${count === 1 ? '' : 's'}`
+  }
+  if (workflow === 'significant-hit-structure-expression') {
+    const count = Number(Boolean(state.hitResult?.gene)) + Number(Boolean(state.hitResult?.transcript))
+    return `${count} significant-hit structure panel${count === 1 ? '' : 's'}`
+  }
+  return '4C Insight analysis result'
+}
+
+async function recordHistory(workflow, label) {
+  try {
+    const id = crypto.randomUUID()
+    const snapshot = historyStatePayload(workflow)
+    const entry = {
+      id,
+      workflow,
+      label,
+      summary: historySummary(workflow),
+      createdAt: snapshot.createdAt,
+      appVersion: APP_VERSION,
+      engine: state.engine,
+      projectFileCount: state.records.length,
+      localDataBytes: totalBytes(),
+    }
+    await saveHistoryEntry(entry, snapshot)
+    state.historyLoaded = false
+  } catch (error) {
+    console.warn('4C Insight could not save this result to browser History.', error)
+  }
+}
+
+async function refreshHistory() {
+  if (state.historyBusy) return
+  state.historyBusy = true
+  try {
+    state.historyEntries = await listHistoryEntries()
+    state.storageEstimate = await storageEstimate()
+    state.historyLoaded = true
+  } catch (error) {
+    state.historyMessage = `History could not be loaded: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    state.historyBusy = false
+    render()
+  }
+}
+
+function restoreHistorySnapshot(snapshot) {
+  if (!snapshot || snapshot.product !== '4C Insight' || snapshot.kind !== 'history-snapshot') return
+  applyConfigSnapshot(snapshot.configs || {})
+  state.qcResult = snapshot.results?.qc || null
+  state.compareResult = snapshot.results?.compare || null
+  state.longitudinalResult = snapshot.results?.longitudinal || null
+  state.hitResult = snapshot.results?.hits || null
+  const tabForWorkflow = {
+    'explore-qc-expression': 'qc',
+    'compare-groups-expression': 'compare',
+    'longitudinal-patient-signature-expression': 'longitudinal',
+    'significant-hit-structure-expression': 'hits',
+  }
+  state.tab = tabForWorkflow[snapshot.workflow] || 'results'
+}
+
+async function openHistoryEntry(id) {
+  state.historyBusy = true
+  render()
+  try {
+    const snapshot = await loadHistorySnapshot(id)
+    if (!snapshot) throw new Error('History snapshot is no longer available.')
+    state.historySelectedId = id
+    state.historySelectedSnapshot = snapshot
+    restoreHistorySnapshot(snapshot)
+  } catch (error) {
+    state.historyMessage = `History entry could not be opened: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    state.historyBusy = false
+    render()
+  }
+}
+
+async function exportHistorySnapshot(id) {
+  const snapshot = await loadHistorySnapshot(id)
+  if (!snapshot) return
+  const safeWorkflow = String(snapshot.workflow || 'result').replaceAll(/[^a-z0-9-]+/gi, '-').toLowerCase()
+  await saveTextFile(`4c-insight-history-${safeWorkflow}.json`, `${JSON.stringify(snapshot, null, 2)}\n`)
+}
+
+async function removeHistorySnapshot(id) {
+  if (!window.confirm('Delete this History snapshot? Original cohort files are not touched.')) return
+  state.historyBusy = true
+  try {
+    await deleteHistoryEntry(id)
+    state.historyMessage = 'History snapshot deleted. Original cohort files were not changed.'
+    state.historyEntries = await listHistoryEntries()
+    state.storageEstimate = await storageEstimate()
+  } catch (error) {
+    state.historyMessage = `History snapshot could not be deleted: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    state.historyBusy = false
+    render()
+  }
+}
+
+async function removeAllHistory() {
+  if (!window.confirm('Delete all 4C Insight History snapshots stored by this browser? Original cohort files are not touched.')) return
+  state.historyBusy = true
+  try {
+    await clearHistoryEntries()
+    state.historyEntries = []
+    state.storageEstimate = await storageEstimate()
+    state.historyMessage = 'Browser History cleared. Original cohort files were not changed.'
+  } catch (error) {
+    state.historyMessage = `History could not be cleared: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    state.historyBusy = false
+    render()
+  }
+}
+
 function selectedValues(select) {
   return Array.from(select?.selectedOptions || []).map((option) => option.value)
 }
@@ -430,6 +751,7 @@ function summaryCard(label, value, detail) {
 function projectView() {
   const recognized = recognizedCount()
   const counts = modalityCounts()
+  const expected = state.loadedStateManifest?.length || 0
   const status = state.records.length === 0
     ? 'No files selected'
     : recognized === state.records.length
@@ -439,11 +761,11 @@ function projectView() {
   return `
     <section class="page-heading">
       <div><span class="eyebrow">Project · Step 1</span><h2>Select the cohort data on this computer</h2>
-      <p>4C Insight reads selected files locally. There is no upload step and no analysis server.</p></div>
-      <div class="local-card"><strong>Private by design</strong><span>Files remain on this device. You choose when results are saved.</span></div>
+      <p>4C Insight references selected files in place. There is no upload step and drag/drop does not duplicate the source files.</p></div>
+      <div class="project-heading-actions"><div class="local-card"><strong>Private by design</strong><span>Files remain on this device. You choose when results or state are saved.</span></div><div class="button-row compact state-actions"><button id="load-state" class="secondary-button">Load state</button><button id="save-state" class="secondary-button">Save state</button><input id="state-input" class="visually-hidden" type="file" accept=".json,.4cstate" /></div></div>
     </section>
     <section class="action-panel" aria-labelledby="select-data-heading">
-      <div class="action-copy"><h3 id="select-data-heading">Add project data</h3><p>Select individual files or a complete project folder. Duplicate selections are ignored.</p></div>
+      <div class="action-copy"><h3 id="select-data-heading">Add project data</h3><p>Select files, select a complete project folder, or drop one or more files into the Input inventory. Duplicate selections are ignored.</p></div>
       <div class="button-row">
         <button id="select-files" class="primary-button">Select files</button>
         <button id="select-folder" class="secondary-button">Select folder</button>
@@ -451,18 +773,20 @@ function projectView() {
         <input id="folder-input" class="visually-hidden" type="file" multiple webkitdirectory directory />
       </div>
     </section>
+    ${state.projectMessage ? `<div class="notice-banner" role="status"><strong>Project state</strong><span>${escapeHtml(state.projectMessage)}</span></div>` : ''}
     ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
     <section class="summary-grid" aria-label="Project summary">
       ${summaryCard('Selected files', String(state.records.length), status)}
       ${summaryCard('Local data', humanBytes(totalBytes()), 'Referenced from this device')}
       ${summaryCard('Detected types', String(counts.length), 'Using 4C filename conventions')}
-      ${summaryCard('Processing', state.busy ? 'Checking…' : 'Ready', 'Preflight runs in a Web Worker')}
+      ${summaryCard('Processing', state.busy ? 'Checking…' : 'Ready', expected && !state.records.length ? `${expected.toLocaleString()} files referenced by loaded state` : 'Preflight runs in a Web Worker')}
     </section>
     ${counts.length ? `<section class="card"><div class="card-heading"><div><h3>Detected data</h3><p>Review the automatic classification before you configure an analysis.</p></div></div><div class="modality-list">${counts.map(([label,count]) => `<div class="modality-pill"><span>${escapeHtml(label)}</span><strong>${count}</strong></div>`).join('')}</div></section>` : ''}
-    <section class="card table-card">
-      <div class="card-heading"><div><h3>Input inventory</h3><p>Nothing in this table has been uploaded. Remove any file you do not want in the project.</p></div>
+    <section id="input-drop-zone" class="card table-card input-drop-zone" aria-label="Input inventory drop zone">
+      <div class="card-heading"><div><h3>Input inventory</h3><p>Drop files here or use the system picker above. Files are referenced in place; nothing is uploaded or copied into the application.</p></div>
       ${state.records.length ? '<div class="button-row compact"><button id="save-manifest" class="text-button">Save manifest</button><button id="clear-project" class="danger-text-button">Clear all</button></div>' : ''}</div>
-      ${state.records.length === 0 ? `<div class="empty-state"><div class="empty-icon" aria-hidden="true">＋</div><strong>No project data selected</strong><span>Start with the sample metadata and any available expression, repertoire, or immune files.</span></div>` : `
+      <div class="drop-hint" aria-hidden="true"><span class="drop-hint-icon">↓</span><div><strong>Drop one or more cohort files here</strong><span>For a complete directory tree, use Select folder.</span></div></div>
+      ${state.records.length === 0 ? `<div class="empty-state"><div class="empty-icon" aria-hidden="true">＋</div><strong>No project data selected</strong><span>Start with sample metadata and any available expression, repertoire, or immune files.</span></div>` : `
       <div class="table-scroll"><table><thead><tr><th>File</th><th>Detected type</th><th>Sample</th><th>Size</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
       ${state.records.map((record) => `<tr><td><span class="file-name" title="${escapeHtml(record.relativePath)}">${escapeHtml(record.relativePath)}</span></td><td>${escapeHtml(record.label || 'Not classified')}</td><td>${escapeHtml(record.sampleId || '—')}</td><td>${humanBytes(record.size)}</td><td><span class="tag ${record.recognized ? 'success' : 'warning'}">${record.recognized ? 'Ready' : 'Review'}</span></td><td><button class="icon-button remove-file" data-file-id="${escapeHtml(record.id)}" aria-label="Remove ${escapeHtml(record.name)}">×</button></td></tr>`).join('')}
       </tbody></table></div>`}
@@ -623,7 +947,7 @@ function plotControls(plotId) {
     <button type="button" class="plot-tool-button" data-plot-id="${plotId}" data-plot-action="out" aria-label="Zoom out">−</button>
     <button type="button" class="plot-tool-button" data-plot-id="${plotId}" data-plot-action="fit">Fit</button>
     <button type="button" class="plot-tool-button" data-plot-id="${plotId}" data-plot-action="in" aria-label="Zoom in">+</button>
-    <span class="plot-toolbar-hint">Ctrl/⌘ + wheel to zoom · drag to pan</span>
+    <span class="plot-toolbar-hint">Ctrl/⌘ + wheel zooms plot coordinates · drag to pan</span>
   </div>`
 }
 
@@ -634,37 +958,45 @@ function plotLegend(plotId, caseLabel, controlLabel) {
   </div>`
 }
 
+function paddedExtent(values) {
+  let min = Math.min(...values)
+  let max = Math.max(...values)
+  if (min === max) { min -= 1; max += 1 }
+  const padding = (max - min) * 0.08
+  return [min - padding, max + padding]
+}
+
+function tickValues(min, max, count = 5) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return []
+  return Array.from({ length: count }, (_, index) => min + ((max - min) * index) / (count - 1))
+}
+
 function pcaSvg(pca, plotId, caseLabel, controlLabel) {
   const points = pca?.points || []
   if (!points.length) return '<div class="plot-empty">PCA is not available for this result.</div>'
   const width = 760
   const height = 360
-  const pad = 46
+  const pad = 54
   const xs = points.map((point) => Number(point.x)).filter(Number.isFinite)
   const ys = points.map((point) => Number(point.y)).filter(Number.isFinite)
   if (!xs.length || !ys.length) return '<div class="plot-empty">PCA coordinates are not finite.</div>'
-  let minX = Math.min(...xs); let maxX = Math.max(...xs)
-  let minY = Math.min(...ys); let maxY = Math.max(...ys)
-  if (minX === maxX) { minX -= 1; maxX += 1 }
-  if (minY === maxY) { minY -= 1; maxY += 1 }
-  const xPad = (maxX - minX) * 0.08; const yPad = (maxY - minY) * 0.08
-  minX -= xPad; maxX += xPad; minY -= yPad; maxY += yPad
+  const [minX, maxX] = paddedExtent(xs)
+  const [minY, maxY] = paddedExtent(ys)
   const sx = (x) => pad + ((x - minX) / (maxX - minX)) * (width - pad * 2)
   const sy = (y) => height - pad - ((y - minY) / (maxY - minY)) * (height - pad * 2)
-  const xZero = minX <= 0 && maxX >= 0 ? sx(0) : pad
-  const yZero = minY <= 0 && maxY >= 0 ? sy(0) : height - pad
   const circles = points.map((point) => {
     const group = String(point.group).toLowerCase() === 'case' ? 'case' : 'control'
     const klass = group === 'case' ? 'case-point' : 'control-point'
-    return `<circle class="${klass}" data-plot-group="${group}" cx="${sx(Number(point.x)).toFixed(2)}" cy="${sy(Number(point.y)).toFixed(2)}" r="4.2"><title>${escapeHtml(point.sample_id)} · ${escapeHtml(point.group)} · subject ${escapeHtml(point.subject)} · ${escapeHtml(pca.x_label)} ${formatNumber(point.x)} · ${escapeHtml(pca.y_label)} ${formatNumber(point.y)}</title></circle>`
+    return `<circle class="${klass}" data-plot-group="${group}" data-x="${Number(point.x)}" data-y="${Number(point.y)}" cx="${sx(Number(point.x)).toFixed(2)}" cy="${sy(Number(point.y)).toFixed(2)}" r="4.2"><title>${escapeHtml(point.sample_id)} · ${escapeHtml(point.group)} · subject ${escapeHtml(point.subject)} · ${escapeHtml(pca.x_label)} ${formatNumber(point.x)} · ${escapeHtml(pca.y_label)} ${formatNumber(point.y)}</title></circle>`
   }).join('')
-  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-scale="1">
+  const clipId = `${plotId}-clip`
+  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-kind="pca" data-width="${width}" data-height="${height}" data-pad="${pad}" data-min-x="${minX}" data-max-x="${maxX}" data-min-y="${minY}" data-max-y="${maxY}">
     ${plotControls(plotId)}
-    <div class="plot-scroll interactive-plot-scroll"><svg class="science-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(pca.name)}">
-      <line class="plot-axis" x1="${pad}" y1="${yZero}" x2="${width-pad}" y2="${yZero}"/><line class="plot-axis" x1="${xZero}" y1="${pad}" x2="${xZero}" y2="${height-pad}"/>
-      ${circles}
+    <div class="plot-scroll interactive-plot-scroll coordinate-plot"><svg class="science-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(pca.name)}">
+      <defs><clipPath id="${clipId}"><rect x="${pad}" y="${pad}" width="${width-pad*2}" height="${height-pad*2}"/></clipPath></defs>
+      <g class="pca-grid"></g><g class="pca-axes"></g><g class="pca-points" clip-path="url(#${clipId})">${circles}</g>
       <text class="plot-label" x="${width/2}" y="${height-10}" text-anchor="middle">${escapeHtml(pca.x_label)}</text>
-      <text class="plot-label" x="14" y="${height/2}" text-anchor="middle" transform="rotate(-90 14 ${height/2})">${escapeHtml(pca.y_label)}</text>
+      <text class="plot-label" x="16" y="${height/2}" text-anchor="middle" transform="rotate(-90 16 ${height/2})">${escapeHtml(pca.y_label)}</text>
     </svg></div>
     ${plotLegend(plotId, caseLabel, controlLabel)}
   </div>`
@@ -688,68 +1020,141 @@ function dendrogramSvg(tree, plotId, caseLabel, controlLabel) {
     const y = sy(leaf.position)
     return `<text class="dendro-label" data-plot-group="${group}" x="${left-10}" y="${(y+3).toFixed(2)}" text-anchor="end">${escapeHtml(leaf.sample_id)}</text><circle class="${klass}" data-plot-group="${group}" cx="${left}" cy="${y.toFixed(2)}" r="2.7"><title>${escapeHtml(leaf.sample_id)} · ${escapeHtml(leaf.group)} · subject ${escapeHtml(leaf.subject)}</title></circle>`
   }).join('')
-  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-scale="1">
+  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-kind="dendrogram" data-width="${width}" data-height="${height}">
     ${plotControls(plotId)}
-    <div class="plot-scroll dendro-scroll interactive-plot-scroll"><svg class="science-plot dendrogram" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(tree.name)}">${lines}${leafMarks}<text class="plot-label" x="${(left+width-right)/2}" y="${height-6}" text-anchor="middle">${escapeHtml(tree.distance_label)} · ${escapeHtml(tree.linkage)}</text></svg></div>
+    <div class="plot-scroll dendro-scroll interactive-plot-scroll coordinate-plot"><svg class="science-plot dendrogram" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(tree.name)}">${lines}${leafMarks}<text class="plot-label" x="${(left+width-right)/2}" y="${height-6}" text-anchor="middle">${escapeHtml(tree.distance_label)} · ${escapeHtml(tree.linkage)}</text></svg></div>
     ${plotLegend(plotId, caseLabel, controlLabel)}
   </div>`
 }
 
-function setPlotScale(shell, nextScale, anchorX = null, anchorY = null) {
-  const viewport = shell.querySelector('.interactive-plot-scroll')
+function pcaInitialDomain(shell) {
+  return {
+    minX: Number(shell.dataset.minX), maxX: Number(shell.dataset.maxX),
+    minY: Number(shell.dataset.minY), maxY: Number(shell.dataset.maxY),
+  }
+}
+
+function renderPcaDomain(shell, domain) {
   const svg = shell.querySelector('.science-plot')
-  if (!viewport || !svg) return
-  const previousScale = Number(shell.dataset.plotScale || 1)
-  const scale = Math.min(5, Math.max(0.6, nextScale))
-  const oldWidth = svg.getBoundingClientRect().width
-  const oldHeight = svg.getBoundingClientRect().height
-  if (!Number.isFinite(Number(shell.dataset.fitWidth))) shell.dataset.fitWidth = String(oldWidth)
-  const fitWidth = Number(shell.dataset.fitWidth) || oldWidth
-  const localX = anchorX ?? viewport.clientWidth / 2
-  const localY = anchorY ?? viewport.clientHeight / 2
-  const contentX = viewport.scrollLeft + localX
-  const contentY = viewport.scrollTop + localY
-
-  svg.style.minWidth = '0'
-  svg.style.width = `${fitWidth * scale}px`
-  shell.dataset.plotScale = String(scale)
-
-  const newWidth = svg.getBoundingClientRect().width
-  const newHeight = svg.getBoundingClientRect().height
-  if (oldWidth > 0) viewport.scrollLeft = contentX * (newWidth / oldWidth) - localX
-  if (oldHeight > 0) viewport.scrollTop = contentY * (newHeight / oldHeight) - localY
-
-  shell.querySelectorAll('[data-plot-action="fit"]').forEach((button) => {
-    button.textContent = Math.abs(scale - 1) < 0.01 ? 'Fit' : `${Math.round(scale * 100)}%`
+  if (!svg) return
+  const width = Number(shell.dataset.width)
+  const height = Number(shell.dataset.height)
+  const pad = Number(shell.dataset.pad)
+  const plotWidth = width - pad * 2
+  const plotHeight = height - pad * 2
+  const sx = (x) => pad + ((x - domain.minX) / (domain.maxX - domain.minX)) * plotWidth
+  const sy = (y) => height - pad - ((y - domain.minY) / (domain.maxY - domain.minY)) * plotHeight
+  const xTicks = tickValues(domain.minX, domain.maxX)
+  const yTicks = tickValues(domain.minY, domain.maxY)
+  const grid = svg.querySelector('.pca-grid')
+  const axes = svg.querySelector('.pca-axes')
+  if (grid) grid.innerHTML = [
+    ...xTicks.map((tick) => `<line class="plot-grid-line" x1="${sx(tick).toFixed(2)}" y1="${pad}" x2="${sx(tick).toFixed(2)}" y2="${height-pad}"/>`),
+    ...yTicks.map((tick) => `<line class="plot-grid-line" x1="${pad}" y1="${sy(tick).toFixed(2)}" x2="${width-pad}" y2="${sy(tick).toFixed(2)}"/>`),
+  ].join('')
+  if (axes) axes.innerHTML = `
+    <line class="plot-axis" x1="${pad}" y1="${height-pad}" x2="${width-pad}" y2="${height-pad}"/>
+    <line class="plot-axis" x1="${pad}" y1="${pad}" x2="${pad}" y2="${height-pad}"/>
+    ${xTicks.map((tick) => `<text class="plot-tick" x="${sx(tick).toFixed(2)}" y="${height-pad+17}" text-anchor="middle">${escapeHtml(formatNumber(tick, 2))}</text>`).join('')}
+    ${yTicks.map((tick) => `<text class="plot-tick" x="${pad-8}" y="${(sy(tick)+3).toFixed(2)}" text-anchor="end">${escapeHtml(formatNumber(tick, 2))}</text>`).join('')}`
+  svg.querySelectorAll('.pca-points circle').forEach((point) => {
+    const x = Number(point.dataset.x)
+    const y = Number(point.dataset.y)
+    point.setAttribute('cx', sx(x).toFixed(2))
+    point.setAttribute('cy', sy(y).toFixed(2))
   })
-  if (previousScale !== scale) viewport.classList.toggle('is-zoomed', scale > 1.01)
+  shell._plotDomain = domain
+  const initial = pcaInitialDomain(shell)
+  const initialWidth = initial.maxX - initial.minX
+  const zoom = initialWidth / (domain.maxX - domain.minX)
+  shell.querySelectorAll('[data-plot-action="fit"]').forEach((button) => { button.textContent = Math.abs(zoom - 1) < 0.02 ? 'Fit' : `${Math.round(zoom * 100)}%` })
+}
+
+function pcaZoom(shell, factor, anchorX = 0.5, anchorY = 0.5) {
+  const domain = shell._plotDomain || pcaInitialDomain(shell)
+  const initial = pcaInitialDomain(shell)
+  const minRangeX = (initial.maxX - initial.minX) / 50
+  const minRangeY = (initial.maxY - initial.minY) / 50
+  const maxRangeX = (initial.maxX - initial.minX) * 4
+  const maxRangeY = (initial.maxY - initial.minY) * 4
+  const rangeX = Math.min(maxRangeX, Math.max(minRangeX, (domain.maxX - domain.minX) * factor))
+  const rangeY = Math.min(maxRangeY, Math.max(minRangeY, (domain.maxY - domain.minY) * factor))
+  const anchorDataX = domain.minX + (domain.maxX - domain.minX) * anchorX
+  const anchorDataY = domain.maxY - (domain.maxY - domain.minY) * anchorY
+  renderPcaDomain(shell, {
+    minX: anchorDataX - rangeX * anchorX,
+    maxX: anchorDataX + rangeX * (1 - anchorX),
+    minY: anchorDataY - rangeY * (1 - anchorY),
+    maxY: anchorDataY + rangeY * anchorY,
+  })
+}
+
+function pcaPan(shell, dx, dy) {
+  const domain = shell._plotDomain || pcaInitialDomain(shell)
+  const width = Number(shell.dataset.width) - Number(shell.dataset.pad) * 2
+  const height = Number(shell.dataset.height) - Number(shell.dataset.pad) * 2
+  const shiftX = -(dx / width) * (domain.maxX - domain.minX)
+  const shiftY = (dy / height) * (domain.maxY - domain.minY)
+  renderPcaDomain(shell, {
+    minX: domain.minX + shiftX, maxX: domain.maxX + shiftX,
+    minY: domain.minY + shiftY, maxY: domain.maxY + shiftY,
+  })
+}
+
+function dendrogramInitialViewBox(shell) {
+  return { x: 0, y: 0, width: Number(shell.dataset.width), height: Number(shell.dataset.height) }
+}
+
+function renderDendrogramViewBox(shell, viewBox) {
+  const svg = shell.querySelector('.science-plot')
+  if (!svg) return
+  svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`)
+  shell._plotViewBox = viewBox
+  const initial = dendrogramInitialViewBox(shell)
+  const zoom = initial.width / viewBox.width
+  shell.querySelectorAll('[data-plot-action="fit"]').forEach((button) => { button.textContent = Math.abs(zoom - 1) < 0.02 ? 'Fit' : `${Math.round(zoom * 100)}%` })
+}
+
+function dendrogramZoom(shell, factor, anchorX = 0.5, anchorY = 0.5) {
+  const current = shell._plotViewBox || dendrogramInitialViewBox(shell)
+  const initial = dendrogramInitialViewBox(shell)
+  const width = Math.min(initial.width * 2, Math.max(initial.width / 20, current.width * factor))
+  const height = Math.min(initial.height * 2, Math.max(initial.height / 20, current.height * factor))
+  const anchorSvgX = current.x + current.width * anchorX
+  const anchorSvgY = current.y + current.height * anchorY
+  renderDendrogramViewBox(shell, {
+    x: anchorSvgX - width * anchorX,
+    y: anchorSvgY - height * anchorY,
+    width,
+    height,
+  })
+}
+
+function dendrogramPan(shell, dx, dy, viewport) {
+  const current = shell._plotViewBox || dendrogramInitialViewBox(shell)
+  const shiftX = -(dx / Math.max(1, viewport.clientWidth)) * current.width
+  const shiftY = -(dy / Math.max(1, viewport.clientHeight)) * current.height
+  renderDendrogramViewBox(shell, { ...current, x: current.x + shiftX, y: current.y + shiftY })
 }
 
 function fitPlot(shell) {
-  const viewport = shell.querySelector('.interactive-plot-scroll')
-  const svg = shell.querySelector('.science-plot')
-  if (!viewport || !svg) return
-  svg.style.width = ''
-  svg.style.minWidth = ''
-  shell.dataset.plotScale = '1'
-  delete shell.dataset.fitWidth
-  viewport.scrollLeft = 0
-  viewport.scrollTop = 0
-  viewport.classList.remove('is-zoomed')
-  shell.querySelectorAll('[data-plot-action="fit"]').forEach((button) => { button.textContent = 'Fit' })
+  if (shell.dataset.plotKind === 'pca') renderPcaDomain(shell, pcaInitialDomain(shell))
+  else renderDendrogramViewBox(shell, dendrogramInitialViewBox(shell))
 }
 
 function bindInteractivePlots() {
   document.querySelectorAll('[data-interactive-plot]').forEach((shell) => {
     const viewport = shell.querySelector('.interactive-plot-scroll')
-    if (!viewport) return
+    const svg = shell.querySelector('.science-plot')
+    if (!viewport || !svg) return
+    fitPlot(shell)
 
     shell.querySelectorAll('[data-plot-action]').forEach((button) => {
       button.addEventListener('click', () => {
         const action = button.dataset.plotAction
-        const scale = Number(shell.dataset.plotScale || 1)
         if (action === 'fit') fitPlot(shell)
-        else setPlotScale(shell, action === 'in' ? scale * 1.25 : scale / 1.25)
+        else if (shell.dataset.plotKind === 'pca') pcaZoom(shell, action === 'in' ? 0.8 : 1.25)
+        else dendrogramZoom(shell, action === 'in' ? 0.8 : 1.25)
       })
     })
 
@@ -759,31 +1164,35 @@ function bindInteractivePlots() {
         const visible = button.getAttribute('aria-pressed') !== 'false'
         button.setAttribute('aria-pressed', visible ? 'false' : 'true')
         button.classList.toggle('is-hidden', visible)
-        shell.querySelectorAll(`[data-plot-group="${group}"]`).forEach((mark) => {
-          mark.style.display = visible ? 'none' : ''
-        })
+        shell.querySelectorAll(`[data-plot-group="${group}"]`).forEach((mark) => { mark.style.display = visible ? 'none' : '' })
       })
     })
 
     viewport.addEventListener('wheel', (event) => {
       if (!event.ctrlKey && !event.metaKey) return
       event.preventDefault()
-      const rect = viewport.getBoundingClientRect()
-      const scale = Number(shell.dataset.plotScale || 1)
-      setPlotScale(shell, event.deltaY < 0 ? scale * 1.12 : scale / 1.12, event.clientX - rect.left, event.clientY - rect.top)
+      const rect = svg.getBoundingClientRect()
+      const anchorX = Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width)))
+      const anchorY = Math.min(1, Math.max(0, (event.clientY - rect.top) / Math.max(1, rect.height)))
+      const factor = event.deltaY < 0 ? 0.88 : 1.14
+      if (shell.dataset.plotKind === 'pca') pcaZoom(shell, factor, anchorX, anchorY)
+      else dendrogramZoom(shell, factor, anchorX, anchorY)
     }, { passive: false })
 
     let drag = null
     viewport.addEventListener('pointerdown', (event) => {
       if (event.button !== 0) return
-      drag = { x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop }
+      drag = { x: event.clientX, y: event.clientY }
       viewport.setPointerCapture?.(event.pointerId)
       viewport.classList.add('is-dragging')
     })
     viewport.addEventListener('pointermove', (event) => {
       if (!drag) return
-      viewport.scrollLeft = drag.left - (event.clientX - drag.x)
-      viewport.scrollTop = drag.top - (event.clientY - drag.y)
+      const dx = event.clientX - drag.x
+      const dy = event.clientY - drag.y
+      drag = { x: event.clientX, y: event.clientY }
+      if (shell.dataset.plotKind === 'pca') pcaPan(shell, dx, dy)
+      else dendrogramPan(shell, dx, dy, viewport)
     })
     const stopDrag = () => { drag = null; viewport.classList.remove('is-dragging') }
     viewport.addEventListener('pointerup', stopDrag)
@@ -1058,6 +1467,7 @@ async function runLongitudinalAnalysis() {
       render()
     })
     state.longitudinalResult = response.result
+    await recordHistory('longitudinal-patient-signature-expression', 'Longitudinal patient signature')
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
   } finally {
@@ -1273,6 +1683,7 @@ async function runSignificantHits() {
       render()
     })
     state.hitResult = response.result
+    await recordHistory('significant-hit-structure-expression', response.result.comparisonName || 'Significant Hits')
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
   } finally {
@@ -1321,6 +1732,31 @@ function resultsView() {
     return `<section class="page-heading"><div><span class="eyebrow">Results</span><h2>Results stay with the project on this computer</h2><p>Completed workflows appear here with local exports.</p></div></section><section class="card empty-results"><div class="empty-icon" aria-hidden="true">↧</div><h3>No WASM analysis has completed yet</h3><p>${state.records.length ? 'Your local inputs are selected. Run Explore & QC or Compare Groups to create a browser result.' : 'Select project inputs first.'}</p></section>`
   }
   return `<section class="page-heading"><div><span class="eyebrow">Results</span><h2>Local analysis results</h2><p>No result data have left this device.</p></div></section>${cards.join('')}`
+}
+
+
+function historyWorkflowTitle(workflow) {
+  return ({
+    'explore-qc-expression': 'Explore & QC',
+    'compare-groups-expression': 'Compare Groups',
+    'longitudinal-patient-signature-expression': 'Longitudinal',
+    'significant-hit-structure-expression': 'Significant Hits',
+  })[workflow] || workflow || 'Analysis result'
+}
+
+function historyView() {
+  const estimate = state.storageEstimate
+  const storageDetail = estimate?.quota
+    ? `${humanBytes(estimate.usage)} used of approximately ${humanBytes(estimate.quota)} browser storage`
+    : 'Stored in this browser profile with IndexedDB'
+  const entries = state.historyEntries
+  return `<section class="page-heading"><div><span class="eyebrow">History</span><h2>Previous local analysis results</h2><p>Completed runs are saved as browser-local snapshots so you can inspect them again after a page reload. Raw cohort files are never stored in History.</p></div><div class="local-card"><strong>Browser-local audit</strong><span>${escapeHtml(storageDetail)}</span></div></section>
+    ${state.historyMessage ? `<div class="notice-banner" role="status"><strong>History</strong><span>${escapeHtml(state.historyMessage)}</span></div>` : ''}
+    <section class="card history-card"><div class="card-heading"><div><h3>Saved result snapshots</h3><p>Open a snapshot to restore its result and settings. Delete removes only this browser snapshot and never the original cohort files.</p></div>${entries.length ? '<button id="clear-history" class="danger-text-button">Clear History</button>' : ''}</div>
+      ${state.historyBusy && !state.historyLoaded ? '<div class="inline-status"><span class="spinner" aria-hidden="true"></span><div><strong>Reading browser History</strong><span>No network request is used.</span></div></div>' : ''}
+      ${!state.historyBusy && state.historyLoaded && !entries.length ? '<div class="empty-state"><div class="empty-icon" aria-hidden="true">↺</div><strong>No saved results yet</strong><span>Each completed QC, comparison, longitudinal, or significant-hit run will be added here automatically.</span></div>' : ''}
+      ${entries.length ? `<div class="history-list">${entries.map((entry) => `<article class="history-entry"><div class="history-entry-main"><div class="history-entry-title"><span class="tag success">${escapeHtml(historyWorkflowTitle(entry.workflow))}</span><strong>${escapeHtml(entry.label || historyWorkflowTitle(entry.workflow))}</strong></div><span>${new Date(entry.createdAt).toLocaleString()} · ${escapeHtml(entry.summary || '')}</span><small>${Number(entry.projectFileCount || 0).toLocaleString()} referenced files · ${humanBytes(Number(entry.localDataBytes || 0))} · ${escapeHtml(entry.engine || '')}</small></div><div class="history-entry-actions"><button class="secondary-button history-open" data-history-id="${escapeHtml(entry.id)}">View</button><button class="text-button history-export" data-history-id="${escapeHtml(entry.id)}">Save JSON</button><button class="danger-text-button history-delete" data-history-id="${escapeHtml(entry.id)}">Delete</button></div></article>`).join('')}</div>` : ''}
+    </section>`
 }
 
 function docsView() {
@@ -1381,6 +1817,7 @@ async function runExpressionQc() {
       render()
     })
     state.qcResult = response.result
+    await recordHistory('explore-qc-expression', 'Explore & QC')
     if (response.result.metadata) {
       state.metadataInspection = response.result.metadata
       state.metadataInspectionFileId = state.qcConfig.metadataId
@@ -1471,6 +1908,7 @@ async function runGroupComparison() {
       render()
     })
     state.compareResult = response.result
+    await recordHistory('compare-groups-expression', response.result.comparisonName || comparisonName || 'Compare Groups')
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
   } finally {
@@ -1604,10 +2042,31 @@ function bindCompareEvents() {
 function bindProjectEvents() {
   const fileInput = document.querySelector('#file-input')
   const folderInput = document.querySelector('#folder-input')
+  const stateInput = document.querySelector('#state-input')
+  const dropZone = document.querySelector('#input-drop-zone')
   document.querySelector('#select-files')?.addEventListener('click', () => fileInput.click())
   document.querySelector('#select-folder')?.addEventListener('click', () => folderInput.click())
+  document.querySelector('#load-state')?.addEventListener('click', () => stateInput.click())
+  document.querySelector('#save-state')?.addEventListener('click', () => void saveApplicationState())
   fileInput?.addEventListener('change', (event) => addFiles(event.currentTarget.files))
   folderInput?.addEventListener('change', (event) => addFiles(event.currentTarget.files))
+  stateInput?.addEventListener('change', (event) => void loadApplicationState(event.currentTarget.files?.[0]))
+  if (dropZone) {
+    const activate = (event) => { event.preventDefault(); dropZone.classList.add('is-dragover') }
+    const deactivate = (event) => {
+      event.preventDefault()
+      if (!event.relatedTarget || !dropZone.contains(event.relatedTarget)) dropZone.classList.remove('is-dragover')
+    }
+    dropZone.addEventListener('dragenter', activate)
+    dropZone.addEventListener('dragover', activate)
+    dropZone.addEventListener('dragleave', deactivate)
+    dropZone.addEventListener('drop', (event) => {
+      event.preventDefault()
+      dropZone.classList.remove('is-dragover')
+      const files = event.dataTransfer?.files
+      if (files?.length) addFiles(files)
+    })
+  }
   document.querySelector('#save-manifest')?.addEventListener('click', () => void exportManifest())
   document.querySelector('#clear-project')?.addEventListener('click', clearProject)
   document.querySelector('#continue-qc')?.addEventListener('click', () => { state.tab = 'qc'; render() })
@@ -1664,6 +2123,13 @@ function bindResultsEvents() {
   document.querySelector('#results-export-hits')?.addEventListener('click', () => void exportHitResult())
 }
 
+function bindHistoryEvents() {
+  document.querySelectorAll('.history-open').forEach((button) => button.addEventListener('click', () => void openHistoryEntry(button.dataset.historyId)))
+  document.querySelectorAll('.history-export').forEach((button) => button.addEventListener('click', () => void exportHistorySnapshot(button.dataset.historyId)))
+  document.querySelectorAll('.history-delete').forEach((button) => button.addEventListener('click', () => void removeHistorySnapshot(button.dataset.historyId)))
+  document.querySelector('#clear-history')?.addEventListener('click', () => void removeAllHistory())
+}
+
 function render() {
   renderNav()
   const main = document.querySelector('#main-content')
@@ -1674,6 +2140,7 @@ function render() {
     longitudinal: longitudinalView(),
     hits: significantHitsView(),
     results: resultsView(),
+    history: historyView(),
     docs: docsView(),
   }
   main.innerHTML = views[state.tab]
@@ -1683,13 +2150,17 @@ function render() {
   if (state.tab === 'longitudinal') bindLongitudinalEvents()
   if (state.tab === 'hits') bindSignificantHitEvents()
   if (state.tab === 'results') bindResultsEvents()
+  if (state.tab === 'history') {
+    bindHistoryEvents()
+    if (!state.historyLoaded && !state.historyBusy) void refreshHistory()
+  }
 }
 
 async function registerIsolationServiceWorker() {
   if (!('serviceWorker' in navigator) || !window.isSecureContext) return
   try {
     const workerUrl = new URL('./coi-serviceworker.js', window.location.href)
-    workerUrl.searchParams.set('v', '0.21.0-w5-cache1')
+    workerUrl.searchParams.set('v', '0.21.0-ux1')
     await navigator.serviceWorker.register(workerUrl.href, { scope: new URL('./', workerUrl).pathname })
     await navigator.serviceWorker.ready
     if (!navigator.serviceWorker.controller && sessionStorage.getItem('4c-insight-coi-reload') !== '1') {
