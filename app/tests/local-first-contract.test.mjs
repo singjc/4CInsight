@@ -24,6 +24,18 @@ test('static entry point is branded 4C Insight', async () => {
 })
 
 
+
+test('browser shell cannot silently reuse a stale workflow bundle', async () => {
+  const html = await readFile(new URL('../index.html', import.meta.url), 'utf8')
+  const main = await readFile(new URL('../main.js', import.meta.url), 'utf8')
+  const worker = await readFile(new URL('../coi-serviceworker.js', import.meta.url), 'utf8')
+  assert.match(html, /styles\.css\?v=/)
+  assert.match(html, /main\.js\?v=/)
+  assert.match(main, /coi-serviceworker\.js/)
+  assert.match(main, /searchParams\.set\('v',/)
+  assert.match(worker, /cache:\s*['"]no-store['"]/)
+})
+
 test('W2 expression QC stays inside the worker and Rust/WASM bridge', async () => {
   const main = await readFile(new URL('../main.js', import.meta.url), 'utf8')
   const worker = await readFile(new URL('../analysis-worker.js', import.meta.url), 'utf8')

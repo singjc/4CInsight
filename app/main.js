@@ -1689,6 +1689,7 @@ async function registerIsolationServiceWorker() {
   if (!('serviceWorker' in navigator) || !window.isSecureContext) return
   try {
     const workerUrl = new URL('./coi-serviceworker.js', window.location.href)
+    workerUrl.searchParams.set('v', '0.21.0-w5-cache1')
     await navigator.serviceWorker.register(workerUrl.href, { scope: new URL('./', workerUrl).pathname })
     await navigator.serviceWorker.ready
     if (!navigator.serviceWorker.controller && sessionStorage.getItem('4c-insight-coi-reload') !== '1') {
