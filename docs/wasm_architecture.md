@@ -20,7 +20,7 @@ Long-running work runs outside the UI thread. Worker messages use explicit versi
 
 ### 3. Rust/WASM bridge
 
-`wasm/` exposes browser-safe functions. W1 added input preflight classification, W2 added metadata and expression QC, W3 added corrected expression group comparison, and W4 adds gene/transcript longitudinal patient-signature analysis. Later phases add repertoire/immune longitudinal analysis, significant-hit structure, and report generation.
+`wasm/` exposes browser-safe functions. W1 added input preflight classification, W2 added metadata and expression QC, W3 added corrected expression group comparison, W4 added gene/transcript longitudinal patient-signature analysis, and W5 adds expression-backed significant-hit structure. Later phases add repertoire/immune parity and report generation.
 
 ### 4. Shared Rust science
 
@@ -97,3 +97,10 @@ local metadata File + selected merged expression File
 ```
 
 The browser must not construct its own statistical model or send selected data to a server.
+
+
+## W5 significant-hit boundary
+
+`src/hit_structure_core.rs` contains reader-agnostic post-selection calculations shared by the native workflow and browser/WASM path. `src/portable_hit_structure.rs` reruns the frozen corrected W3 comparison from local bytes, applies the selected-hit thresholds, reconstructs only the selected feature rows, and calls the shared core for PCA, hierarchical clustering, heatmap z scores, silhouette, nearest-neighbour coherence, and PERMANOVA.
+
+The browser does not reimplement feature selection or statistics. It only sends the frozen comparison settings and post-selection thresholds to the worker and renders the returned result.

@@ -20,7 +20,7 @@ Both HTML report styles and the technical table export are generated from the **
 
 ### 4C Insight WASM migration
 
-From v0.17.0, the primary product is the local-first 4C Insight web application. W2 enabled metadata and gene/transcript expression QC, W3 enabled corrected gene/transcript Case/Control comparison, and W4 enables gene/transcript longitudinal patient-signature analysis. Users select files from their own computer; scientific execution runs in Rust/WebAssembly browser workers, with results saved locally. The existing Rust implementation remains authoritative while each workflow is moved behind browser-safe byte/reader APIs and native/WASM parity tests. See `docs/wasm_architecture.md` and `docs/wasm_development.md`.
+From v0.17.0, the primary product is the local-first 4C Insight web application. W2 enabled metadata and gene/transcript expression QC, W3 enabled corrected gene/transcript Case/Control comparison, W4 enabled gene/transcript longitudinal patient-signature analysis, and W5 enables expression-backed significant-hit structure analysis. Users select files from their own computer; scientific execution runs in Rust/WebAssembly browser workers, with results saved locally. The existing Rust implementation remains authoritative while each workflow is moved behind browser-safe byte/reader APIs and native/WASM parity tests. See `docs/wasm_architecture.md` and `docs/wasm_development.md`.
 
 ### Searchable visual in-app and report documentation
 
@@ -550,3 +550,24 @@ Patient identity is not used to construct the expression distance matrix. It is 
 - a patient-annotated average-linkage dendrogram.
 
 These statistics address whether a modality captures a stable patient-specific signature over time. They do not test Case/Control separation and they do not establish predictive performance.
+
+
+## W5 browser significant-hit structure workflow
+
+The **Significant Hits** tab starts from a completed **Compare Groups** analysis. It does not ask the user to define the cohort twice. The browser reuses the exact W3 sample-ID role, Case/Control values, patient/subject role, covariates, exclusions, model thresholds, and merged expression files.
+
+For each enabled expression modality, Rust/WASM reruns the corrected W3 model with the frozen settings, selects features by the configured BH q-value and optional absolute adjusted-effect threshold, and reconstructs the selected-feature matrix from local merged expression bytes. Gene panels use Raw Count columns. Transcript/isoform panels use Total Reads columns. Both use median-ratio normalization followed by `log2(normalized count + 0.5)`.
+
+W5 reports:
+
+- significant-hit PCA;
+- average-linkage hierarchical clustering;
+- clustered feature-by-sample z-score heatmap for display;
+- Case/Control silhouette;
+- nearest-neighbour group accuracy;
+- subject-blocked PERMANOVA when repeated-measure subject IDs are available;
+- exact selected-feature tables and local JSON export.
+
+The heatmap z scores are for visualization only. PCA and hierarchical clustering use the normalized selected-feature values, not the display z scores.
+
+**Important interpretation rule:** these are post-selection descriptive views. The same Case/Control labels were used to select the significant features and are then shown in the PCA, dendrogram, and heatmap. Strong separation can show that the selected hit set is coherent across samples, but it is not independent validation and must not be described as held-out predictive accuracy. A generalization claim requires patient-grouped cross-validation with feature selection repeated inside each training fold.

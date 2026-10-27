@@ -280,3 +280,31 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 @media (max-width: 720px) {
   .longitudinal-role-grid { grid-template-columns: 1fr; }
 }
+
+/* W5 significant-hit post-selection workflow */
+.hit-settings-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.significant-result { margin-bottom: 20px; }
+.hit-heatmap-card { margin-top: 14px; overflow: hidden; }
+.significant-heatmap-scroll { overflow: auto; max-width: 100%; max-height: 680px; background: #fff; border-top: 1px solid #eaecf0; }
+.significant-heatmap { border-collapse: separate; border-spacing: 0; font-size: 9px; width: max-content; min-width: 100%; }
+.significant-heatmap th, .significant-heatmap td { border-right: 1px solid rgba(255,255,255,.45); border-bottom: 1px solid rgba(255,255,255,.45); }
+.heatmap-feature-head, .heatmap-feature-label { position: sticky; left: 0; z-index: 3; min-width: 170px; max-width: 240px; padding: 5px 8px; background: #fff; text-align: left; border-right: 1px solid #eaecf0 !important; }
+.heatmap-feature-head { top: 0; z-index: 5; vertical-align: bottom; }
+.heatmap-annotation-label { top: 88px; }
+.heatmap-feature-label strong { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #344054; font-size: 9.5px; }
+.heatmap-feature-label span { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #98a2b3; font-size: 8px; }
+.heatmap-sample-head { position: sticky; top: 0; z-index: 2; width: 15px; min-width: 15px; height: 88px; background: #fff; vertical-align: bottom; padding: 0; }
+.heatmap-sample-head span { display: inline-block; max-width: 82px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; writing-mode: vertical-rl; transform: rotate(180deg); color: #667085; font-size: 7.5px; padding: 4px 2px; }
+.heatmap-group-cell { position: sticky; top: 88px; z-index: 2; width: 15px; min-width: 15px; height: 8px; padding: 0; }
+.heatmap-group-cell.case-heat { background: #3159d9; }
+.heatmap-group-cell.control-heat { background: #12a078; }
+.heatmap-cell { width: 15px; min-width: 15px; height: 15px; padding: 0; }
+.heatmap-scale { display: flex; align-items: center; gap: 7px; padding: 8px 12px 10px; color: #667085; font-size: 9px; border-top: 1px solid #eaecf0; background: #fff; }
+.heatmap-scale small { margin-left: 4px; color: #98a2b3; }
+.heatmap-gradient { width: 140px; height: 9px; border-radius: 999px; background: linear-gradient(90deg, rgba(49,89,217,.88), rgba(255,255,255,1), rgba(196,60,60,.88)); border: 1px solid #eaecf0; }
+@media (max-width: 900px) {
+  .hit-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .hit-settings-grid { grid-template-columns: 1fr; }
+}

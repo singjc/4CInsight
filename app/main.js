@@ -44,6 +44,16 @@ const state = {
   compareResult: null,
   longitudinalProgress: null,
   longitudinalResult: null,
+  hitProgress: null,
+  hitResult: null,
+  hitConfig: {
+    qThreshold: 0.05,
+    minAbsEffect: 0.0,
+    maxAnalysisFeatures: 500,
+    maxHeatmapFeatures: 80,
+    geneEnabled: true,
+    transcriptEnabled: true,
+  },
   longitudinalConfig: {
     observationIdColumn: '',
     patientIdColumn: '',
@@ -190,6 +200,8 @@ function resetQcStateAfterInputsChange() {
   state.compareProgress = null
   state.longitudinalResult = null
   state.longitudinalProgress = null
+  state.hitResult = null
+  state.hitProgress = null
 
   const geneMerged = recordsOfKind('merged-gene-expression')
   const transcriptMerged = recordsOfKind('merged-transcript-expression')
@@ -273,6 +285,8 @@ function clearProject() {
   state.compareProgress = null
   state.longitudinalResult = null
   state.longitudinalProgress = null
+  state.hitResult = null
+  state.hitProgress = null
   state.qcConfig.metadataId = ''
   state.qcConfig.metadataIdColumn = ''
   state.compareConfig.groupColumn = ''
@@ -342,6 +356,22 @@ async function exportLongitudinalResult() {
     result: state.longitudinalResult,
   }
   await saveTextFile('4c-insight-longitudinal-patient-signature.json', `${JSON.stringify(payload, null, 2)}\n`)
+}
+
+async function exportHitResult() {
+  if (!state.hitResult) return
+  const payload = {
+    product: '4C Insight',
+    schemaVersion: 1,
+    workflow: 'significant-hit-structure-expression',
+    comparisonConfig: {
+      metadataIdColumn: state.qcConfig.metadataIdColumn,
+      ...state.compareConfig,
+    },
+    hitConfig: state.hitConfig,
+    result: state.hitResult,
+  }
+  await saveTextFile('4c-insight-significant-hit-structure.json', `${JSON.stringify(payload, null, 2)}\n`)
 }
 
 function selectedValues(select) {
@@ -1107,11 +1137,165 @@ function bindLongitudinalEvents() {
   }
 }
 
-function migrationView(title, step) {
-  const records = recognizedCount()
-  return `<section class="page-heading"><div><span class="eyebrow">${title}</span><h2>${title}</h2><p>This workflow is being moved to the shared Rust/WASM engine.</p></div></section>
-  <section class="card migration-card"><span class="tag neutral">Migration ${step}</span><h3>The workflow is visible, but scientific execution is not enabled yet.</h3><p>The existing Rust implementation remains the scientific reference. 4C Insight enables this action only after the browser-safe API and native/WASM parity tests pass.</p><div class="migration-checks"><div><span class="check done">✓</span><span>Local file selection and worker boundary</span></div><div><span class="check done">✓</span><span>Metadata and expression byte readers</span></div><div><span class="check done">✓</span><span>${records} recognized local input${records === 1 ? '' : 's'} available</span></div><div><span class="check">→</span><span>Workflow-specific statistical parity</span></div></div></section>`
+function significantSampleOrder(panel) {
+  const samples = panel?.sample_ids || []
+  const leaves = panel?.dendrogram?.leaves || []
+  if (!samples.length || !leaves.length) return samples.map((_, index) => index)
+  const bySample = new Map(samples.map((sample, index) => [String(sample), index]))
+  const order = leaves.map((leaf) => bySample.get(String(leaf.sample_id))).filter((index) => index !== undefined)
+  return order.length === samples.length ? order : samples.map((_, index) => index)
 }
+
+function heatmapCellColor(value) {
+  const z = Math.max(-3, Math.min(3, Number(value) || 0))
+  const amount = Math.abs(z) / 3
+  if (z >= 0) return `rgba(196, 60, 60, ${0.12 + amount * 0.76})`
+  return `rgba(49, 89, 217, ${0.12 + amount * 0.76})`
+}
+
+function significantHeatmap(panel) {
+  const features = panel?.heatmap_features || []
+  const rows = panel?.heatmap_zscores || []
+  const samples = panel?.sample_ids || []
+  if (!features.length || !rows.length || !samples.length) return '<div class="plot-empty">No heatmap matrix is available.</div>'
+  const order = significantSampleOrder(panel)
+  return `<div class="significant-heatmap-scroll"><table class="significant-heatmap"><thead><tr><th class="heatmap-feature-head">Feature</th>${order.map((index) => `<th class="heatmap-sample-head" title="${escapeHtml(samples[index])}"><span>${escapeHtml(samples[index])}</span></th>`).join('')}</tr><tr><th class="heatmap-feature-head heatmap-annotation-label">Group</th>${order.map((index) => `<th class="heatmap-group-cell ${String(panel.groups[index]).toLowerCase() === 'case' ? 'case-heat' : 'control-heat'}" title="${escapeHtml(samples[index])} · ${escapeHtml(panel.groups[index])}"></th>`).join('')}</tr></thead><tbody>${features.map((feature, rowIndex) => `<tr><th class="heatmap-feature-label" title="${escapeHtml(feature.feature)} · q ${formatNumber(feature.q_value)} · effect ${formatNumber(feature.adjusted_effect)}"><strong>${escapeHtml(feature.feature)}</strong><span>${escapeHtml(feature.family || '')}</span></th>${order.map((sampleIndex) => { const value = Number(rows[rowIndex]?.[sampleIndex] ?? 0); return `<td class="heatmap-cell" style="background:${heatmapCellColor(value)}" title="${escapeHtml(feature.feature)} · ${escapeHtml(samples[sampleIndex])} · z=${formatNumber(value)}"><span class="visually-hidden">${formatNumber(value)}</span></td>` }).join('')}</tr>`).join('')}</tbody></table></div><div class="heatmap-scale" aria-label="Heatmap z-score scale"><span>−3</span><i class="heatmap-gradient"></i><span>+3</span><small>Feature-wise z-score</small></div>`
+}
+
+function significantFeatureTable(panel) {
+  const rows = panel?.analysis_features || []
+  if (!rows.length) return '<div class="plot-empty">No selected features are available.</div>'
+  return `<div class="table-scroll differential-table"><table><thead><tr><th>Feature</th><th>Family / secondary ID</th><th>Adjusted effect</th><th>q-value</th></tr></thead><tbody>${rows.slice(0, 250).map((row) => `<tr><td><strong>${escapeHtml(row.feature)}</strong></td><td>${escapeHtml(row.family || '')}</td><td>${formatNumber(row.adjusted_effect)}</td><td>${formatNumber(row.q_value)}</td></tr>`).join('')}</tbody></table></div><p class="table-note">Showing ${Math.min(250, rows.length).toLocaleString()} of ${rows.length.toLocaleString()} features used for the post-selection structure analysis. The JSON export contains all selected features.</p>`
+}
+
+function significantPanelSection(title, result) {
+  if (!result) return ''
+  const panel = result.panel
+  const warnings = [...new Set([...(result.warnings || []), ...(panel?.warnings || [])])]
+  const caseLabel = result.comparison?.case_label || 'Case'
+  const controlLabel = result.comparison?.control_label || 'Control'
+  if (!panel) {
+    return `<section class="card significant-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>No features passed the configured post-selection threshold.</p></div><span class="tag neutral">No hits</span></div>${warnings.length ? `<div class="analysis-warnings">${warnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join('')}</div>` : ''}</section>`
+  }
+  const pca = panel.pca
+  const permanova = pca ? `F ${formatNumber(pca.permanova_f)} · p ${formatNumber(pca.permanova_p)}` : 'Not available'
+  const prefix = title.toLowerCase().startsWith('gene') ? 'hit-gene' : 'hit-transcript'
+  return `<section class="card significant-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(panel.distance_label)} · ${panel.sample_ids.length} modeled samples</p></div><span class="tag warning">Post-selection</span></div>
+    <div class="summary-grid compact-grid">
+      ${summaryCard('Significant hits', panel.significant_features_total, `BH q ≤ ${formatNumber(state.hitConfig.qThreshold)} · |effect| ≥ ${formatNumber(state.hitConfig.minAbsEffect)}`)}
+      ${summaryCard('Features analyzed', panel.analysis_features.length, `Maximum ${state.hitConfig.maxAnalysisFeatures}`)}
+      ${summaryCard('Silhouette', formatNumber(panel.silhouette), 'Case/Control coherence on the selected-hit distance matrix')}
+      ${summaryCard('NN group accuracy', Number.isFinite(Number(panel.nearest_neighbor_group_accuracy)) ? `${(Number(panel.nearest_neighbor_group_accuracy) * 100).toFixed(1)}%` : '—', 'Nearest other sample has the same Case/Control label')}
+      ${summaryCard('PERMANOVA', permanova, `${pca?.permutations || 0} subject-blocked permutations when repeated measures are present`)}
+      ${summaryCard('Heatmap rows', panel.heatmap_features.length, `Maximum ${state.hitConfig.maxHeatmapFeatures}`)}
+    </div>
+    ${warnings.length ? `<div class="analysis-warnings">${warnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join('')}</div>` : ''}
+    <div class="plot-grid"><article class="plot-card"><div class="plot-heading"><strong>Significant-hit PCA</strong><span>Descriptive structure after feature selection using the same group labels.</span></div>${pcaSvg(panel.pca, `${prefix}-pca`, caseLabel, controlLabel)}</article><article class="plot-card"><div class="plot-heading"><strong>Significant-hit hierarchical clustering</strong><span>Average linkage using only the selected-hit matrix.</span></div>${dendrogramSvg(panel.dendrogram, `${prefix}-dendrogram`, caseLabel, controlLabel)}</article></div>
+    <article class="plot-card hit-heatmap-card"><div class="plot-heading"><strong>Clustered significant-hit heatmap</strong><span>Rows are selected features; columns follow the significant-hit dendrogram leaf order.</span></div>${significantHeatmap(panel)}</article>
+    <details class="details-block result-details"><summary>Selected features (${panel.analysis_features.length})</summary>${significantFeatureTable(panel)}</details>
+  </section>`
+}
+
+function significantCoherenceSummary(result) {
+  const rows = [['Gene expression', result?.gene], ['Transcript / isoform expression', result?.transcript]]
+    .filter(([, entry]) => entry?.panel)
+    .map(([label, entry]) => ({ label, entry, panel: entry.panel }))
+    .sort((a, b) => Number(b.panel.silhouette || -1) - Number(a.panel.silhouette || -1))
+  if (!rows.length) return ''
+  return `<section class="card"><div class="card-heading"><div><h3>Cross-modality selected-hit coherence</h3><p>This is a descriptive comparison of the post-selection structures. It is not a predictive ranking or independent validation.</p></div><span class="tag warning">Descriptive</span></div><div class="table-scroll"><table><thead><tr><th>Data type</th><th>Significant hits</th><th>Features analyzed</th><th>Silhouette</th><th>NN group accuracy</th><th>PERMANOVA p</th></tr></thead><tbody>${rows.map(({ label, panel }) => `<tr><td><strong>${escapeHtml(label)}</strong></td><td>${panel.significant_features_total}</td><td>${panel.analysis_features.length}</td><td>${formatNumber(panel.silhouette)}</td><td>${Number.isFinite(Number(panel.nearest_neighbor_group_accuracy)) ? `${(Number(panel.nearest_neighbor_group_accuracy) * 100).toFixed(1)}%` : '—'}</td><td>${formatNumber(panel.pca?.permanova_p)}</td></tr>`).join('')}</tbody></table></div></section>`
+}
+
+function significantHitsView() {
+  const cfg = state.hitConfig
+  const compare = state.compareResult
+  const geneAvailable = Boolean(compare?.gene && selectedFile(state.compareConfig.geneMergedId))
+  const transcriptAvailable = Boolean(compare?.transcript && selectedFile(state.compareConfig.transcriptMergedId))
+  const enabledCount = Number(cfg.geneEnabled && geneAvailable) + Number(cfg.transcriptEnabled && transcriptAvailable)
+  const runnable = Boolean(compare && state.wasmReady && !state.busy && selectedFile(state.qcConfig.metadataId) && enabledCount > 0)
+
+  if (!compare) {
+    return `<section class="page-heading"><div><span class="eyebrow">Significant Hits · W5</span><h2>Inspect the structure of differential hits</h2><p>This workflow starts from a completed Compare Groups analysis so the cohort definition, exclusions, covariates, and Case/Control labels cannot drift between feature selection and visualization.</p></div></section>
+      ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
+      <section class="card migration-card"><span class="tag warning">Comparison required</span><h3>Run Compare Groups first.</h3><p>Significant-hit PCA, clustering, and heatmaps are post-selection views of the same corrected comparison. Complete the group comparison before opening this workflow.</p><div class="button-row"><button id="hits-open-compare" class="primary-button">Go to Compare Groups</button></div></section>`
+  }
+
+  const comparisonName = compare.comparisonName || 'Current corrected comparison'
+  return `<section class="page-heading"><div><span class="eyebrow">Significant Hits · W5</span><h2>Post-selection PCA, clustering, and heatmaps</h2><p>Use the FDR-supported features from <strong>${escapeHtml(comparisonName)}</strong> to ask whether the discovered signal is coherent across samples.</p></div><div class="local-card"><strong>Descriptive, not validation</strong><span>The same Case/Control labels select the features and appear in these plots.</span></div></section>
+  ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
+  <div class="notice-banner" role="note"><strong>Post-selection interpretation:</strong><span>Clean Case/Control separation here is expected to some degree because these features were selected using the same labels. Use these plots to inspect consistency, outliers, and multivariate structure—not as held-out predictive performance.</span></div>
+  <section class="card"><div class="card-heading"><div><h3>1. Frozen comparison</h3><p>W5 reuses the current W3 metadata roles, groups, covariates, exclusions, and merged tables. Change them in Compare Groups, then rerun that workflow if needed.</p></div><span class="tag success">${escapeHtml(comparisonName)}</span></div><div class="summary-grid compact-grid">${summaryCard('Case', compare.gene?.comparison?.case_label || compare.transcript?.comparison?.case_label || 'Case', `${state.compareConfig.caseValues.length} selected metadata value${state.compareConfig.caseValues.length === 1 ? '' : 's'}`)}${summaryCard('Control', compare.gene?.comparison?.control_label || compare.transcript?.comparison?.control_label || 'Control', `${state.compareConfig.controlValues.length} selected metadata value${state.compareConfig.controlValues.length === 1 ? '' : 's'}`)}${summaryCard('Subject / patient', state.compareConfig.subjectColumn || 'Not selected', state.compareConfig.subjectColumn ? 'Used for repeated-measure robust inference' : 'Samples treated as independent subjects')}${summaryCard('Covariates', state.compareConfig.covariates.length, state.compareConfig.covariates.length ? state.compareConfig.covariates.join(', ') : 'No adjustment covariates')}</div></section>
+  <section class="card"><div class="card-heading"><div><h3>2. Significant-hit definition</h3><p>Thresholds only control which already-tested W3 features enter the descriptive structure analysis.</p></div></div><div class="form-grid hit-settings-grid"><label><span>BH q-value threshold</span><input id="hit-q-threshold" type="number" min="0" max="1" step="0.001" value="${cfg.qThreshold}"/></label><label><span>Minimum |adjusted effect|</span><input id="hit-min-effect" type="number" min="0" step="0.05" value="${cfg.minAbsEffect}"/></label><label><span>Maximum PCA/clustering features</span><input id="hit-max-analysis" type="number" min="2" step="1" value="${cfg.maxAnalysisFeatures}"/></label><label><span>Maximum heatmap features</span><input id="hit-max-heatmap" type="number" min="1" step="1" value="${cfg.maxHeatmapFeatures}"/></label></div></section>
+  <section class="card"><div class="card-heading"><div><h3>3. Data types</h3><p>Only expression modalities completed in the current Compare Groups result can be used.</p></div></div><div class="config-grid expression-source-grid"><div class="config-block stacked ${geneAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-gene-enabled" type="checkbox" ${cfg.geneEnabled && geneAvailable ? 'checked' : ''} ${geneAvailable ? '' : 'disabled'}/><span><strong>Gene expression</strong><small>Selected corrected gene hits</small></span></label><span class="tag ${geneAvailable ? 'success' : 'neutral'}">${geneAvailable ? 'Available' : 'Run W3 first'}</span></div></div><div class="config-block stacked ${transcriptAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-transcript-enabled" type="checkbox" ${cfg.transcriptEnabled && transcriptAvailable ? 'checked' : ''} ${transcriptAvailable ? '' : 'disabled'}/><span><strong>Transcript / isoform expression</strong><small>Selected corrected transcript hits</small></span></label><span class="tag ${transcriptAvailable ? 'success' : 'neutral'}">${transcriptAvailable ? 'Available' : 'Run W3 first'}</span></div></div></div>
+  <div class="run-row"><div><strong>${enabledCount} expression data type${enabledCount === 1 ? '' : 's'} enabled</strong><span>The corrected W3 model is rerun locally with the frozen settings, then only the selected-hit structure is retained.</span></div><button id="run-significant-hits" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run significant-hit structure'}</button></div></section>
+  ${state.hitProgress ? `<div class="progress-card" role="status"><div class="progress-copy"><strong>${escapeHtml(state.hitProgress.message)}</strong><span>${state.hitProgress.completed} of ${state.hitProgress.total} modality steps complete</span></div><progress max="${Math.max(1, state.hitProgress.total)}" value="${state.hitProgress.completed}"></progress></div>` : ''}
+  ${state.hitResult ? `<div class="result-heading"><div><span class="eyebrow">Post-selection result</span><h3>${escapeHtml(state.hitResult.comparisonName)}</h3><p>Generated entirely on this device from the same corrected comparison settings.</p></div><button id="export-significant-hits" class="secondary-button">Save significant-hit JSON</button></div>${significantCoherenceSummary(state.hitResult)}${significantPanelSection('Gene expression', state.hitResult.gene)}${significantPanelSection('Transcript / isoform expression', state.hitResult.transcript)}` : ''}`
+}
+
+async function runSignificantHits() {
+  const compare = state.compareResult
+  if (!compare) {
+    state.error = 'Run Compare Groups before significant-hit structure analysis.'
+    render()
+    return
+  }
+  const metadataFile = selectedFile(state.qcConfig.metadataId)
+  const geneFile = selectedFile(state.compareConfig.geneMergedId)
+  const transcriptFile = selectedFile(state.compareConfig.transcriptMergedId)
+  if (!metadataFile) {
+    state.error = 'The local metadata file is no longer available. Select the project files again.'
+    render()
+    return
+  }
+  const { comparisonName, portableConfig } = currentPortableComparisonConfig()
+  const hitConfig = {
+    qThreshold: Number(state.hitConfig.qThreshold),
+    minAbsEffect: Number(state.hitConfig.minAbsEffect),
+    maxAnalysisFeatures: Math.max(2, Math.trunc(Number(state.hitConfig.maxAnalysisFeatures) || 500)),
+    maxHeatmapFeatures: Math.max(1, Math.trunc(Number(state.hitConfig.maxHeatmapFeatures) || 80)),
+  }
+  const geneEnabled = Boolean(state.hitConfig.geneEnabled && compare.gene && geneFile)
+  const transcriptEnabled = Boolean(state.hitConfig.transcriptEnabled && compare.transcript && transcriptFile)
+  state.busy = true
+  state.error = null
+  state.hitResult = null
+  state.hitProgress = { completed: 0, total: Number(geneEnabled) + Number(transcriptEnabled), message: 'Starting significant-hit analysis' }
+  render()
+  try {
+    const response = await workerRequest('run-significant-hits', {
+      metadataFile,
+      comparisonName,
+      comparisonConfig: portableConfig,
+      hitConfig,
+      gene: { enabled: geneEnabled, file: geneEnabled ? geneFile : null },
+      transcript: { enabled: transcriptEnabled, file: transcriptEnabled ? transcriptFile : null },
+    }, (progress) => {
+      state.hitProgress = progress
+      render()
+    })
+    state.hitResult = response.result
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    state.busy = false
+    state.hitProgress = null
+    render()
+  }
+}
+
+function bindSignificantHitEvents() {
+  const cfg = state.hitConfig
+  document.querySelector('#hits-open-compare')?.addEventListener('click', () => { state.tab = 'compare'; render() })
+  document.querySelector('#hit-q-threshold')?.addEventListener('change', (event) => { cfg.qThreshold = Number(event.currentTarget.value); state.hitResult = null; render() })
+  document.querySelector('#hit-min-effect')?.addEventListener('change', (event) => { cfg.minAbsEffect = Number(event.currentTarget.value); state.hitResult = null; render() })
+  document.querySelector('#hit-max-analysis')?.addEventListener('change', (event) => { cfg.maxAnalysisFeatures = Math.max(2, Math.trunc(Number(event.currentTarget.value) || 500)); state.hitResult = null })
+  document.querySelector('#hit-max-heatmap')?.addEventListener('change', (event) => { cfg.maxHeatmapFeatures = Math.max(1, Math.trunc(Number(event.currentTarget.value) || 80)); state.hitResult = null })
+  document.querySelector('#hit-gene-enabled')?.addEventListener('change', (event) => { cfg.geneEnabled = event.currentTarget.checked; state.hitResult = null; render() })
+  document.querySelector('#hit-transcript-enabled')?.addEventListener('change', (event) => { cfg.transcriptEnabled = event.currentTarget.checked; state.hitResult = null; render() })
+  document.querySelector('#run-significant-hits')?.addEventListener('click', () => void runSignificantHits())
+  document.querySelector('#export-significant-hits')?.addEventListener('click', () => void exportHitResult())
+  bindInteractivePlots()
+}
+
 
 function resultsView() {
   const cards = []
@@ -1128,6 +1312,11 @@ function resultsView() {
     const best = modalities.slice().sort((a, b) => Number(b.identity_auc || -1) - Number(a.identity_auc || -1))[0]
     cards.push(`<section class="card result-card"><div><span class="tag success">Completed</span><h3>Longitudinal · patient-specific signature</h3><p>${modalities.length} expression data type${modalities.length === 1 ? '' : 's'} analyzed${best ? ` · best identity AUC ${formatNumber(best.identity_auc)}` : ''}.</p></div><div class="button-row"><button id="results-open-longitudinal" class="secondary-button">View longitudinal</button><button id="results-export-longitudinal" class="primary-button">Save longitudinal JSON</button></div></section>`)
   }
+  if (state.hitResult) {
+    const panels = [state.hitResult.gene?.panel, state.hitResult.transcript?.panel].filter(Boolean)
+    const totalHits = panels.reduce((sum, panel) => sum + Number(panel.significant_features_total || 0), 0)
+    cards.push(`<section class="card result-card"><div><span class="tag success">Completed</span><h3>Significant Hits · post-selection structure</h3><p>${escapeHtml(state.hitResult.comparisonName)} · ${panels.length} expression data type${panels.length === 1 ? '' : 's'} with selected-hit structure · ${totalHits.toLocaleString()} threshold-supported hits.</p></div><div class="button-row"><button id="results-open-hits" class="secondary-button">View significant hits</button><button id="results-export-hits" class="primary-button">Save significant-hit JSON</button></div></section>`)
+  }
   if (!cards.length) {
     return `<section class="page-heading"><div><span class="eyebrow">Results</span><h2>Results stay with the project on this computer</h2><p>Completed workflows appear here with local exports.</p></div></section><section class="card empty-results"><div class="empty-icon" aria-hidden="true">↧</div><h3>No WASM analysis has completed yet</h3><p>${state.records.length ? 'Your local inputs are selected. Run Explore & QC or Compare Groups to create a browser result.' : 'Select project inputs first.'}</p></section>`
   }
@@ -1135,7 +1324,7 @@ function resultsView() {
 }
 
 function docsView() {
-  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods and interpretation</h2><p>4C Insight keeps analysis assumptions and limitations visible next to the workflows that use them.</p></div></section><div class="docs-grid"><article class="card"><h3>Local-first execution</h3><p>Selected files remain on the user's computer. Browser workers and Rust/WebAssembly perform analysis locally. Results are saved only when the user chooses an export.</p></article><article class="card"><h3>Expression QC</h3><p>Metadata tables and gene/transcript workbooks are parsed from bytes in Rust. Expression workbooks are processed one at a time so the browser does not retain the complete cohort in source-file buffers.</p></article><article class="card"><h3>W3 corrected group comparison</h3><p>Gene analysis uses Raw Count columns. Transcript analysis uses Total Reads columns. Positive-count median-ratio size factors are followed by the established negative-binomial log-link group model. A selected patient/subject column enables subject-clustered sandwich standard errors for repeated measurements. Selected covariates are added to the same model.</p></article><article class="card"><h3>PCA and hierarchical clustering</h3><p>Global PCA and the dendrogram use top-variable normalized features. Case/Control labels do not select those features. The dendrogram uses average linkage with Euclidean distance. These plots describe cohort structure and are distinct from post-selection significant-hit plots.</p></article><article class="card"><h3>Sample exclusions</h3><p>Reviewed-QC and custom metadata rules are optional and independent. Each rule uses a user-selected metadata column and one or more exact observed values. Matching metadata rows are removed before Case/Control construction and model fitting, and the exact rule and excluded sample IDs are stored in the result.</p></article><article class="card"><h3>Transcript usage</h3><p>The transcript workflow also runs the existing differential transcript-usage screen. It aggregates transcript proportions within genes, applies the established CLR-based transcript-usage model, and reports BH-adjusted gene and transcript results.</p></article><article class="card"><h3>Scientific parity</h3><p>W3 fixtures run the same merged expression tables through native filesystem APIs and browser-safe byte APIs. The enabled workflow must match for size factors, differential tests, PCA, dendrograms, and transcript DTU outputs.</p></article><article class="card"><h3>W4 longitudinal patient signature</h3><p>Longitudinal analysis is unsupervised. Expression distances are built from top-variable normalized log2 counts without using patient identity. Patient labels are applied afterward to measure identity AUC, nearest-neighbour patient accuracy, same-patient versus different-patient distance, and to annotate the average-linkage dendrogram. Observation ID, patient ID, time/visit, and exclusions are user-selected metadata roles.</p></article><article class="card"><h3>Significant hits</h3><p>Significant-hit PCA and clustering remain a separate post-selection workflow. Those plots describe the coherence of features selected by the same Case/Control comparison and do not provide independent predictive validation.</p></article></div>`
+  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods and interpretation</h2><p>4C Insight keeps analysis assumptions and limitations visible next to the workflows that use them.</p></div></section><div class="docs-grid"><article class="card"><h3>Local-first execution</h3><p>Selected files remain on the user's computer. Browser workers and Rust/WebAssembly perform analysis locally. Results are saved only when the user chooses an export.</p></article><article class="card"><h3>Expression QC</h3><p>Metadata tables and gene/transcript workbooks are parsed from bytes in Rust. Expression workbooks are processed one at a time so the browser does not retain the complete cohort in source-file buffers.</p></article><article class="card"><h3>W3 corrected group comparison</h3><p>Gene analysis uses Raw Count columns. Transcript analysis uses Total Reads columns. Positive-count median-ratio size factors are followed by the established negative-binomial log-link group model. A selected patient/subject column enables subject-clustered sandwich standard errors for repeated measurements. Selected covariates are added to the same model.</p></article><article class="card"><h3>PCA and hierarchical clustering</h3><p>Global PCA and the dendrogram use top-variable normalized features. Case/Control labels do not select those features. The dendrogram uses average linkage with Euclidean distance. These plots describe cohort structure and are distinct from post-selection significant-hit plots.</p></article><article class="card"><h3>Sample exclusions</h3><p>Reviewed-QC and custom metadata rules are optional and independent. Each rule uses a user-selected metadata column and one or more exact observed values. Matching metadata rows are removed before Case/Control construction and model fitting, and the exact rule and excluded sample IDs are stored in the result.</p></article><article class="card"><h3>Transcript usage</h3><p>The transcript workflow also runs the existing differential transcript-usage screen. It aggregates transcript proportions within genes, applies the established CLR-based transcript-usage model, and reports BH-adjusted gene and transcript results.</p></article><article class="card"><h3>Scientific parity</h3><p>W3 fixtures run the same merged expression tables through native filesystem APIs and browser-safe byte APIs. The enabled workflow must match for size factors, differential tests, PCA, dendrograms, and transcript DTU outputs.</p></article><article class="card"><h3>W4 longitudinal patient signature</h3><p>Longitudinal analysis is unsupervised. Expression distances are built from top-variable normalized log2 counts without using patient identity. Patient labels are applied afterward to measure identity AUC, nearest-neighbour patient accuracy, same-patient versus different-patient distance, and to annotate the average-linkage dendrogram. Observation ID, patient ID, time/visit, and exclusions are user-selected metadata roles.</p></article><article class="card"><h3>W5 significant-hit structure</h3><p>The Significant Hits workflow reuses the exact completed Compare Groups definition. Features are selected by BH q-value and optional absolute adjusted-effect threshold, then the same normalized selected-feature matrix is used for PCA, average-linkage clustering, a clustered z-score heatmap, silhouette, nearest-neighbour group coherence, and subject-blocked PERMANOVA. Because the same Case/Control labels select and display the features, these outputs are descriptive post-selection structure, not independent validation or predictive performance.</p></article></div>`
 }
 
 async function inspectSelectedMetadata() {
@@ -1206,17 +1395,8 @@ async function runExpressionQc() {
 }
 
 
-async function runGroupComparison() {
+function currentPortableComparisonConfig() {
   const cfg = state.compareConfig
-  const metadataFile = selectedFile(state.qcConfig.metadataId)
-  const geneFile = selectedFile(cfg.geneMergedId)
-  const transcriptFile = selectedFile(cfg.transcriptMergedId)
-  if (!metadataFile) {
-    state.error = 'Select a metadata file before running the comparison.'
-    render()
-    return
-  }
-
   const exclusions = [
     {
       enabled: cfg.qcExclusionEnabled,
@@ -1234,24 +1414,43 @@ async function runGroupComparison() {
   const caseLabel = cfg.caseValues.join(' + ')
   const controlLabel = cfg.controlValues.join(' + ')
   const comparisonName = `${caseLabel || 'Case'} vs ${controlLabel || 'Control'}`
-  const portableConfig = {
-    metadataIdColumn: state.qcConfig.metadataIdColumn,
-    groupColumn: cfg.groupColumn,
-    caseValues: cfg.caseValues,
-    controlValues: cfg.controlValues,
+  return {
     comparisonName,
-    caseLabel: caseLabel || 'Case',
-    controlLabel: controlLabel || 'Control',
-    subjectColumn: cfg.subjectColumn || null,
-    covariates: cfg.covariates,
-    exclusions,
-    minCount: Number(cfg.minCount),
-    minFractionSamples: Number(cfg.minFractionSamples),
+    portableConfig: {
+      metadataIdColumn: state.qcConfig.metadataIdColumn,
+      groupColumn: cfg.groupColumn,
+      caseValues: cfg.caseValues,
+      controlValues: cfg.controlValues,
+      comparisonName,
+      caseLabel: caseLabel || 'Case',
+      controlLabel: controlLabel || 'Control',
+      subjectColumn: cfg.subjectColumn || null,
+      covariates: cfg.covariates,
+      exclusions,
+      minCount: Number(cfg.minCount),
+      minFractionSamples: Number(cfg.minFractionSamples),
+    },
   }
+}
+
+async function runGroupComparison() {
+  const cfg = state.compareConfig
+  const metadataFile = selectedFile(state.qcConfig.metadataId)
+  const geneFile = selectedFile(cfg.geneMergedId)
+  const transcriptFile = selectedFile(cfg.transcriptMergedId)
+  if (!metadataFile) {
+    state.error = 'Select a metadata file before running the comparison.'
+    render()
+    return
+  }
+
+  const { comparisonName, portableConfig } = currentPortableComparisonConfig()
 
   state.busy = true
   state.error = null
   state.compareResult = null
+  state.hitResult = null
+  state.hitProgress = null
   state.compareProgress = { completed: 0, total: Number(cfg.geneEnabled) + Number(cfg.transcriptEnabled), message: 'Starting local comparison' }
   render()
   try {
@@ -1461,6 +1660,8 @@ function bindResultsEvents() {
   document.querySelector('#results-export-compare')?.addEventListener('click', () => void exportCompareResult())
   document.querySelector('#results-open-longitudinal')?.addEventListener('click', () => { state.tab = 'longitudinal'; render() })
   document.querySelector('#results-export-longitudinal')?.addEventListener('click', () => void exportLongitudinalResult())
+  document.querySelector('#results-open-hits')?.addEventListener('click', () => { state.tab = 'hits'; render() })
+  document.querySelector('#results-export-hits')?.addEventListener('click', () => void exportHitResult())
 }
 
 function render() {
@@ -1471,7 +1672,7 @@ function render() {
     qc: qcView(),
     compare: compareView(),
     longitudinal: longitudinalView(),
-    hits: migrationView('Significant Hits', 'W5'),
+    hits: significantHitsView(),
     results: resultsView(),
     docs: docsView(),
   }
@@ -1480,6 +1681,7 @@ function render() {
   if (state.tab === 'qc') bindQcEvents()
   if (state.tab === 'compare') bindCompareEvents()
   if (state.tab === 'longitudinal') bindLongitudinalEvents()
+  if (state.tab === 'hits') bindSignificantHitEvents()
   if (state.tab === 'results') bindResultsEvents()
 }
 

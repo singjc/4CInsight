@@ -22,9 +22,9 @@ HTML / TSV / ZIP / JSON saved locally
 
 The existing Rust scientific modules remain the reference implementation while they are migrated to browser-safe byte/reader APIs. Each migrated workflow must pass native/WASM parity tests before the UI enables it as production analysis.
 
-## Current W4 status
+## Current W5 status
 
-W1 established the static, local-first browser shell, W2 added metadata/expression QC, and W3 added corrected gene/transcript group comparison. W4 bumps the source version to **v0.20.0** and enables longitudinal patient-signature analysis for gene and transcript expression in local Rust/WASM:
+W1 established the static local-first browser shell, W2 added metadata/expression QC, W3 added corrected gene/transcript group comparison, and W4 added longitudinal patient-signature analysis. W5 bumps the source version to **v0.21.0** and enables the **Significant Hits** workflow for gene and transcript expression in local Rust/WASM. W5 reuses the exact completed W3 comparison definition and adds post-selection PCA, hierarchical clustering, a clustered heatmap, silhouette, nearest-neighbour group coherence, and subject-blocked PERMANOVA.
 
 - W2 metadata and per-sample gene/transcript expression QC remain available;
 - the sample/expression ID, patient/subject ID, grouping column, and adjustment covariates are selected by role rather than hardcoded names;
@@ -48,7 +48,7 @@ W4 adds:
 - cross-modality ranking of gene versus transcript patient-specific stability;
 - native filesystem versus byte/WASM parity fixtures for the longitudinal workflow.
 
-W4 does **not** yet enable BCR/TCR or immune-infiltration longitudinal analysis, significant-hit structure, or full report generation in the browser. Those workflows remain gated until their own byte/WASM parity work is complete.
+W5 currently enables significant-hit structure for **gene and transcript/isoform expression**. BCR/TCR and immune-infiltration significant-hit panels, repertoire/immune longitudinal analysis, and full browser report generation remain gated until their own byte/WASM parity work is complete. Significant-hit plots are explicitly post-selection descriptive views; they are not independent validation or predictive performance.
 
 ## Repository layout
 
@@ -71,7 +71,7 @@ Requirements:
 - Rust stable with `wasm32-unknown-unknown`;
 - `wasm-pack` for the Rust/WASM package.
 
-Build the W3 WASM engine:
+Build the current WASM engine:
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -83,7 +83,7 @@ wasm-pack build wasm \
   --release
 ```
 
-Then serve the static `app/` directory from any local HTTP server. The app can still show filename preflight without the generated WASM package. W2/W3 metadata, expression QC, and group comparison require the generated WASM package and remain disabled when it is absent. Production Pages builds compile the WASM package first and publish the static `app/` directory directly.
+Then serve the static `app/` directory from any local HTTP server. The app can still show filename preflight without the generated WASM package. W2-W5 scientific workflows require the generated WASM package and remain disabled when it is absent. Production Pages builds compile the WASM package first and publish the static `app/` directory directly.
 
 ## Validation
 

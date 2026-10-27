@@ -131,3 +131,8 @@ node --test app/tests/*.test.mjs
 W4 adds `src/portable_longitudinal.rs` and a byte-based expression-distance entry point in `src/corrected.rs`. `tests/w4_longitudinal_parity.rs` runs the same fixed metadata and merged gene/transcript tables through the native filesystem longitudinal workflow and the byte/WASM orchestration, then compares patient counts, identity metrics, pairwise distances, and dendrogram structure.
 
 The browser worker reads the selected metadata file once, then one selected merged expression table per enabled modality. It does not load the original per-sample expression workbooks for longitudinal analysis.
+
+
+## W5 significant-hit parity
+
+W5 adds `src/hit_structure_core.rs` and `src/portable_hit_structure.rs`. The native significant-hit workflow now uses the same reader-agnostic core that the WASM path uses. `tests/w5_hit_structure_parity.rs` runs fixed gene and transcript fixtures through the native filesystem workflow and the browser-safe byte workflow, then compares selected features, heatmap z scores, PCA coordinates, PERMANOVA values, silhouette, nearest-neighbour coherence, and dendrogram structure. The test also covers transcript **Total Reads** reconstruction so the browser and native transcript hit matrices use the same source metric as W3.

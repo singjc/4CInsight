@@ -6,6 +6,7 @@ use wasm_bindgen::prelude::*;
 // still needs the small selection shape referenced by that excluded workflow.
 #[cfg(not(target_arch = "wasm32"))]
 mod analysis {
+    #[allow(dead_code)]
     pub struct CohortModalitySelection {
         pub gene: bool,
         pub transcript: bool,
@@ -39,6 +40,11 @@ mod longitudinal;
 mod portable_compare;
 #[path = "../../src/portable_longitudinal.rs"]
 mod portable_longitudinal;
+#[allow(dead_code)]
+#[path = "../../src/hit_structure_core.rs"]
+mod hit_structure_core;
+#[path = "../../src/portable_hit_structure.rs"]
+mod portable_hit_structure;
 
 use input_conventions::{FilenameInputKind, classify_input_filename};
 use portable_compare::{
@@ -47,6 +53,8 @@ use portable_compare::{
 use portable_longitudinal::{
     PortableLongitudinalConfig, run_portable_expression_longitudinal,
 };
+use portable_hit_structure::run_portable_expression_hit_structure;
+use hit_structure_core::SignificantHitStructureConfig;
 use portable_io::{
     PortableExpressionKind, PortableExpressionMetric, inspect_metadata_bytes,
     metadata_column_values_bytes, summarize_expression_bytes,
@@ -58,7 +66,7 @@ struct EngineInfo<'a> {
     package: &'a str,
     version: &'a str,
     execution: &'a str,
-    capabilities: [&'a str; 6],
+    capabilities: [&'a str; 7],
 }
 
 #[derive(Serialize)]
@@ -103,6 +111,7 @@ pub fn engine_info_json() -> String {
             "metadata-grouping",
             "corrected-expression-comparison",
             "longitudinal-expression-signature",
+            "significant-hit-expression-structure",
         ],
     })
     .expect("engine info serialization is infallible")
@@ -250,6 +259,52 @@ pub fn run_expression_longitudinal_json(
     .map_err(js_error)
 }
 
+
+fn run_expression_hit_structure_json_core(
+    metadata_file_name: &str,
+    metadata_bytes: &[u8],
+    merged_file_name: &str,
+    merged_bytes: &[u8],
+    comparison_config_json: &str,
+    hit_config_json: &str,
+) -> Result<String, String> {
+    let comparison_config: PortableExpressionComparisonConfig =
+        serde_json::from_str(comparison_config_json).map_err(|error| error.to_string())?;
+    let hit_config: SignificantHitStructureConfig =
+        serde_json::from_str(hit_config_json).map_err(|error| error.to_string())?;
+    let result = run_portable_expression_hit_structure(
+        metadata_file_name,
+        metadata_bytes,
+        merged_file_name,
+        merged_bytes,
+        &comparison_config,
+        hit_config,
+        |_done, _total, _message| {},
+    )
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string(&result).map_err(|error| error.to_string())
+}
+
+#[wasm_bindgen]
+pub fn run_expression_hit_structure_json(
+    metadata_file_name: &str,
+    metadata_bytes: &[u8],
+    merged_file_name: &str,
+    merged_bytes: &[u8],
+    comparison_config_json: &str,
+    hit_config_json: &str,
+) -> Result<String, JsValue> {
+    run_expression_hit_structure_json_core(
+        metadata_file_name,
+        metadata_bytes,
+        merged_file_name,
+        merged_bytes,
+        comparison_config_json,
+        hit_config_json,
+    )
+    .map_err(js_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +409,53 @@ mod tests {
         assert!(json.contains("\"qc_excluded_rows\":1"));
         assert!(json.contains("\"longitudinal_patients\":3"));
         assert!(json.contains("\"samples\":7"));
+    }
+
+
+    #[test]
+    fn w5_gene_significant_hit_structure_runs_through_wasm_bridge() {
+        let metadata = include_bytes!("../../tests/fixtures/w3_metadata.tsv");
+        let merged = include_bytes!("../../tests/fixtures/w3_merged_gene_expression.tsv");
+        let comparison = serde_json::json!({
+            "kind": "gene-expression",
+            "metadataIdColumn": "sample_id",
+            "groupColumn": "analysis_group",
+            "caseValues": ["Case"],
+            "controlValues": ["Control"],
+            "comparisonName": "Case vs Control",
+            "caseLabel": "Case",
+            "controlLabel": "Control",
+            "subjectColumn": "patient_id",
+            "covariates": ["batch"],
+            "exclusions": [{
+                "enabled": true,
+                "label": "Reviewed QC",
+                "column": "qc_review_status",
+                "values": ["Failed"]
+            }],
+            "minCount": 10.0,
+            "minFractionSamples": 0.20,
+            "permutations": 49
+        });
+        let hits = serde_json::json!({
+            "qThreshold": 1.0,
+            "minAbsEffect": 0.0,
+            "maxAnalysisFeatures": 50,
+            "maxHeatmapFeatures": 20
+        });
+        let json = run_expression_hit_structure_json_core(
+            "w3_metadata.tsv",
+            metadata,
+            "w3_merged_gene_expression.tsv",
+            merged,
+            &comparison.to_string(),
+            &hits.to_string(),
+        )
+        .unwrap();
+        assert!(json.contains("\"significant_features_total\""));
+        assert!(json.contains("\"heatmap_zscores\""));
+        assert!(json.contains("\"silhouette\""));
+        assert!(json.contains("\"nearest_neighbor_group_accuracy\""));
     }
 
 }

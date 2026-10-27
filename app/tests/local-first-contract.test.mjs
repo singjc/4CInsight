@@ -59,3 +59,15 @@ test('W4 longitudinal expression signature stays inside the worker and Rust/WASM
   assert.match(worker, /run_expression_longitudinal_json/)
   assert.equal(worker.includes('fetch('), false, 'W4 analysis worker must not send selected data over the network')
 })
+
+test('W5 significant-hit structure stays inside the worker and shared Rust/WASM engine', async () => {
+  const main = await readFile(new URL('../main.js', import.meta.url), 'utf8')
+  const worker = await readFile(new URL('../analysis-worker.js', import.meta.url), 'utf8')
+  assert.match(main, /run-significant-hits/)
+  assert.match(main, /Post-selection interpretation/)
+  assert.match(main, /Significant-hit PCA/)
+  assert.match(main, /Clustered significant-hit heatmap/)
+  assert.match(main, /Descriptive, not validation/)
+  assert.match(worker, /run_expression_hit_structure_json/)
+  assert.equal(worker.includes('fetch('), false, 'W5 analysis worker must not send selected data over the network')
+})

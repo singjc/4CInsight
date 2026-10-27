@@ -279,6 +279,60 @@ async function handleLongitudinalExpression(request) {
   })
 }
 
+
+async function handleSignificantHits(request) {
+  const wasm = await loadWasm()
+  if (!wasm) throw new Error('Rust/WASM is required for significant-hit analysis. Build or deploy app/wasm first.')
+  if (!request.metadataFile) throw new Error('Select a metadata file before running significant-hit analysis')
+
+  const analyses = [
+    ['gene', request.gene],
+    ['transcript', request.transcript],
+  ].filter(([, entry]) => entry?.enabled && entry?.file)
+  if (!analyses.length) throw new Error('Enable gene and/or transcript expression and select a merged table')
+
+  const total = analyses.length
+  let completed = 0
+  postProgress(request.requestId, completed, total, `Reading metadata: ${request.metadataFile.name}`)
+  const metadataBytes = await wasmBytes(request.metadataFile)
+  const result = {
+    comparisonName: request.comparisonName || 'Metadata-defined comparison',
+    gene: null,
+    transcript: null,
+    completedAt: null,
+    execution: 'local-browser-wasm',
+  }
+
+  for (const [kind, entry] of analyses) {
+    const label = kind === 'gene' ? 'Gene expression' : 'Transcript expression'
+    postProgress(request.requestId, completed, total, `${label}: re-running corrected comparison and selecting hits`)
+    const mergedBytes = await wasmBytes(entry.file)
+    const comparisonConfig = {
+      ...request.comparisonConfig,
+      kind: kind === 'gene' ? 'gene-expression' : 'transcript-expression',
+    }
+    result[kind] = JSON.parse(
+      wasm.run_expression_hit_structure_json(
+        request.metadataFile.name,
+        metadataBytes,
+        entry.file.name,
+        mergedBytes,
+        JSON.stringify(comparisonConfig),
+        JSON.stringify(request.hitConfig),
+      ),
+    )
+    completed += 1
+    postProgress(request.requestId, completed, total, `${label}: significant-hit structure complete`)
+  }
+
+  result.completedAt = new Date().toISOString()
+  self.postMessage({
+    type: 'significant-hit-result',
+    requestId: request.requestId,
+    result,
+  })
+}
+
 self.addEventListener('message', async (event) => {
   const request = event.data
   if (!request?.type || !request.requestId) return
@@ -306,6 +360,10 @@ self.addEventListener('message', async (event) => {
     }
     if (request.type === 'run-longitudinal-expression') {
       await handleLongitudinalExpression(request)
+      return
+    }
+    if (request.type === 'run-significant-hits') {
+      await handleSignificantHits(request)
     }
   } catch (error) {
     postError(request.requestId, error)
