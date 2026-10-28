@@ -56,6 +56,7 @@ jobs:
           node --check app/save.js
           node --check app/persistence.js
           node --check app/resource-controls.js
+          node --check app/system-monitor.js
           node --check app/docs-content.js
           node --check app/coi-serviceworker.js
       - uses: actions/configure-pages@v5

@@ -56,14 +56,14 @@ test('volcano drawing remains bounded without changing full scientific results',
   assert.match(main, /All tested features remain in the searchable table and export/)
 })
 
-test('resource preferences persist independently and do not claim native RAM access', () => {
+test('resource preferences persist independently and native RAM requires the helper', () => {
   assert.match(main, /localStorage\.setItem\('4c-insight-resources'/)
   assert.match(main, /physicalRamGiB/)
-  assert.match(main, /cannot run native sysinfo/)
-  assert.match(main, /neither|Neither/) // browser memory is not free physical RAM
+  assert.match(main, /Firefox cannot access sysinfo directly/)
+  assert.match(main, /browser's memory class measures available RAM|not physical RAM or currently free memory/) // browser measurement differs from host RAM
   assert.match(main, /id="save-resources"/)
   assert.match(main, /id="stop-science-work"/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-ux6-state-reconnect/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-ux7-native-monitor/)
 })
 
 test('completed science runs release WASM memory and History avoids duplicate JSON clones', () => {

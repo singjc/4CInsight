@@ -70,3 +70,10 @@ User findings: portable Save State references 2,983 files but cannot grant file 
 UX6 verification: 41/41 JS tests pass against reconstructed UX5 source. Browser visual and real 2,983-file restore remain to be tested by user. Package `4C_INSIGHT_UX6_RECONNECT_FIXED_SIDEBAR_20261028.tar.gz` contains patch, installer and docs addenda. Use verified package SHA and apply script. Run `git diff --check`, `node --check app/main.js`, `node --check app/state-reconnect.js`, `node --test app/tests/*.test.mjs`; include exact git add/commit commands for changed source and docs. Do not re-move SVG; it is already committed under `app/assets/4c-insight-logo.svg`.
 
 Next: review user's real-cohort smoke, especially path matching and restored metadata selection. If user requires zero-click reloads, investigate permission-aware IndexedDB directory handles for Chromium, but not possible for arbitrary JSON paths and not assumed supported by Firefox. Consider opt-in local native companion for physical/available Linux RAM; confirm security and browser transport first. Then prioritize large-file streaming and PX1 threaded WASM when measured benefit and parity are established.
+
+
+## Continue after UX7: native host monitor
+
+UX7 added an optional native Rust sysinfo companion. Folder: `native/system-monitor` (standalone Rust crate). New JS module: `app/system-monitor.js`; current shell `0.21.0-ux7-native-monitor`. No science engine change.
+
+47/47 JS tests passed on reconstructed source. Native compilation, rustfmt, and real browser↔localhost connection were NOT performed in this authoring environment because cargo/rustc were not available. Next: obtain user local `cargo fmt/check/test` output and Firefox/Chromium smoke test after launching helper, then fix issues and update rolling handoff. Do not claim automatic host memory is available when helper is not connected. No Rayon in WASM. Include full runnable shell validation and git add/commit commands for source overlays.

@@ -467,3 +467,14 @@ Scientific engine remains v0.21.0. Browser shell v0.21.0-ux6-state-reconnect.
 - Automated source tests: **41/41 PASS**, including 7 dedicated matching tests and a 2,983-reference test. Patch against reconstructed UX5 source: PASS. Actual user browser smoke test: PENDING. Headless browser test was blocked by local page access in the tool environment.
 - For user acceptance: load prior `.4cstate.json`; confirm expected reference count; click Reconnect project folder; select full cohort root; verify matched count, missing/ambiguous count, and restored metadata/group/selected expression tables; compare and Significant Hits must not run unless sources are available; scroll a long results or Docs page and confirm sidebar status stays visible; check mobile width; confirm RAM still shows its source (manual/browser) rather than falsely claiming auto-detection.
 - Recommended next milestone: optionally store browser-granted directory handles (where supported and with permission checks), add a clearly opt-in native RAM companion for Linux, and investigate streaming/chunked large-file processing. These are not included in this update.
+
+
+## UX7 — Optional native sysinfo monitor (2026-10-28)
+
+- Added a standalone native Rust helper `native/system-monitor` using `sysinfo 0.36`, `uuid` (ephemeral token), and `serde_json`. It runs on the user's machine and binds only IPv4 loopback `127.0.0.1:47831`. No raw cohort access, no uploads, no filesystem scanning.
+- Browser client `app/system-monitor.js`: explicit Connect action, bearer token in memory only, strict response schema, 4-second request timeout, 3-second metric polling after connection, disconnect, stale-reading invalidation, and browser-only fallback.
+- Settings displays host total/available/used RAM, CPU usage and swap when connected. Header gives source-labelled native available/total RAM; manual RAM remains fallback when not connected.
+- Connection uses exact origin verification and HTTP CORS; the allowed production origin is `https://singjc.github.io`. Some browsers also gate public-HTTPS-to-loopback with a permission prompt or browser policy. This cannot be bypassed by WASM `sysinfo`.
+- UX7 does NOT implement Rayon, impose hard memory/CPU limits, or change scientific results.
+- UX7 tests: 47/47 JavaScript tests passed after reconstruction from uploaded base + UX3/UX4/UX5/UX6 overlays. Rust cargo/rustfmt unavailable in authoring environment, so native compile, formatting, and local browser integration remain UNVERIFIED. Native test job added to CI.
+- First live validation: `cargo fmt --manifest-path native/system-monitor/Cargo.toml` then `cargo test --manifest-path native/system-monitor/Cargo.toml`, start helper, use browser Settings Connect, test Linux Firefox and Chromium HTTPS Pages, check CORS/loopback prompts, inspect 3-second updates and disconnect; verify browser-only mode after killing helper.

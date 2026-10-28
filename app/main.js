@@ -1,5 +1,6 @@
 import { saveTextFile } from './save.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
+import { createSystemMonitor } from './system-monitor.js'
 import { methodDocs } from './docs-content.js'
 import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory } from './resource-controls.js'
 import {
@@ -11,7 +12,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux6-state-reconnect'
+const APP_VERSION = '0.21.0-ux7-native-monitor'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -75,6 +76,7 @@ const state = {
   systemInfo: null,
   appMemorySample: null,
   appMemoryBusy: false,
+  monitorBusy: false,
   resources: loadResourceSettings(),
   hitConfig: {
     maxAnalysisFeatures: 500,
@@ -126,6 +128,10 @@ const state = {
   },
 }
 
+// Native monitoring is optional. No network access takes place before Connect.
+const nativeMonitor = createSystemMonitor()
+let monitorTimer = null
+let monitorRefreshing = false
 const pending = new Map()
 let worker = null
 function attachScienceWorker() {
@@ -250,9 +256,44 @@ function renderSystemInfo() {
   if (!chip) return
   const info = state.systemInfo
   const threadText = info.threads ? `${info.threads} logical threads` : 'threads unavailable'
-  const memoryText = state.resources.physicalRamGiB ? `${state.resources.physicalRamGiB} GiB RAM (manual)` : info.memory
+  const monitor = nativeMonitor.getState()
+  const native = monitor.status === 'connected' ? monitor.last : null
+  const memoryText = native
+    ? `${humanBytes(native.available_memory_bytes)} RAM available / ${humanBytes(native.total_memory_bytes)} total (native)`
+    : state.resources.physicalRamGiB ? `${state.resources.physicalRamGiB} GiB RAM (manual)` : info.memory
   chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(memoryText)} · ${escapeHtml(threadText)} · WASM science: 1 worker · Settings</small></span>`
-  chip.title = `Open Settings for local resource limits · Local execution · ${info.crossOriginIsolated ? 'cross-origin isolated' : 'single-worker fallback'} · browser-reported system information`
+  chip.title = `Open Settings · ${native ? 'Native sysinfo connected, read-only host metrics' : 'No native system monitor connected'} · ${info.crossOriginIsolated ? 'cross-origin isolated' : 'single-worker fallback'}`
+}
+
+function monitorSummaryHtml() {
+  const monitor = nativeMonitor.getState()
+  const snapshot = monitor.status === 'connected' ? monitor.last : null
+  if (snapshot) {
+    const percent = (100 * snapshot.available_memory_bytes / snapshot.total_memory_bytes).toFixed(1)
+    return `<strong>Native system monitor connected</strong><span>Host RAM: ${humanBytes(snapshot.total_memory_bytes)} total · ${humanBytes(snapshot.available_memory_bytes)} available (${percent}%) · ${humanBytes(snapshot.used_memory_bytes)} used</span><span>CPU: ${formatNumber(snapshot.cpu_usage_percent, 1)}% total usage across ${snapshot.logical_cpus} logical CPUs · swap: ${humanBytes(snapshot.used_swap_bytes)} used of ${humanBytes(snapshot.total_swap_bytes)}</span><small>Host metrics from local sysinfo, not browser-process or WASM memory. Updated when the monitor responds.</small>`
+  }
+  return `<strong>Native system monitor: ${escapeHtml(monitor.status)}</strong><span>${escapeHtml(monitor.error || 'Optional monitor is not connected. Browser-only operation remains available.')}</span>`
+}
+
+function updateMonitorDisplay() {
+  renderSystemInfo()
+  const status = document.querySelector('#native-monitor-status')
+  if (status) status.innerHTML = monitorSummaryHtml()
+}
+
+function stopMonitorPolling() {
+  if (monitorTimer !== null) { clearInterval(monitorTimer); monitorTimer = null }
+}
+
+async function pollNativeMonitor() {
+  if (monitorRefreshing || nativeMonitor.getState().status !== 'connected') return
+  monitorRefreshing = true
+  try { await nativeMonitor.refresh() }
+  finally {
+    monitorRefreshing = false
+    if (nativeMonitor.getState().status !== 'connected') stopMonitorPolling()
+    updateMonitorDisplay()
+  }
 }
 
 function fileKey(file) {
@@ -1983,7 +2024,14 @@ function settingsView() {
         <label><span>Physical RAM (GiB, optional manual entry)</span><input id="resource-ram" type="number" min="0" max="2048" step="0.5" value="${r.physicalRamGiB}" /></label>
         <label><span>Maximum volcano points drawn</span><input id="resource-points" type="number" min="200" max="6000" step="200" value="${r.maxPlotPoints}" /></label>
       </div>
-      <p class="method-note">System RAM: ${escapeHtml(info.memory)}. ${r.physicalRamGiB ? `Manually entered total RAM: ${r.physicalRamGiB} GiB (not independently verified).` : 'Enter total system RAM manually if you want to display it.'} Ordinary web pages, including GitHub Pages, cannot run native sysinfo to read Linux free/total RAM. Neither the manual value nor the browser's memory class measures available RAM.</p>
+      <p class="method-note">Browser system RAM report: ${escapeHtml(info.memory)}. ${r.physicalRamGiB ? `Manual RAM fallback: ${r.physicalRamGiB} GiB (not verified).` : 'Manual RAM is optional.'} An optional native Rust monitor can read actual system metrics; Firefox cannot access sysinfo directly.</p>
+      <div class="native-monitor-panel">
+        <div class="card-heading"><div><h3>Optional native system monitor</h3><p>Run the local Rust helper, then paste its session token. Connection is opt-in. Metrics stay on this computer; source files are not read.</p></div></div>
+        <div id="native-monitor-status" class="resource-memory-status" role="status" aria-live="polite">${monitorSummaryHtml()}</div>
+        <label class="native-monitor-token"><span>Local monitor session token (not saved)</span><input id="native-monitor-token" type="password" placeholder="Paste the 32-character token from the helper terminal" autocomplete="off" spellcheck="false" /></label>
+        <div class="button-row resource-actions"><button id="connect-native-monitor" class="secondary-button" ${state.monitorBusy ? 'disabled' : ''}>${state.monitorBusy ? 'Connecting…' : 'Connect native monitor'}</button><button id="disconnect-native-monitor" class="secondary-button" ${nativeMonitor.getState().status === 'disconnected' ? 'disabled' : ''}>Disconnect</button></div>
+        <p class="method-note">Start from the repository: <code>cargo run --release --manifest-path native/system-monitor/Cargo.toml</code>. The helper listens only on 127.0.0.1:47831 and accepts requests from the approved site with a session token. Your browser may request loopback-network permission. Stop the helper with Ctrl+C.</p>
+      </div>
       <div class="resource-memory-status" role="status"><strong>Browser application memory</strong><span>${escapeHtml(sampleText)}</span></div>
       <p class="method-note">When supported, the measurement estimates application memory or the main JavaScript heap only. It is not physical RAM or currently free memory. Firefox may not expose either measurement.</p>
       <div class="button-row"><button id="measure-app-memory" class="secondary-button" ${state.appMemoryBusy ? 'disabled' : ''}>${state.appMemoryBusy ? 'Measuring…' : 'Measure app memory'}</button></div>
@@ -1992,6 +2040,30 @@ function settingsView() {
     </section>`
 }
 function bindSettingsEvents() {
+  document.querySelector('#connect-native-monitor')?.addEventListener('click', async () => {
+    if (state.monitorBusy) return
+    const tokenInput = document.querySelector('#native-monitor-token')
+    const token = tokenInput?.value || ''
+    state.monitorBusy = true
+    if (tokenInput) tokenInput.value = ''
+    // Call connect from this user gesture. Some browsers ask for loopback access.
+    const connectRequest = nativeMonitor.connect(token)
+    const connectButton = document.querySelector('#connect-native-monitor')
+    if (connectButton) { connectButton.disabled = true; connectButton.textContent = 'Connecting…' }
+    await connectRequest
+    state.monitorBusy = false
+    stopMonitorPolling()
+    if (nativeMonitor.getState().status === 'connected') {
+      monitorTimer = setInterval(() => void pollNativeMonitor(), 3000)
+    }
+    if (state.tab === 'settings') render()
+    else updateMonitorDisplay()
+  })
+  document.querySelector('#disconnect-native-monitor')?.addEventListener('click', () => {
+    stopMonitorPolling()
+    nativeMonitor.disconnect()
+    render()
+  })
   document.querySelector('#save-resources')?.addEventListener('click', () => {
     state.resources = normalizeResources({
       cpuPercent: document.querySelector('#resource-cpu')?.value,

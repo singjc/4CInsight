@@ -17,7 +17,7 @@ test('served app uses the existing 4C Insight SVG logo as its only visible brand
 
 test('logo uses a Pages-safe relative path and mobile header rules', () => {
   assert.match(html, /src="\.\/assets\/4c-insight-logo\.svg"/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-ux6-state-reconnect/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-ux7-native-monitor/)
   assert.match(css, /@media \(max-width: 720px\)\s*\{/)
   assert.match(css, /\.brand-logo\s*\{ height: 64px; \}/)
   assert.match(html, /id="system-chip"/)

@@ -433,3 +433,10 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .state-reconnect-panel span { margin-top: 4px; font-size: 12px; color: #475467; }
 .state-reconnect-panel small { margin-top: 6px; font-size: 11px; color: #667085; }
 .state-reconnect-warning { flex-basis: 100%; }
+
+/* UX7 optional read-only native system monitor. */
+.native-monitor-panel { padding: 16px; margin: 16px 0; border: 1px solid #d5dfeb; border-radius: 10px; background: #f8fafc; }
+.native-monitor-panel .card-heading { margin-bottom: 8px; }
+.native-monitor-token { display: flex; flex-direction: column; gap: 8px; max-width: 650px; margin-top: 12px; font-size: 12px; color: #475467; }
+.native-monitor-token input { width: 100%; max-width: 100%; }
+.native-monitor-panel code { overflow-wrap: anywhere; }
