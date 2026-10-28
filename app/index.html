@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#111827" />
   <meta name="description" content="4C Insight — local-first multi-omics cohort analysis" />
-  <link rel="stylesheet" href="./styles.css?v=0.21.0-ux1" />
+  <link rel="stylesheet" href="./styles.css?v=0.21.0-ux2" />
   <title>4C Insight</title>
 </head>
 <body>
@@ -16,8 +16,8 @@
         <div class="brand-mark" aria-hidden="true">4C</div>
         <div><h1>4C Insight</h1><p>Local-first multi-omics cohort analysis</p></div>
       </div>
-      <div class="privacy-chip" title="Selected data stay on this device">
-        <span class="privacy-dot"></span> Runs on this device
+      <div id="system-chip" class="privacy-chip system-chip" title="Analysis runs locally. Browser-reported system information only.">
+        <span class="privacy-dot"></span><span>Local system</span>
       </div>
     </header>
     <div class="workspace">
@@ -29,6 +29,6 @@
       <main id="main-content" class="main-content"></main>
     </div>
   </div>
-  <script type="module" src="./main.js?v=0.21.0-ux1"></script>
+  <script type="module" src="./main.js?v=0.21.0-ux2"></script>
 </body>
 </html>

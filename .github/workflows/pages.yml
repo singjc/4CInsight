@@ -54,6 +54,8 @@ jobs:
           node --check app/analysis-worker.js
           node --check app/file-classifier.js
           node --check app/save.js
+          node --check app/persistence.js
+          node --check app/docs-content.js
           node --check app/coi-serviceworker.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4

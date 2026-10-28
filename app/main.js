@@ -1,4 +1,5 @@
 import { saveTextFile } from './save.js'
+import { methodDocs } from './docs-content.js'
 import {
   clearHistoryEntries,
   deleteHistoryEntry,
@@ -8,8 +9,9 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux1'
+const APP_VERSION = '0.21.0-ux2'
 const APP_STATE_SCHEMA = 1
+const dynamicTableSources = new Map()
 
 const tabs = [
   ['project', 'Project', '1'],
@@ -17,8 +19,7 @@ const tabs = [
   ['compare', 'Compare Groups', '3'],
   ['longitudinal', 'Longitudinal', '4'],
   ['hits', 'Significant Hits', '5'],
-  ['results', 'Results', '6'],
-  ['history', 'History', 'H'],
+  ['history', 'History', '6'],
   ['docs', 'Docs', '?'],
 ]
 
@@ -68,9 +69,10 @@ const state = {
   storageEstimate: null,
   loadedStateManifest: null,
   pendingStateConfig: null,
+  docsQuery: '',
+  globalThresholds: { fdr: 0.05, absLog2Fc: 1.0 },
+  systemInfo: null,
   hitConfig: {
-    qThreshold: 0.05,
-    minAbsEffect: 0.0,
     maxAnalysisFeatures: 500,
     maxHeatmapFeatures: 80,
     geneEnabled: true,
@@ -182,6 +184,32 @@ function formatNumber(value, digits = 3) {
 function percent(part, total) {
   if (!total) return '—'
   return `${((part / total) * 100).toFixed(1)}%`
+}
+
+function detectSystemInfo() {
+  const platform = navigator.userAgentData?.platform || navigator.platform || 'Unknown OS'
+  const threads = Number(navigator.hardwareConcurrency || 0)
+  const deviceMemory = Number(navigator.deviceMemory || 0)
+  const heapLimit = Number(globalThis.performance?.memory?.jsHeapSizeLimit || 0)
+  let memory = 'Memory not exposed'
+  if (deviceMemory > 0) memory = `≈${formatNumber(deviceMemory, 1)} GiB device memory`
+  else if (heapLimit > 0) memory = `${humanBytes(heapLimit)} JS heap limit`
+  return {
+    platform,
+    threads,
+    memory,
+    crossOriginIsolated: Boolean(globalThis.crossOriginIsolated),
+  }
+}
+
+function renderSystemInfo() {
+  state.systemInfo ||= detectSystemInfo()
+  const chip = document.querySelector('#system-chip')
+  if (!chip) return
+  const info = state.systemInfo
+  const threadText = info.threads ? `${info.threads} logical threads` : 'threads unavailable'
+  chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(info.memory)} · ${escapeHtml(threadText)} · WASM science: 1 worker</small></span>`
+  chip.title = `Local execution · ${info.crossOriginIsolated ? 'cross-origin isolated' : 'single-worker fallback'} · browser-reported system information`
 }
 
 function fileKey(file) {
@@ -448,7 +476,7 @@ function configSnapshot() {
   delete compare.transcriptMergedId
   delete longitudinal.geneMergedId
   delete longitudinal.transcriptMergedId
-  return { qc, compare, longitudinal, hit, fileRefs }
+  return { qc, compare, longitudinal, hit, thresholds: cloneJson(state.globalThresholds), fileRefs }
 }
 
 function applicationStatePayload() {
@@ -520,6 +548,9 @@ function applyConfigSnapshot(configs) {
     transcriptMergedId: resolveSavedFileRef(refs.longitudinalTranscript),
   }
   state.hitConfig = { ...state.hitConfig, ...(configs.hit || {}) }
+  state.globalThresholds = { ...state.globalThresholds, ...(configs.thresholds || {}) }
+  if (configs.hit?.qThreshold !== undefined && configs.thresholds?.fdr === undefined) state.globalThresholds.fdr = Number(configs.hit.qThreshold)
+  if (configs.hit?.minAbsEffect !== undefined && configs.thresholds?.absLog2Fc === undefined) state.globalThresholds.absLog2Fc = Number(configs.hit.minAbsEffect)
 
   const required = Object.values(refs).filter(Boolean)
   const resolved = required.filter((reference) => resolveSavedFileRef(reference)).length
@@ -636,7 +667,7 @@ function restoreHistorySnapshot(snapshot) {
     'longitudinal-patient-signature-expression': 'longitudinal',
     'significant-hit-structure-expression': 'hits',
   }
-  state.tab = tabForWorkflow[snapshot.workflow] || 'results'
+  state.tab = tabForWorkflow[snapshot.workflow] || 'history'
 }
 
 async function openHistoryEntry(id) {
@@ -984,10 +1015,12 @@ function pcaSvg(pca, plotId, caseLabel, controlLabel) {
   const [minY, maxY] = paddedExtent(ys)
   const sx = (x) => pad + ((x - minX) / (maxX - minX)) * (width - pad * 2)
   const sy = (y) => height - pad - ((y - minY) / (maxY - minY)) * (height - pad * 2)
-  const circles = points.map((point) => {
+  const circles = points.map((point, index) => {
     const group = String(point.group).toLowerCase() === 'case' ? 'case' : 'control'
     const klass = group === 'case' ? 'case-point' : 'control-point'
-    return `<circle class="${klass}" data-plot-group="${group}" data-x="${Number(point.x)}" data-y="${Number(point.y)}" cx="${sx(Number(point.x)).toFixed(2)}" cy="${sy(Number(point.y)).toFixed(2)}" r="4.2"><title>${escapeHtml(point.sample_id)} · ${escapeHtml(point.group)} · subject ${escapeHtml(point.subject)} · ${escapeHtml(pca.x_label)} ${formatNumber(point.x)} · ${escapeHtml(pca.y_label)} ${formatNumber(point.y)}</title></circle>`
+    const x = sx(Number(point.x)).toFixed(2)
+    const y = sy(Number(point.y)).toFixed(2)
+    return `<circle class="${klass}" data-plot-group="${group}" data-point-index="${index}" data-x="${Number(point.x)}" data-y="${Number(point.y)}" data-sample-id="${escapeHtml(point.sample_id)}" cx="${x}" cy="${y}" r="4.2"><title>${escapeHtml(point.sample_id)} · ${escapeHtml(point.group)} · subject ${escapeHtml(point.subject)} · ${escapeHtml(pca.x_label)} ${formatNumber(point.x)} · ${escapeHtml(pca.y_label)} ${formatNumber(point.y)}</title></circle><text class="scatter-point-label" data-plot-group="${group}" data-point-label="${index}" x="${Number(x)+7}" y="${Number(y)-6}" style="display:none">${escapeHtml(point.sample_id)}</text>`
   }).join('')
   const clipId = `${plotId}-clip`
   return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-kind="pca" data-width="${width}" data-height="${height}" data-pad="${pad}" data-min-x="${minX}" data-max-x="${maxX}" data-min-y="${minY}" data-max-y="${maxY}">
@@ -1000,6 +1033,54 @@ function pcaSvg(pca, plotId, caseLabel, controlLabel) {
     </svg></div>
     ${plotLegend(plotId, caseLabel, controlLabel)}
   </div>`
+}
+
+function volcanoSvg(analysis, plotId) {
+  const rows = (analysis?.tests || []).filter((row) => Number.isFinite(Number(row.beta_group)) && Number.isFinite(Number(row.q_value)) && Number(row.q_value) >= 0)
+  if (!rows.length) return '<div class="plot-empty">Volcano plot is not available for this result.</div>'
+  const width = 760
+  const height = 360
+  const pad = 54
+  const fdr = Math.min(1, Math.max(1e-12, Number(state.globalThresholds.fdr) || 0.05))
+  const fc = Math.max(0, Number(state.globalThresholds.absLog2Fc) || 0)
+  const points = rows.map((row) => ({
+    row,
+    x: Number(row.beta_group),
+    y: -Math.log10(Math.max(Number(row.q_value), 1e-300)),
+  }))
+  const xs = points.map((point) => point.x)
+  const ys = points.map((point) => point.y)
+  const [rawMinX, rawMaxX] = paddedExtent([...xs, -fc, fc])
+  const minX = Math.min(rawMinX, -Math.max(0.5, fc * 1.15))
+  const maxX = Math.max(rawMaxX, Math.max(0.5, fc * 1.15))
+  const minY = 0
+  const maxY = Math.max(1, paddedExtent([...ys, -Math.log10(fdr)])[1])
+  const sx = (x) => pad + ((x - minX) / (maxX - minX)) * (width - pad * 2)
+  const sy = (y) => height - pad - ((y - minY) / (maxY - minY)) * (height - pad * 2)
+  const marks = points.map((point, index) => {
+    const significant = point.row.q_value <= fdr && Math.abs(point.row.beta_group) >= fc
+    const regulation = significant ? (point.row.beta_group >= 0 ? 'up' : 'down') : 'neutral'
+    const klass = regulation === 'up' ? 'volcano-up' : regulation === 'down' ? 'volcano-down' : 'volcano-neutral'
+    const x = sx(point.x).toFixed(2)
+    const y = sy(point.y).toFixed(2)
+    return `<circle class="${klass}" data-point-index="${index}" data-x="${point.x}" data-y="${point.y}" data-sample-id="${escapeHtml(point.row.feature)}" cx="${x}" cy="${y}" r="3.2"><title>${escapeHtml(point.row.feature)} · log2FC ${formatNumber(point.x)} · q ${formatNumber(point.row.q_value)}</title></circle><text class="scatter-point-label" data-point-label="${index}" x="${Number(x)+7}" y="${Number(y)-6}" style="display:none">${escapeHtml(point.row.feature)}</text>`
+  }).join('')
+  const thresholdY = -Math.log10(fdr)
+  const clipId = `${plotId}-clip`
+  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-kind="pca" data-width="${width}" data-height="${height}" data-pad="${pad}" data-min-x="${minX}" data-max-x="${maxX}" data-min-y="${minY}" data-max-y="${maxY}" data-volcano-fdr-y="${thresholdY}" data-volcano-fc="${fc}">
+    ${plotControls(plotId)}
+    <div class="plot-scroll interactive-plot-scroll coordinate-plot"><svg class="science-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="Differential expression volcano plot">
+      <defs><clipPath id="${clipId}"><rect x="${pad}" y="${pad}" width="${width-pad*2}" height="${height-pad*2}"/></clipPath></defs>
+      <g class="pca-grid"></g><g class="pca-axes"></g><g class="volcano-thresholds" clip-path="url(#${clipId})"></g><g class="pca-points" clip-path="url(#${clipId})">${marks}</g>
+      <text class="plot-label" x="${width/2}" y="${height-10}" text-anchor="middle">Model log2 fold change</text>
+      <text class="plot-label" x="16" y="${height/2}" text-anchor="middle" transform="rotate(-90 16 ${height/2})">−log10(BH q-value)</text>
+    </svg></div>
+    <div class="plot-legend" aria-label="Volcano classification"><span><i class="legend-dot volcano-up"></i>Up-regulated</span><span><i class="legend-dot volcano-down"></i>Down-regulated</span><span><i class="legend-dot volcano-neutral"></i>Below threshold</span></div>
+  </div>`
+}
+
+function globalThresholdControls() {
+  return `<section class="card threshold-card"><div class="card-heading"><div><h3>Differential result thresholds</h3><p>Global display/post-selection thresholds. Changing these values does not refit the count model.</p></div><span class="tag neutral">Global</span></div><div class="form-grid threshold-grid"><label><span>FDR (BH q-value)</span><input id="global-fdr-threshold" type="number" min="0.000001" max="1" step="0.001" value="${state.globalThresholds.fdr}"/></label><label><span>Minimum |log2 fold change|</span><input id="global-log2fc-threshold" type="number" min="0" step="0.1" value="${state.globalThresholds.absLog2Fc}"/></label></div></section>`
 }
 
 function dendrogramSvg(tree, plotId, caseLabel, controlLabel) {
@@ -1057,14 +1138,55 @@ function renderPcaDomain(shell, domain) {
     <line class="plot-axis" x1="${pad}" y1="${pad}" x2="${pad}" y2="${height-pad}"/>
     ${xTicks.map((tick) => `<text class="plot-tick" x="${sx(tick).toFixed(2)}" y="${height-pad+17}" text-anchor="middle">${escapeHtml(formatNumber(tick, 2))}</text>`).join('')}
     ${yTicks.map((tick) => `<text class="plot-tick" x="${pad-8}" y="${(sy(tick)+3).toFixed(2)}" text-anchor="end">${escapeHtml(formatNumber(tick, 2))}</text>`).join('')}`
+  const visiblePoints = []
   svg.querySelectorAll('.pca-points circle').forEach((point) => {
     const x = Number(point.dataset.x)
     const y = Number(point.dataset.y)
-    point.setAttribute('cx', sx(x).toFixed(2))
-    point.setAttribute('cy', sy(y).toFixed(2))
+    const px = sx(x)
+    const py = sy(y)
+    point.setAttribute('cx', px.toFixed(2))
+    point.setAttribute('cy', py.toFixed(2))
+    const inside = px >= pad && px <= width - pad && py >= pad && py <= height - pad
+    if (inside && point.style.display !== 'none') visiblePoints.push({ point, px, py })
   })
-  shell._plotDomain = domain
   const initial = pcaInitialDomain(shell)
+  const zoomX = (initial.maxX - initial.minX) / (domain.maxX - domain.minX)
+  const zoomY = (initial.maxY - initial.minY) / (domain.maxY - domain.minY)
+  const labelZoom = Math.max(zoomX, zoomY)
+  const labelCandidates = []
+  if (labelZoom >= 1.45) {
+    for (const candidate of visiblePoints) {
+      let nearest = Infinity
+      for (const other of visiblePoints) {
+        if (other === candidate) continue
+        nearest = Math.min(nearest, Math.hypot(candidate.px - other.px, candidate.py - other.py))
+      }
+      if (visiblePoints.length <= 18 || nearest >= 28) labelCandidates.push(candidate)
+    }
+  }
+  const accepted = []
+  for (const candidate of labelCandidates.slice(0, 80)) {
+    if (accepted.every((other) => Math.hypot(candidate.px - other.px, candidate.py - other.py) >= 34)) accepted.push(candidate)
+  }
+  svg.querySelectorAll('.scatter-point-label').forEach((label) => { label.style.display = 'none' })
+  for (const candidate of accepted) {
+    const label = svg.querySelector(`[data-point-label="${candidate.point.dataset.pointIndex}"]`)
+    const toggle = shell.querySelector(`[data-plot-group-toggle="${candidate.point.dataset.plotGroup}"]`)
+    if (!label || toggle?.getAttribute('aria-pressed') === 'false') continue
+    label.setAttribute('x', (candidate.px + 7).toFixed(2))
+    label.setAttribute('y', (candidate.py - 6).toFixed(2))
+    label.style.display = ''
+  }
+  const thresholdLayer = svg.querySelector('.volcano-thresholds')
+  if (thresholdLayer) {
+    const fdrY = Number(shell.dataset.volcanoFdrY)
+    const fc = Number(shell.dataset.volcanoFc)
+    const lines = []
+    if (Number.isFinite(fdrY) && fdrY >= domain.minY && fdrY <= domain.maxY) lines.push(`<line class="volcano-cutoff-line" x1="${pad}" y1="${sy(fdrY).toFixed(2)}" x2="${width-pad}" y2="${sy(fdrY).toFixed(2)}"/>`)
+    for (const x of [-fc, fc]) if (Number.isFinite(x) && x >= domain.minX && x <= domain.maxX) lines.push(`<line class="volcano-cutoff-line" x1="${sx(x).toFixed(2)}" y1="${pad}" x2="${sx(x).toFixed(2)}" y2="${height-pad}"/>`)
+    thresholdLayer.innerHTML = lines.join('')
+  }
+  shell._plotDomain = domain
   const initialWidth = initial.maxX - initial.minX
   const zoom = initialWidth / (domain.maxX - domain.minX)
   shell.querySelectorAll('[data-plot-action="fit"]').forEach((button) => { button.textContent = Math.abs(zoom - 1) < 0.02 ? 'Fit' : `${Math.round(zoom * 100)}%` })
@@ -1200,10 +1322,45 @@ function bindInteractivePlots() {
   })
 }
 
-function differentialTable(analysis) {
+function differentialRowCells(row) {
+  return [
+    row.feature,
+    row.secondary_id || '',
+    row.mean_case,
+    row.mean_control,
+    row.beta_group,
+    row.robust_se,
+    row.q_value,
+    row.subject_effect,
+    row.subject_q_value,
+  ]
+}
+
+function differentialRowHtml(row) {
+  return `<tr><td><strong>${escapeHtml(row.feature)}</strong></td><td>${escapeHtml(row.secondary_id || '')}</td><td>${formatNumber(row.mean_case)}</td><td>${formatNumber(row.mean_control)}</td><td>${formatNumber(row.beta_group)}</td><td>${formatNumber(row.robust_se)}</td><td>${formatNumber(row.q_value)}</td><td>${formatNumber(row.subject_effect)}</td><td>${formatNumber(row.subject_q_value)}</td></tr>`
+}
+
+function differentialTable(analysis, tableId) {
   const rows = analysis?.tests || []
   if (!rows.length) return '<div class="plot-empty">No tested features are available.</div>'
-  return `<div class="table-scroll differential-table"><table><thead><tr><th>Feature</th><th>Secondary ID</th><th>Case mean</th><th>Control mean</th><th>log2 group effect</th><th>SE</th><th>q-value</th><th>Subject effect</th><th>Subject q</th></tr></thead><tbody>${rows.slice(0, 250).map((row) => `<tr><td><strong>${escapeHtml(row.feature)}</strong></td><td>${escapeHtml(row.secondary_id || '')}</td><td>${formatNumber(row.mean_case)}</td><td>${formatNumber(row.mean_control)}</td><td>${formatNumber(row.beta_group)}</td><td>${formatNumber(row.robust_se)}</td><td>${formatNumber(row.q_value)}</td><td>${formatNumber(row.subject_effect)}</td><td>${formatNumber(row.subject_q_value)}</td></tr>`).join('')}</tbody></table></div><p class="table-note">Showing the first ${Math.min(250, rows.length).toLocaleString()} of ${rows.length.toLocaleString()} tested features, ordered by adjusted q-value and effect size. The JSON export contains all rows.</p>`
+  dynamicTableSources.set(tableId, { rows, cells: differentialRowCells, rowHtml: differentialRowHtml, limit: 500 })
+  const initial = rows.slice(0, 500)
+  return `<div class="table-scroll differential-table" data-dynamic-table="${escapeHtml(tableId)}"><table><thead><tr><th>Feature</th><th>Secondary ID</th><th>Case mean</th><th>Control mean</th><th>log2 group effect</th><th>SE</th><th>q-value</th><th>Subject effect</th><th>Subject q</th></tr></thead><tbody>${initial.map(differentialRowHtml).join('')}</tbody></table></div><p class="table-note">Search and sort operate across all ${rows.length.toLocaleString()} tested features. Up to 500 matching rows are drawn at once; the JSON export contains all rows.</p>`
+}
+
+function dtuGeneRowCells(row) {
+  return [row.gene_id, row.n_transcripts, row.q_value, row.max_abs_clr_effect]
+}
+
+function dtuGeneRowHtml(row) {
+  return `<tr><td><strong>${escapeHtml(row.gene_id)}</strong></td><td>${row.n_transcripts}</td><td>${formatNumber(row.q_value)}</td><td>${formatNumber(row.max_abs_clr_effect)}</td></tr>`
+}
+
+function dtuGeneTable(dtu, tableId) {
+  const rows = dtu?.gene_tests || []
+  if (!rows.length) return '<div class="plot-empty">No transcript-usage gene tests are available.</div>'
+  dynamicTableSources.set(tableId, { rows, cells: dtuGeneRowCells, rowHtml: dtuGeneRowHtml, limit: 500 })
+  return `<div class="table-scroll" data-dynamic-table="${escapeHtml(tableId)}"><table><thead><tr><th>Gene</th><th>Transcripts</th><th>q-value</th><th>Max |CLR effect|</th></tr></thead><tbody>${rows.slice(0, 500).map(dtuGeneRowHtml).join('')}</tbody></table></div><p class="table-note">Search and sort operate across all ${rows.length.toLocaleString()} tested genes. Up to 500 matching rows are drawn at once.</p>`
 }
 
 function comparisonResultSection(title, result) {
@@ -1212,19 +1369,20 @@ function comparisonResultSection(title, result) {
   const plotPrefix = title.toLowerCase().startsWith('gene') ? 'gene' : 'transcript'
   const caseLabel = result.comparison?.case_label || 'Case'
   const controlLabel = result.comparison?.control_label || 'Control'
-  const significant = (analysis.tests || []).filter((row) => Number.isFinite(Number(row.q_value)) && Number(row.q_value) <= 0.05).length
+  const significant = (analysis.tests || []).filter((row) => Number.isFinite(Number(row.q_value)) && Number(row.q_value) <= state.globalThresholds.fdr && Math.abs(Number(row.beta_group)) >= state.globalThresholds.absLog2Fc).length
   return `<section class="card comparison-result">
     <div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(result.source_metric)} · corrected native/WASM-parity expression model</p></div><span class="tag success">Rust/WASM</span></div>
     <div class="summary-grid compact-grid">
       ${summaryCard('Model samples', analysis.n_model_samples, `${analysis.n_subjects} subject/patient IDs`)}
       ${summaryCard('Tested features', analysis.tested_features.toLocaleString(), `${analysis.filtered_features.toLocaleString()} filtered before modeling`)}
-      ${summaryCard('q ≤ 0.05', significant.toLocaleString(), 'BH-adjusted feature tests')}
+      ${summaryCard(`q ≤ ${formatNumber(state.globalThresholds.fdr)} & |log2FC| ≥ ${formatNumber(state.globalThresholds.absLog2Fc)}`, significant.toLocaleString(), 'Global differential-result thresholds')}
       ${summaryCard('Excluded rows', result.comparison.excluded_rows.toLocaleString(), `${result.comparison.metadata_rows_after_exclusions} metadata rows retained`)}
     </div>
     ${analysis.warnings?.length ? `<div class="analysis-warnings">${analysis.warnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join('')}</div>` : ''}
+    <article class="plot-card volcano-card"><div class="plot-heading"><strong>Differential-expression volcano plot</strong><span>Model log2 fold change versus −log10(BH q-value). Dashed lines show the global FDR and |log2FC| thresholds.</span></div>${volcanoSvg(analysis, `${plotPrefix}-volcano`)}</article>
     <div class="plot-grid"><article class="plot-card"><div class="plot-heading"><strong>Global expression PCA</strong><span>Top variable normalized features; groups do not select the PCA features.</span></div>${pcaSvg(analysis.pca, `${plotPrefix}-pca`, caseLabel, controlLabel)}</article><article class="plot-card"><div class="plot-heading"><strong>Hierarchical clustering</strong><span>Average linkage on Euclidean distance across the same normalized feature space.</span></div>${dendrogramSvg(analysis.dendrogram, `${plotPrefix}-dendrogram`, caseLabel, controlLabel)}</article></div>
-    <details class="details-block result-details" open><summary>Differential feature table</summary>${differentialTable(analysis)}</details>
-    ${analysis.dtu ? `<details class="details-block result-details"><summary>Transcript-usage screen (${analysis.dtu.genes_tested.toLocaleString()} genes)</summary><p class="method-note">${escapeHtml(analysis.dtu.method_description)}</p><div class="table-scroll"><table><thead><tr><th>Gene</th><th>Transcripts</th><th>q-value</th><th>Max |CLR effect|</th></tr></thead><tbody>${analysis.dtu.gene_tests.slice(0, 100).map((row) => `<tr><td><strong>${escapeHtml(row.gene_id)}</strong></td><td>${row.n_transcripts}</td><td>${formatNumber(row.q_value)}</td><td>${formatNumber(row.max_abs_clr_effect)}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
+    <details class="details-block result-details" open><summary>Differential feature table</summary>${differentialTable(analysis, `${plotPrefix}-differential-table`)}</details>
+    ${analysis.dtu ? `<details class="details-block result-details"><summary>Transcript-usage screen (${analysis.dtu.genes_tested.toLocaleString()} genes)</summary><p class="method-note">${escapeHtml(analysis.dtu.method_description)}</p>${dtuGeneTable(analysis.dtu, `${plotPrefix}-dtu-gene-table`)}</details>` : ''}
   </section>`
 }
 
@@ -1289,7 +1447,7 @@ function compareView() {
   <details class="advanced-settings"><summary>Advanced model settings</summary><div class="form-grid advanced-grid"><label><span>Minimum count</span><input id="compare-min-count" type="number" min="0" step="1" value="${cfg.minCount}"/></label><label><span>Minimum fraction of samples</span><input id="compare-min-fraction" type="number" min="0" max="1" step="0.01" value="${cfg.minFractionSamples}"/></label></div><p>Defaults match the established corrected-expression analysis. Change them only when the analysis plan requires it.</p></details>
   <div class="run-row"><div><strong>${cfg.caseValues.length} case value${cfg.caseValues.length === 1 ? '' : 's'} · ${cfg.controlValues.length} control value${cfg.controlValues.length === 1 ? '' : 's'}</strong><span>Group membership, exclusions, subject mapping, and model settings are frozen into the result.</span></div><button id="run-group-comparison" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run local comparison'}</button></div></section>
   ${state.compareProgress ? `<div class="progress-card" role="status"><div class="progress-copy"><strong>${escapeHtml(state.compareProgress.message)}</strong><span>${state.compareProgress.completed} of ${state.compareProgress.total} modality steps complete</span></div><progress max="${Math.max(1, state.compareProgress.total)}" value="${state.compareProgress.completed}"></progress></div>` : ''}
-  ${state.compareResult ? `<div class="result-heading"><div><span class="eyebrow">Corrected expression result</span><h3>${escapeHtml(state.compareResult.comparisonName)}</h3><p>Generated entirely on this device. PCA and clustering use global top-variable normalized features, not significant-hit selection.</p></div><button id="export-comparison" class="secondary-button">Save comparison JSON</button></div>${comparisonResultSection('Gene expression', state.compareResult.gene)}${comparisonResultSection('Transcript expression', state.compareResult.transcript)}` : ''}`
+  ${state.compareResult ? `${globalThresholdControls()}<div class="result-heading"><div><span class="eyebrow">Corrected expression result</span><h3>${escapeHtml(state.compareResult.comparisonName)}</h3><p>Generated entirely on this device. PCA and clustering use global top-variable normalized features, not significant-hit selection.</p></div><button id="export-comparison" class="secondary-button">Save comparison JSON</button></div>${comparisonResultSection('Gene expression', state.compareResult.gene)}${comparisonResultSection('Transcript expression', state.compareResult.transcript)}` : ''}`
 }
 
 
@@ -1575,7 +1733,7 @@ function significantHeatmap(panel) {
 function significantFeatureTable(panel) {
   const rows = panel?.analysis_features || []
   if (!rows.length) return '<div class="plot-empty">No selected features are available.</div>'
-  return `<div class="table-scroll differential-table"><table><thead><tr><th>Feature</th><th>Family / secondary ID</th><th>Adjusted effect</th><th>q-value</th></tr></thead><tbody>${rows.slice(0, 250).map((row) => `<tr><td><strong>${escapeHtml(row.feature)}</strong></td><td>${escapeHtml(row.family || '')}</td><td>${formatNumber(row.adjusted_effect)}</td><td>${formatNumber(row.q_value)}</td></tr>`).join('')}</tbody></table></div><p class="table-note">Showing ${Math.min(250, rows.length).toLocaleString()} of ${rows.length.toLocaleString()} features used for the post-selection structure analysis. The JSON export contains all selected features.</p>`
+  return `<div class="table-scroll differential-table"><table><thead><tr><th>Feature</th><th>Family / secondary ID</th><th>Adjusted effect</th><th>q-value</th></tr></thead><tbody>${rows.map((row) => `<tr><td><strong>${escapeHtml(row.feature)}</strong></td><td>${escapeHtml(row.family || '')}</td><td>${formatNumber(row.adjusted_effect)}</td><td>${formatNumber(row.q_value)}</td></tr>`).join('')}</tbody></table></div><p class="table-note">Showing all ${rows.length.toLocaleString()} features used for the post-selection structure analysis.</p>`
 }
 
 function significantPanelSection(title, result) {
@@ -1592,7 +1750,7 @@ function significantPanelSection(title, result) {
   const prefix = title.toLowerCase().startsWith('gene') ? 'hit-gene' : 'hit-transcript'
   return `<section class="card significant-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(panel.distance_label)} · ${panel.sample_ids.length} modeled samples</p></div><span class="tag warning">Post-selection</span></div>
     <div class="summary-grid compact-grid">
-      ${summaryCard('Significant hits', panel.significant_features_total, `BH q ≤ ${formatNumber(state.hitConfig.qThreshold)} · |effect| ≥ ${formatNumber(state.hitConfig.minAbsEffect)}`)}
+      ${summaryCard('Significant hits', panel.significant_features_total, `BH q ≤ ${formatNumber(state.globalThresholds.fdr)} · |log2FC| ≥ ${formatNumber(state.globalThresholds.absLog2Fc)}`)}
       ${summaryCard('Features analyzed', panel.analysis_features.length, `Maximum ${state.hitConfig.maxAnalysisFeatures}`)}
       ${summaryCard('Silhouette', formatNumber(panel.silhouette), 'Case/Control coherence on the selected-hit distance matrix')}
       ${summaryCard('NN group accuracy', Number.isFinite(Number(panel.nearest_neighbor_group_accuracy)) ? `${(Number(panel.nearest_neighbor_group_accuracy) * 100).toFixed(1)}%` : '—', 'Nearest other sample has the same Case/Control label')}
@@ -1634,7 +1792,8 @@ function significantHitsView() {
   ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
   <div class="notice-banner" role="note"><strong>Post-selection interpretation:</strong><span>Clean Case/Control separation here is expected to some degree because these features were selected using the same labels. Use these plots to inspect consistency, outliers, and multivariate structure—not as held-out predictive performance.</span></div>
   <section class="card"><div class="card-heading"><div><h3>1. Frozen comparison</h3><p>W5 reuses the current W3 metadata roles, groups, covariates, exclusions, and merged tables. Change them in Compare Groups, then rerun that workflow if needed.</p></div><span class="tag success">${escapeHtml(comparisonName)}</span></div><div class="summary-grid compact-grid">${summaryCard('Case', compare.gene?.comparison?.case_label || compare.transcript?.comparison?.case_label || 'Case', `${state.compareConfig.caseValues.length} selected metadata value${state.compareConfig.caseValues.length === 1 ? '' : 's'}`)}${summaryCard('Control', compare.gene?.comparison?.control_label || compare.transcript?.comparison?.control_label || 'Control', `${state.compareConfig.controlValues.length} selected metadata value${state.compareConfig.controlValues.length === 1 ? '' : 's'}`)}${summaryCard('Subject / patient', state.compareConfig.subjectColumn || 'Not selected', state.compareConfig.subjectColumn ? 'Used for repeated-measure robust inference' : 'Samples treated as independent subjects')}${summaryCard('Covariates', state.compareConfig.covariates.length, state.compareConfig.covariates.length ? state.compareConfig.covariates.join(', ') : 'No adjustment covariates')}</div></section>
-  <section class="card"><div class="card-heading"><div><h3>2. Significant-hit definition</h3><p>Thresholds only control which already-tested W3 features enter the descriptive structure analysis.</p></div></div><div class="form-grid hit-settings-grid"><label><span>BH q-value threshold</span><input id="hit-q-threshold" type="number" min="0" max="1" step="0.001" value="${cfg.qThreshold}"/></label><label><span>Minimum |adjusted effect|</span><input id="hit-min-effect" type="number" min="0" step="0.05" value="${cfg.minAbsEffect}"/></label><label><span>Maximum PCA/clustering features</span><input id="hit-max-analysis" type="number" min="2" step="1" value="${cfg.maxAnalysisFeatures}"/></label><label><span>Maximum heatmap features</span><input id="hit-max-heatmap" type="number" min="1" step="1" value="${cfg.maxHeatmapFeatures}"/></label></div></section>
+  ${globalThresholdControls()}
+  <section class="card"><div class="card-heading"><div><h3>2. Post-selection display limits</h3><p>The global FDR/log2FC thresholds define the hit set. These limits only cap how many selected features are drawn in dense views.</p></div></div><div class="form-grid hit-settings-grid"><label><span>Maximum PCA/clustering features</span><input id="hit-max-analysis" type="number" min="2" step="1" value="${cfg.maxAnalysisFeatures}"/></label><label><span>Maximum heatmap features</span><input id="hit-max-heatmap" type="number" min="1" step="1" value="${cfg.maxHeatmapFeatures}"/></label></div></section>
   <section class="card"><div class="card-heading"><div><h3>3. Data types</h3><p>Only expression modalities completed in the current Compare Groups result can be used.</p></div></div><div class="config-grid expression-source-grid"><div class="config-block stacked ${geneAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-gene-enabled" type="checkbox" ${cfg.geneEnabled && geneAvailable ? 'checked' : ''} ${geneAvailable ? '' : 'disabled'}/><span><strong>Gene expression</strong><small>Selected corrected gene hits</small></span></label><span class="tag ${geneAvailable ? 'success' : 'neutral'}">${geneAvailable ? 'Available' : 'Run W3 first'}</span></div></div><div class="config-block stacked ${transcriptAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-transcript-enabled" type="checkbox" ${cfg.transcriptEnabled && transcriptAvailable ? 'checked' : ''} ${transcriptAvailable ? '' : 'disabled'}/><span><strong>Transcript / isoform expression</strong><small>Selected corrected transcript hits</small></span></label><span class="tag ${transcriptAvailable ? 'success' : 'neutral'}">${transcriptAvailable ? 'Available' : 'Run W3 first'}</span></div></div></div>
   <div class="run-row"><div><strong>${enabledCount} expression data type${enabledCount === 1 ? '' : 's'} enabled</strong><span>The corrected W3 model is rerun locally with the frozen settings, then only the selected-hit structure is retained.</span></div><button id="run-significant-hits" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run significant-hit structure'}</button></div></section>
   ${state.hitProgress ? `<div class="progress-card" role="status"><div class="progress-copy"><strong>${escapeHtml(state.hitProgress.message)}</strong><span>${state.hitProgress.completed} of ${state.hitProgress.total} modality steps complete</span></div><progress max="${Math.max(1, state.hitProgress.total)}" value="${state.hitProgress.completed}"></progress></div>` : ''}
@@ -1658,8 +1817,8 @@ async function runSignificantHits() {
   }
   const { comparisonName, portableConfig } = currentPortableComparisonConfig()
   const hitConfig = {
-    qThreshold: Number(state.hitConfig.qThreshold),
-    minAbsEffect: Number(state.hitConfig.minAbsEffect),
+    qThreshold: Number(state.globalThresholds.fdr),
+    minAbsEffect: Number(state.globalThresholds.absLog2Fc),
     maxAnalysisFeatures: Math.max(2, Math.trunc(Number(state.hitConfig.maxAnalysisFeatures) || 500)),
     maxHeatmapFeatures: Math.max(1, Math.trunc(Number(state.hitConfig.maxHeatmapFeatures) || 80)),
   }
@@ -1696,8 +1855,7 @@ async function runSignificantHits() {
 function bindSignificantHitEvents() {
   const cfg = state.hitConfig
   document.querySelector('#hits-open-compare')?.addEventListener('click', () => { state.tab = 'compare'; render() })
-  document.querySelector('#hit-q-threshold')?.addEventListener('change', (event) => { cfg.qThreshold = Number(event.currentTarget.value); state.hitResult = null; render() })
-  document.querySelector('#hit-min-effect')?.addEventListener('change', (event) => { cfg.minAbsEffect = Number(event.currentTarget.value); state.hitResult = null; render() })
+  bindGlobalThresholdEvents()
   document.querySelector('#hit-max-analysis')?.addEventListener('change', (event) => { cfg.maxAnalysisFeatures = Math.max(2, Math.trunc(Number(event.currentTarget.value) || 500)); state.hitResult = null })
   document.querySelector('#hit-max-heatmap')?.addEventListener('change', (event) => { cfg.maxHeatmapFeatures = Math.max(1, Math.trunc(Number(event.currentTarget.value) || 80)); state.hitResult = null })
   document.querySelector('#hit-gene-enabled')?.addEventListener('change', (event) => { cfg.geneEnabled = event.currentTarget.checked; state.hitResult = null; render() })
@@ -1705,33 +1863,6 @@ function bindSignificantHitEvents() {
   document.querySelector('#run-significant-hits')?.addEventListener('click', () => void runSignificantHits())
   document.querySelector('#export-significant-hits')?.addEventListener('click', () => void exportHitResult())
   bindInteractivePlots()
-}
-
-
-function resultsView() {
-  const cards = []
-  if (state.qcResult) {
-    cards.push(`<section class="card result-card"><div><span class="tag success">Completed</span><h3>Explore & QC · expression distributions</h3><p>${state.qcResult.gene.length} gene-expression samples and ${state.qcResult.transcript.length} transcript-expression samples processed with Rust/WASM.</p></div><div class="button-row"><button id="results-open-qc" class="secondary-button">View QC</button><button id="results-export-qc" class="primary-button">Save QC JSON</button></div></section>`)
-  }
-  if (state.compareResult) {
-    const geneSamples = state.compareResult.gene?.analysis?.n_model_samples || 0
-    const transcriptSamples = state.compareResult.transcript?.analysis?.n_model_samples || 0
-    cards.push(`<section class="card result-card"><div><span class="tag success">Completed</span><h3>Compare Groups · corrected expression</h3><p>${escapeHtml(state.compareResult.comparisonName)} · ${geneSamples ? `${geneSamples} gene model samples` : 'gene disabled'} · ${transcriptSamples ? `${transcriptSamples} transcript model samples` : 'transcript disabled'}.</p></div><div class="button-row"><button id="results-open-compare" class="secondary-button">View comparison</button><button id="results-export-compare" class="primary-button">Save comparison JSON</button></div></section>`)
-  }
-  if (state.longitudinalResult) {
-    const modalities = [state.longitudinalResult.gene?.modality, state.longitudinalResult.transcript?.modality].filter(Boolean)
-    const best = modalities.slice().sort((a, b) => Number(b.identity_auc || -1) - Number(a.identity_auc || -1))[0]
-    cards.push(`<section class="card result-card"><div><span class="tag success">Completed</span><h3>Longitudinal · patient-specific signature</h3><p>${modalities.length} expression data type${modalities.length === 1 ? '' : 's'} analyzed${best ? ` · best identity AUC ${formatNumber(best.identity_auc)}` : ''}.</p></div><div class="button-row"><button id="results-open-longitudinal" class="secondary-button">View longitudinal</button><button id="results-export-longitudinal" class="primary-button">Save longitudinal JSON</button></div></section>`)
-  }
-  if (state.hitResult) {
-    const panels = [state.hitResult.gene?.panel, state.hitResult.transcript?.panel].filter(Boolean)
-    const totalHits = panels.reduce((sum, panel) => sum + Number(panel.significant_features_total || 0), 0)
-    cards.push(`<section class="card result-card"><div><span class="tag success">Completed</span><h3>Significant Hits · post-selection structure</h3><p>${escapeHtml(state.hitResult.comparisonName)} · ${panels.length} expression data type${panels.length === 1 ? '' : 's'} with selected-hit structure · ${totalHits.toLocaleString()} threshold-supported hits.</p></div><div class="button-row"><button id="results-open-hits" class="secondary-button">View significant hits</button><button id="results-export-hits" class="primary-button">Save significant-hit JSON</button></div></section>`)
-  }
-  if (!cards.length) {
-    return `<section class="page-heading"><div><span class="eyebrow">Results</span><h2>Results stay with the project on this computer</h2><p>Completed workflows appear here with local exports.</p></div></section><section class="card empty-results"><div class="empty-icon" aria-hidden="true">↧</div><h3>No WASM analysis has completed yet</h3><p>${state.records.length ? 'Your local inputs are selected. Run Explore & QC or Compare Groups to create a browser result.' : 'Select project inputs first.'}</p></section>`
-  }
-  return `<section class="page-heading"><div><span class="eyebrow">Results</span><h2>Local analysis results</h2><p>No result data have left this device.</p></div></section>${cards.join('')}`
 }
 
 
@@ -1760,7 +1891,117 @@ function historyView() {
 }
 
 function docsView() {
-  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods and interpretation</h2><p>4C Insight keeps analysis assumptions and limitations visible next to the workflows that use them.</p></div></section><div class="docs-grid"><article class="card"><h3>Local-first execution</h3><p>Selected files remain on the user's computer. Browser workers and Rust/WebAssembly perform analysis locally. Results are saved only when the user chooses an export.</p></article><article class="card"><h3>Expression QC</h3><p>Metadata tables and gene/transcript workbooks are parsed from bytes in Rust. Expression workbooks are processed one at a time so the browser does not retain the complete cohort in source-file buffers.</p></article><article class="card"><h3>W3 corrected group comparison</h3><p>Gene analysis uses Raw Count columns. Transcript analysis uses Total Reads columns. Positive-count median-ratio size factors are followed by the established negative-binomial log-link group model. A selected patient/subject column enables subject-clustered sandwich standard errors for repeated measurements. Selected covariates are added to the same model.</p></article><article class="card"><h3>PCA and hierarchical clustering</h3><p>Global PCA and the dendrogram use top-variable normalized features. Case/Control labels do not select those features. The dendrogram uses average linkage with Euclidean distance. These plots describe cohort structure and are distinct from post-selection significant-hit plots.</p></article><article class="card"><h3>Sample exclusions</h3><p>Reviewed-QC and custom metadata rules are optional and independent. Each rule uses a user-selected metadata column and one or more exact observed values. Matching metadata rows are removed before Case/Control construction and model fitting, and the exact rule and excluded sample IDs are stored in the result.</p></article><article class="card"><h3>Transcript usage</h3><p>The transcript workflow also runs the existing differential transcript-usage screen. It aggregates transcript proportions within genes, applies the established CLR-based transcript-usage model, and reports BH-adjusted gene and transcript results.</p></article><article class="card"><h3>Scientific parity</h3><p>W3 fixtures run the same merged expression tables through native filesystem APIs and browser-safe byte APIs. The enabled workflow must match for size factors, differential tests, PCA, dendrograms, and transcript DTU outputs.</p></article><article class="card"><h3>W4 longitudinal patient signature</h3><p>Longitudinal analysis is unsupervised. Expression distances are built from top-variable normalized log2 counts without using patient identity. Patient labels are applied afterward to measure identity AUC, nearest-neighbour patient accuracy, same-patient versus different-patient distance, and to annotate the average-linkage dendrogram. Observation ID, patient ID, time/visit, and exclusions are user-selected metadata roles.</p></article><article class="card"><h3>W5 significant-hit structure</h3><p>The Significant Hits workflow reuses the exact completed Compare Groups definition. Features are selected by BH q-value and optional absolute adjusted-effect threshold, then the same normalized selected-feature matrix is used for PCA, average-linkage clustering, a clustered z-score heatmap, silhouette, nearest-neighbour group coherence, and subject-blocked PERMANOVA. Because the same Case/Control labels select and display the features, these outputs are descriptive post-selection structure, not independent validation or predictive performance.</p></article></div>`
+  const references = methodDocs.reduce((total, section) => total + (section.references || []).length, 0)
+  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods, assumptions, and references</h2><p>Search the methods that are implemented in 4C Insight. Each section states what the application does, what it does not claim, and the literature that supports the method.</p></div><div class="local-card"><strong>Literature-backed methods</strong><span>${methodDocs.length} sections · ${references} linked references</span></div></section>
+    <section class="card docs-search-card"><label for="docs-search"><strong>Search documentation</strong><span>Search methods, terms, limitations, or references.</span></label><input id="docs-search" type="search" value="${escapeHtml(state.docsQuery)}" placeholder="e.g. NB2, PERMANOVA, longitudinal, FDR, CLR" autocomplete="off"/><small id="docs-search-status">${methodDocs.length} sections shown</small></section>
+    <nav class="docs-toc" aria-label="Documentation sections">${methodDocs.map((section) => `<a href="#doc-${escapeHtml(section.id)}">${escapeHtml(section.title)}</a>`).join('')}</nav>
+    <div class="docs-methods">${methodDocs.map((section) => {
+      const searchable = [section.title, section.keywords, section.summary, ...(section.body || []), ...(section.references || []).map((reference) => reference.label)].join(' ').toLowerCase()
+      return `<article id="doc-${escapeHtml(section.id)}" class="card docs-section" data-doc-section data-doc-search="${escapeHtml(searchable)}"><div class="card-heading"><div><h3>${escapeHtml(section.title)}</h3><p>${escapeHtml(section.summary)}</p></div><a class="text-button docs-anchor" href="#doc-${escapeHtml(section.id)}" aria-label="Link to ${escapeHtml(section.title)}">#</a></div>${(section.body || []).map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join('')}${section.references?.length ? `<div class="docs-references"><strong>References</strong><ol>${section.references.map((reference) => `<li><a href="${escapeHtml(reference.href)}" target="_blank" rel="noreferrer">${escapeHtml(reference.label)}</a></li>`).join('')}</ol></div>` : `<div class="docs-references"><strong>References</strong><p>No external reference is required for this application-specific provenance behavior.</p></div>`}</article>`
+    }).join('')}</div>`
+}
+
+function bindDocsEvents() {
+  const input = document.querySelector('#docs-search')
+  const status = document.querySelector('#docs-search-status')
+  const sections = [...document.querySelectorAll('[data-doc-section]')]
+  const apply = () => {
+    const query = String(input?.value || '').trim().toLowerCase()
+    state.docsQuery = query
+    let visible = 0
+    for (const section of sections) {
+      const match = !query || String(section.dataset.docSearch || '').includes(query)
+      section.hidden = !match
+      if (match) visible += 1
+    }
+    if (status) status.textContent = query ? `${visible} of ${sections.length} sections match` : `${sections.length} sections shown`
+  }
+  input?.addEventListener('input', apply)
+  apply()
+}
+
+function sortableTableValue(value) {
+  if (value === null || value === undefined) return { numeric: false, value: '' }
+  if (typeof value === 'number' && Number.isFinite(value)) return { numeric: true, value }
+  const text = String(value).trim()
+  const numericText = text.replace(/,/g, '').replace(/%$/, '')
+  if (numericText && /^[-+]?\d*\.?\d+(?:e[-+]?\d+)?$/i.test(numericText)) return { numeric: true, value: Number(numericText) }
+  return { numeric: false, value: text.toLocaleLowerCase() }
+}
+
+function compareSortableValues(a, b) {
+  const left = sortableTableValue(a)
+  const right = sortableTableValue(b)
+  if (left.numeric && right.numeric) return left.value - right.value
+  return String(left.value).localeCompare(String(right.value), undefined, { numeric: true, sensitivity: 'base' })
+}
+
+function enhanceTables() {
+  document.querySelectorAll('.table-scroll').forEach((scroll, tableIndex) => {
+    const table = scroll.querySelector('table')
+    if (!table || table.classList.contains('significant-heatmap') || table.dataset.enhanced === 'true') return
+    table.dataset.enhanced = 'true'
+    const headers = [...table.querySelectorAll('thead tr:first-child th')]
+    const tbody = table.querySelector('tbody')
+    if (!headers.length || !tbody) return
+    const sourceId = scroll.dataset.dynamicTable || ''
+    const source = sourceId ? dynamicTableSources.get(sourceId) : null
+    const staticRows = source ? [] : [...tbody.querySelectorAll('tr')]
+    let query = ''
+    let sortIndex = -1
+    let sortDirection = 1
+    const toolbar = document.createElement('div')
+    toolbar.className = 'table-tools'
+    toolbar.innerHTML = `<label><span class="visually-hidden">Search table</span><input type="search" class="table-search" placeholder="Search table…" autocomplete="off"/></label><span class="table-match-count" aria-live="polite"></span>`
+    scroll.before(toolbar)
+    const status = toolbar.querySelector('.table-match-count')
+
+    const updateHeaderState = () => {
+      headers.forEach((header, index) => {
+        header.classList.add('sortable-table-header')
+        header.tabIndex = 0
+        header.setAttribute('role', 'button')
+        header.setAttribute('aria-sort', index === sortIndex ? (sortDirection > 0 ? 'ascending' : 'descending') : 'none')
+        header.dataset.sortDirection = index === sortIndex ? (sortDirection > 0 ? 'asc' : 'desc') : ''
+      })
+    }
+
+    const apply = () => {
+      if (source) {
+        let rows = source.rows.filter((row) => !query || source.cells(row).some((value) => String(value ?? '').toLowerCase().includes(query)))
+        if (sortIndex >= 0) rows = [...rows].sort((a, b) => compareSortableValues(source.cells(a)[sortIndex], source.cells(b)[sortIndex]) * sortDirection)
+        const limit = source.limit || 500
+        tbody.innerHTML = rows.slice(0, limit).map(source.rowHtml).join('')
+        status.textContent = `Showing ${Math.min(rows.length, limit).toLocaleString()} of ${rows.length.toLocaleString()} matching · ${source.rows.length.toLocaleString()} total`
+      } else {
+        const matches = staticRows.filter((row) => !query || row.textContent.toLowerCase().includes(query))
+        if (sortIndex >= 0) matches.sort((a, b) => compareSortableValues(a.cells[sortIndex]?.textContent, b.cells[sortIndex]?.textContent) * sortDirection)
+        const matchSet = new Set(matches)
+        for (const row of staticRows) row.hidden = !matchSet.has(row)
+        for (const row of matches) tbody.append(row)
+        status.textContent = `${matches.length.toLocaleString()} of ${staticRows.length.toLocaleString()} rows`
+      }
+      updateHeaderState()
+    }
+
+    toolbar.querySelector('.table-search')?.addEventListener('input', (event) => {
+      query = event.currentTarget.value.trim().toLowerCase()
+      apply()
+    })
+    headers.forEach((header, index) => {
+      const sort = () => {
+        if (sortIndex === index) sortDirection *= -1
+        else { sortIndex = index; sortDirection = 1 }
+        apply()
+      }
+      header.addEventListener('click', sort)
+      header.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); sort() }
+      })
+    })
+    updateHeaderState()
+    apply()
+  })
 }
 
 async function inspectSelectedMetadata() {
@@ -1918,6 +2159,19 @@ async function runGroupComparison() {
   }
 }
 
+function bindGlobalThresholdEvents() {
+  const apply = () => {
+    const fdrInput = document.querySelector('#global-fdr-threshold')
+    const fcInput = document.querySelector('#global-log2fc-threshold')
+    if (fdrInput) state.globalThresholds.fdr = Math.min(1, Math.max(0.000001, Number(fdrInput.value) || 0.05))
+    if (fcInput) state.globalThresholds.absLog2Fc = Math.max(0, Number(fcInput.value) || 0)
+    state.hitResult = null
+    render()
+  }
+  document.querySelector('#global-fdr-threshold')?.addEventListener('change', apply)
+  document.querySelector('#global-log2fc-threshold')?.addEventListener('change', apply)
+}
+
 function bindCompareEvents() {
   const cfg = state.compareConfig
   const rerender = () => render()
@@ -2018,6 +2272,7 @@ function bindCompareEvents() {
   })
   document.querySelector('#run-group-comparison')?.addEventListener('click', () => void runGroupComparison())
   document.querySelector('#export-comparison')?.addEventListener('click', () => void exportCompareResult())
+  bindGlobalThresholdEvents()
   bindInteractivePlots()
 
   if (
@@ -2112,17 +2367,6 @@ function bindQcEvents() {
   }
 }
 
-function bindResultsEvents() {
-  document.querySelector('#results-open-qc')?.addEventListener('click', () => { state.tab = 'qc'; render() })
-  document.querySelector('#results-export-qc')?.addEventListener('click', () => void exportQcResult())
-  document.querySelector('#results-open-compare')?.addEventListener('click', () => { state.tab = 'compare'; render() })
-  document.querySelector('#results-export-compare')?.addEventListener('click', () => void exportCompareResult())
-  document.querySelector('#results-open-longitudinal')?.addEventListener('click', () => { state.tab = 'longitudinal'; render() })
-  document.querySelector('#results-export-longitudinal')?.addEventListener('click', () => void exportLongitudinalResult())
-  document.querySelector('#results-open-hits')?.addEventListener('click', () => { state.tab = 'hits'; render() })
-  document.querySelector('#results-export-hits')?.addEventListener('click', () => void exportHitResult())
-}
-
 function bindHistoryEvents() {
   document.querySelectorAll('.history-open').forEach((button) => button.addEventListener('click', () => void openHistoryEntry(button.dataset.historyId)))
   document.querySelectorAll('.history-export').forEach((button) => button.addEventListener('click', () => void exportHistorySnapshot(button.dataset.historyId)))
@@ -2132,35 +2376,37 @@ function bindHistoryEvents() {
 
 function render() {
   renderNav()
+  dynamicTableSources.clear()
   const main = document.querySelector('#main-content')
-  const views = {
-    project: projectView(),
-    qc: qcView(),
-    compare: compareView(),
-    longitudinal: longitudinalView(),
-    hits: significantHitsView(),
-    results: resultsView(),
-    history: historyView(),
-    docs: docsView(),
+  const viewFactories = {
+    project: projectView,
+    qc: qcView,
+    compare: compareView,
+    longitudinal: longitudinalView,
+    hits: significantHitsView,
+    history: historyView,
+    docs: docsView,
   }
-  main.innerHTML = views[state.tab]
+  main.innerHTML = (viewFactories[state.tab] || projectView)()
   if (state.tab === 'project') bindProjectEvents()
   if (state.tab === 'qc') bindQcEvents()
   if (state.tab === 'compare') bindCompareEvents()
   if (state.tab === 'longitudinal') bindLongitudinalEvents()
   if (state.tab === 'hits') bindSignificantHitEvents()
-  if (state.tab === 'results') bindResultsEvents()
   if (state.tab === 'history') {
     bindHistoryEvents()
     if (!state.historyLoaded && !state.historyBusy) void refreshHistory()
   }
+  if (state.tab === 'docs') bindDocsEvents()
+  enhanceTables()
+  renderSystemInfo()
 }
 
 async function registerIsolationServiceWorker() {
   if (!('serviceWorker' in navigator) || !window.isSecureContext) return
   try {
     const workerUrl = new URL('./coi-serviceworker.js', window.location.href)
-    workerUrl.searchParams.set('v', '0.21.0-ux1')
+    workerUrl.searchParams.set('v', '0.21.0-ux2')
     await navigator.serviceWorker.register(workerUrl.href, { scope: new URL('./', workerUrl).pathname })
     await navigator.serviceWorker.ready
     if (!navigator.serviceWorker.controller && sessionStorage.getItem('4c-insight-coi-reload') !== '1') {

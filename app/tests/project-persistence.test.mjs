@@ -27,7 +27,7 @@ test('application state saves settings and file references but not raw file byte
 test('history uses browser-local IndexedDB snapshots with view export and delete actions', () => {
   assert.match(persistence, /indexedDB\.open/)
   assert.match(persistence, /history-snapshots/)
-  assert.match(main, /\['history', 'History', 'H'\]/)
+  assert.match(main, /\['history', 'History', '6'\]/)
   assert.match(main, /recordHistory\('compare-groups-expression'/)
   assert.match(main, /recordHistory\('longitudinal-patient-signature-expression'/)
   assert.match(main, /recordHistory\('significant-hit-structure-expression'/)
