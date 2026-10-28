@@ -453,3 +453,17 @@ User screenshots verified UX4 branding, UX3 Settings, and a transcript `20260820
 - MDN `Performance.memory`: https://developer.mozilla.org/en-US/docs/Web/API/Performance/memory
 - MDN `Performance.measureUserAgentSpecificMemory`: https://developer.mozilla.org/en-US/docs/Web/API/Performance/measureUserAgentSpecificMemory
 - Rust sysinfo: https://docs.rs/sysinfo/latest/sysinfo/
+
+## UX6 — Reconnect saved cohort and fixed sidebar (2026-10-28)
+
+Scientific engine remains v0.21.0. Browser shell v0.21.0-ux6-state-reconnect.
+
+- Root cause of empty Project after Load State: portable state JSON stores the source-file manifest and analysis settings, not source bytes or browser file access grants. Loading 2,983 references must not claim that 2,983 files have been opened.
+- Project shows a **Reconnect project folder** control after Load State. A single explicit folder picker selection reconnects files; there is no browser bypass to reopen arbitrary local paths.
+- Source matches use filename, exact size, and preferred relative-path match; root-folder differences can be reconciled using path suffixes; ambiguous candidates are not silently selected. The interface shows matched, missing and ambiguous counts. Existing pending comparison/QC/longitudinal configurations reapply after file preflight.
+- Desktop topbar remains sticky; sidebar uses viewport-fixed layout under header, sidebar navigation scrolls separately when necessary, and Rust/WASM status stays visible at the bottom. Mobile keeps its horizontal navigation.
+- Browser memory limits: native sysinfo cannot run with OS access from GitHub Pages WASM; Firefox does not expose exact total/available RAM via a standard web API. Manual system RAM entry remains truthful, and UX5 browser application-memory measurement is retained where supported. Real automatic RAM reporting requires an optional explicit native companion/desktop runtime and is not implemented by UX6.
+- No input-size cap was restored. No scientific Rust or WASM algorithm was changed.
+- Automated source tests: **41/41 PASS**, including 7 dedicated matching tests and a 2,983-reference test. Patch against reconstructed UX5 source: PASS. Actual user browser smoke test: PENDING. Headless browser test was blocked by local page access in the tool environment.
+- For user acceptance: load prior `.4cstate.json`; confirm expected reference count; click Reconnect project folder; select full cohort root; verify matched count, missing/ambiguous count, and restored metadata/group/selected expression tables; compare and Significant Hits must not run unless sources are available; scroll a long results or Docs page and confirm sidebar status stays visible; check mobile width; confirm RAM still shows its source (manual/browser) rather than falsely claiming auto-detection.
+- Recommended next milestone: optionally store browser-granted directory handles (where supported and with permission checks), add a clearly opt-in native RAM companion for Linux, and investigate streaming/chunked large-file processing. These are not included in this update.

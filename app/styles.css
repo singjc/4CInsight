@@ -409,3 +409,27 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .resource-memory-status { display: flex; flex-direction: column; gap: 4px; margin: 14px 0 6px; font-size: 12px; }
 .resource-memory-status strong { color: #344054; }
 .resource-memory-status span { color: #667085; }
+
+/* UX6: fixed desktop navigation, with the status always visible. */
+@media (min-width: 721px) {
+  .topbar { position: sticky; top: 0; z-index: 30; }
+  .workspace { grid-template-columns: 238px minmax(0, 1fr); }
+  .sidebar {
+    position: fixed; top: 96px; bottom: 0; left: 0; width: 238px;
+    height: calc(100dvh - 96px); min-height: 0; overflow: hidden;
+  }
+  .workflow-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; align-content: start; }
+  .sidebar-status { flex: 0 0 auto; margin-top: 0; }
+  .main-content { grid-column: 2; min-width: 0; }
+}
+.state-reconnect-panel {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 12px; margin: 0 0 18px; padding: 14px 16px;
+  border: 1px solid #cbd7ed; border-radius: 10px; background: #f8faff;
+}
+.state-reconnect-panel > div { flex: 1 1 310px; min-width: 0; }
+.state-reconnect-panel strong, .state-reconnect-panel span, .state-reconnect-panel small { display: block; }
+.state-reconnect-panel strong { font-size: 12.5px; color: #253047; }
+.state-reconnect-panel span { margin-top: 4px; font-size: 12px; color: #475467; }
+.state-reconnect-panel small { margin-top: 6px; font-size: 11px; color: #667085; }
+.state-reconnect-warning { flex-basis: 100%; }

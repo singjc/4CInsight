@@ -60,3 +60,13 @@ Added a button to measure app memory only where APIs support it. Distinguish app
 Code tests: 34/34 JS PASS on reconstructed UX4 tree; live full-cohort load/browser memory use NOT tested. The existing 10 MiB limit on separate portable state JSON remains; scientific expression files have no arbitrary threshold. `File.arrayBuffer()` still loads the full file, so large inputs can exhaust browser/WASM memory; investigate streaming when necessary.
 
 Next: apply UX5 to the already-logo-integrated checkout (no SVG move). Run validation, commit and push. Confirm large transcript input no longer fails at UX3 guard; benchmark full cohort on Linux and test browser-specific memory diagnostics. Continue to PX1 only when single-worker baseline stable.
+
+## Continuation after UX6 (2026-10-28)
+
+Current scientific engine: v0.21.0. Latest browser milestone UX6. Prior patches UX3, UX4 and UX5 are prerequisites. Repo `~/Documents/github/cfs-expression-merger` remote `singjc/4CInsight`.
+
+User findings: portable Save State references 2,983 files but cannot grant file access on load. UX6 adds explicit one-folder reconnect and conservative matching; previously missing status at bottom of sidebar fixed by desktop fixed-position sidebar plus internally scrollable nav. Exact RAM remains unavailable to Firefox/GitHub Pages; manual value and browser app-memory measurements are separate. Do not claim sysinfo inside WASM provides Linux total RAM. Do not add input file caps. Do not alter scientific models.
+
+UX6 verification: 41/41 JS tests pass against reconstructed UX5 source. Browser visual and real 2,983-file restore remain to be tested by user. Package `4C_INSIGHT_UX6_RECONNECT_FIXED_SIDEBAR_20261028.tar.gz` contains patch, installer and docs addenda. Use verified package SHA and apply script. Run `git diff --check`, `node --check app/main.js`, `node --check app/state-reconnect.js`, `node --test app/tests/*.test.mjs`; include exact git add/commit commands for changed source and docs. Do not re-move SVG; it is already committed under `app/assets/4c-insight-logo.svg`.
+
+Next: review user's real-cohort smoke, especially path matching and restored metadata selection. If user requires zero-click reloads, investigate permission-aware IndexedDB directory handles for Chromium, but not possible for arbitrary JSON paths and not assumed supported by Firefox. Consider opt-in local native companion for physical/available Linux RAM; confirm security and browser transport first. Then prioritize large-file streaming and PX1 threaded WASM when measured benefit and parity are established.

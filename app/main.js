@@ -1,4 +1,5 @@
 import { saveTextFile } from './save.js'
+import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
 import { methodDocs } from './docs-content.js'
 import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory } from './resource-controls.js'
 import {
@@ -10,7 +11,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux5-unlimited-inputs'
+const APP_VERSION = '0.21.0-ux6-state-reconnect'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -342,6 +343,7 @@ async function refreshFiles(nextFiles) {
       : 'JavaScript preflight fallback'
     resetQcStateAfterInputsChange()
     applyPendingStateConfig()
+    if (state.loadedStateManifest) state.projectMessage = reconnectMessage()
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
   } finally {
@@ -563,14 +565,19 @@ function historyStatePayload(workflow) {
 }
 
 function resolveSavedFileRef(reference) {
-  if (!reference) return ''
-  const exact = state.records.find((record) =>
-    (record.relativePath || record.name) === reference.relativePath &&
-    Number(record.size) === Number(reference.size)
-  )
-  if (exact) return exact.id
-  const candidates = state.records.filter((record) => record.name === reference.name && Number(record.size) === Number(reference.size))
-  return candidates.length === 1 ? candidates[0].id : ''
+  return matchSavedReference(reference, state.records)?.id || ''
+}
+
+function stateReconnectStatus() {
+  return matchSavedFiles(state.loadedStateManifest, state.records)
+}
+
+function reconnectMessage() {
+  const report = stateReconnectStatus()
+  if (!report.expected) return 'Loaded analysis settings. This state does not reference any cohort files.'
+  if (!report.matched) return `Loaded ${report.expected.toLocaleString()} file references. Select the original project folder once to reconnect local files. The state JSON does not contain raw data.`
+  const gaps = report.missing.length + report.ambiguous.length
+  return `${report.matched.toLocaleString()} of ${report.expected.toLocaleString()} saved files reconnected. ${gaps ? `${report.missing.length.toLocaleString()} missing, ${report.ambiguous.length.toLocaleString()} ambiguous.` : 'All saved file references are connected.'}`
 }
 
 function applyConfigSnapshot(configs) {
@@ -629,11 +636,7 @@ async function loadApplicationState(file) {
     state.compareResult = null
     state.longitudinalResult = null
     state.hitResult = null
-    const expected = state.loadedStateManifest.length
-    const selected = state.records.length
-    state.projectMessage = expected
-      ? `Loaded settings for ${expected.toLocaleString()} referenced files. ${selected ? 'Current local files were matched where possible.' : 'Select the same local files or folder to reactivate analysis. No raw data were stored in the state file.'}`
-      : 'Loaded application settings. This state does not contain raw cohort files.'
+    state.projectMessage = reconnectMessage()
     state.tab = 'project'
   } catch (error) {
     state.error = `Load state: ${error instanceof Error ? error.message : String(error)}`
@@ -823,6 +826,8 @@ function projectView() {
   const recognized = recognizedCount()
   const counts = modalityCounts()
   const expected = state.loadedStateManifest?.length || 0
+  const reconnect = expected ? stateReconnectStatus() : null
+  const remaining = reconnect ? reconnect.missing.length + reconnect.ambiguous.length : 0
   const status = state.records.length === 0
     ? 'No files selected'
     : recognized === state.records.length
@@ -845,12 +850,19 @@ function projectView() {
       </div>
     </section>
     ${state.projectMessage ? `<div class="notice-banner" role="status"><strong>Project state</strong><span>${escapeHtml(state.projectMessage)}</span></div>` : ''}
+    ${reconnect ? `<section class="state-reconnect-panel" aria-label="Saved project files">
+      <div><strong>Saved file references: ${reconnect.expected.toLocaleString()}</strong>
+        <span>Reconnected: ${reconnect.matched.toLocaleString()} · Missing: ${reconnect.missing.length.toLocaleString()} · Ambiguous: ${reconnect.ambiguous.length.toLocaleString()}</span>
+        <small>For security, a portable state cannot open local paths. Select the project folder to grant read access. Files remain on this device.</small></div>
+      ${remaining ? '<button id="reconnect-state-folder" class="primary-button" type="button">Reconnect project folder</button>' : '<span class="tag success">All state files matched</span>'}
+      ${reconnect.ambiguous.length ? `<small class="state-reconnect-warning">Duplicate names and sizes need unique relative paths. Select a parent folder that includes the original subfolders.</small>` : ''}
+    </section>` : ''}
     ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
     <section class="summary-grid" aria-label="Project summary">
       ${summaryCard('Selected files', String(state.records.length), status)}
       ${summaryCard('Local data', humanBytes(totalBytes()), 'Referenced from this device')}
       ${summaryCard('Detected types', String(counts.length), 'Using 4C filename conventions')}
-      ${summaryCard('Processing', state.busy ? 'Checking…' : 'Ready', expected && !state.records.length ? `${expected.toLocaleString()} files referenced by loaded state` : 'Preflight runs in a Web Worker')}
+      ${summaryCard('Processing', state.busy ? 'Checking…' : 'Ready', reconnect ? `${reconnect.matched.toLocaleString()}/${expected.toLocaleString()} state files matched` : 'Preflight runs in a Web Worker')}
     </section>
     ${counts.length ? `<section class="card"><div class="card-heading"><div><h3>Detected data</h3><p>Review the automatic classification before you configure an analysis.</p></div></div><div class="modality-list">${counts.map(([label,count]) => `<div class="modality-pill"><span>${escapeHtml(label)}</span><strong>${count}</strong></div>`).join('')}</div></section>` : ''}
     <section id="input-drop-zone" class="card table-card input-drop-zone" aria-label="Input inventory drop zone">
@@ -2421,6 +2433,7 @@ function bindProjectEvents() {
   const dropZone = document.querySelector('#input-drop-zone')
   document.querySelector('#select-files')?.addEventListener('click', () => fileInput.click())
   document.querySelector('#select-folder')?.addEventListener('click', () => folderInput.click())
+  document.querySelector('#reconnect-state-folder')?.addEventListener('click', () => folderInput.click())
   document.querySelector('#load-state')?.addEventListener('click', () => stateInput.click())
   document.querySelector('#save-state')?.addEventListener('click', () => void saveApplicationState())
   fileInput?.addEventListener('change', (event) => addFiles(event.currentTarget.files))

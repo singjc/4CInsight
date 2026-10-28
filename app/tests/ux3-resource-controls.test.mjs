@@ -63,7 +63,7 @@ test('resource preferences persist independently and do not claim native RAM acc
   assert.match(main, /neither|Neither/) // browser memory is not free physical RAM
   assert.match(main, /id="save-resources"/)
   assert.match(main, /id="stop-science-work"/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-ux5-unlimited-inputs/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-ux6-state-reconnect/)
 })
 
 test('completed science runs release WASM memory and History avoids duplicate JSON clones', () => {
