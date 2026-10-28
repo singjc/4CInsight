@@ -1,6 +1,8 @@
 import { classifyInputFilename } from './file-classifier.js'
+import { checkInputBudget, DEFAULT_RESOURCES } from './resource-controls.js'
 
 let wasmModulePromise = null
+let activeResources = DEFAULT_RESOURCES
 
 async function loadWasm() {
   if (!wasmModulePromise) {
@@ -37,6 +39,7 @@ function postProgress(requestId, completed, total, message) {
 }
 
 async function wasmBytes(file) {
+  checkInputBudget(file, activeResources)
   const buffer = await file.arrayBuffer()
   return new Uint8Array(buffer)
 }
@@ -338,6 +341,7 @@ self.addEventListener('message', async (event) => {
   if (!request?.type || !request.requestId) return
 
   try {
+    activeResources = request.resourceSettings || DEFAULT_RESOURCES
     if (request.type === 'preflight') {
       await handlePreflight(request)
       return

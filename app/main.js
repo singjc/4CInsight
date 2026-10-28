@@ -1,5 +1,6 @@
 import { saveTextFile } from './save.js'
 import { methodDocs } from './docs-content.js'
+import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints } from './resource-controls.js'
 import {
   clearHistoryEntries,
   deleteHistoryEntry,
@@ -9,7 +10,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux2'
+const APP_VERSION = '0.21.0-ux3-resources'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -21,6 +22,7 @@ const tabs = [
   ['hits', 'Significant Hits', '5'],
   ['history', 'History', '6'],
   ['docs', 'Docs', '?'],
+  ['settings', 'Settings', '⚙'],
 ]
 
 const geneMetrics = [
@@ -64,14 +66,13 @@ const state = {
   historyLoaded: false,
   historyBusy: false,
   historyMessage: '',
-  historySelectedId: '',
-  historySelectedSnapshot: null,
   storageEstimate: null,
   loadedStateManifest: null,
   pendingStateConfig: null,
   docsQuery: '',
   globalThresholds: { fdr: 0.05, absLog2Fc: 1.0 },
   systemInfo: null,
+  resources: loadResourceSettings(),
   hitConfig: {
     maxAnalysisFeatures: 500,
     maxHeatmapFeatures: 80,
@@ -123,30 +124,59 @@ const state = {
 }
 
 const pending = new Map()
-const worker = new Worker(new URL('./analysis-worker.js', import.meta.url), { type: 'module' })
-worker.addEventListener('message', (event) => {
-  const request = pending.get(event.data.requestId)
-  if (!request) return
-  if (event.data.type === 'analysis-progress') {
-    request.onProgress?.(event.data)
-    return
-  }
-  pending.delete(event.data.requestId)
-  event.data.type === 'worker-error'
-    ? request.reject(new Error(event.data.message))
-    : request.resolve(event.data)
-})
-worker.addEventListener('error', (event) => {
-  const error = new Error(event.message || '4C Insight analysis worker failed')
+let worker = null
+function attachScienceWorker() {
+  const current = new Worker(new URL('./analysis-worker.js', import.meta.url), { type: 'module' })
+  current.addEventListener('message', (event) => {
+    if (current !== worker) return
+    const request = pending.get(event.data.requestId)
+    if (!request) return
+    if (event.data.type === 'analysis-progress') {
+      request.onProgress?.(event.data)
+      return
+    }
+    pending.delete(event.data.requestId)
+    event.data.type === 'worker-error'
+      ? request.reject(new Error(event.data.message))
+      : request.resolve(event.data)
+    if (request.type.startsWith('run-') && state.resources.recycleWorker && !pending.size) {
+      // Termination releases the WASM linear-memory high-water mark after a run.
+      replaceScienceWorker()
+    }
+  })
+  current.addEventListener('error', (event) => {
+    if (current !== worker) return
+    const error = new Error(event.message || '4C Insight analysis worker failed')
+    for (const request of pending.values()) request.reject(error)
+    pending.clear()
+    current.terminate()
+    worker = null // Recreate lazily on the next user request; avoid a crash/restart loop.
+    state.error = error.message
+    render()
+  })
+  return current
+}
+function replaceScienceWorker() {
+  worker?.terminate()
+  worker = null // Keep no worker alive when idle. The next request creates one.
+}
+function stopScienceWork() {
+  if (!pending.size) return
+  const error = new Error('Operation stopped. The science worker and its WASM memory were released.')
   for (const request of pending.values()) request.reject(error)
   pending.clear()
-})
+  replaceScienceWorker()
+  state.projectMessage = 'The scientific operation was stopped. Selected local files are unchanged.'
+  render()
+}
+worker = attachScienceWorker()
 
 function workerRequest(type, payload = {}, onProgress = null) {
   const requestId = crypto.randomUUID()
+  if (!worker) worker = attachScienceWorker()
   return new Promise((resolve, reject) => {
-    pending.set(requestId, { resolve, reject, onProgress })
-    worker.postMessage({ type, requestId, ...payload })
+    pending.set(requestId, { resolve, reject, onProgress, type })
+    worker.postMessage({ type, requestId, resourceSettings: state.resources, ...payload })
   })
 }
 
@@ -186,6 +216,15 @@ function percent(part, total) {
   return `${((part / total) * 100).toFixed(1)}%`
 }
 
+function loadResourceSettings() {
+  try { return normalizeResources(JSON.parse(localStorage.getItem('4c-insight-resources') || '{}')) }
+  catch { return { ...DEFAULT_RESOURCES } }
+}
+function persistResourceSettings() {
+  try { localStorage.setItem('4c-insight-resources', JSON.stringify(state.resources)) }
+  catch { state.error = 'This browser cannot save resource settings. They apply only until the page is closed.' }
+}
+
 function detectSystemInfo() {
   const platform = navigator.userAgentData?.platform || navigator.platform || 'Unknown OS'
   const threads = Number(navigator.hardwareConcurrency || 0)
@@ -208,8 +247,9 @@ function renderSystemInfo() {
   if (!chip) return
   const info = state.systemInfo
   const threadText = info.threads ? `${info.threads} logical threads` : 'threads unavailable'
-  chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(info.memory)} · ${escapeHtml(threadText)} · WASM science: 1 worker</small></span>`
-  chip.title = `Local execution · ${info.crossOriginIsolated ? 'cross-origin isolated' : 'single-worker fallback'} · browser-reported system information`
+  const memoryText = state.resources.physicalRamGiB ? `${state.resources.physicalRamGiB} GiB RAM (manual)` : info.memory
+  chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(memoryText)} · ${escapeHtml(threadText)} · WASM science: 1 worker · Settings</small></span>`
+  chip.title = `Open Settings for local resource limits · Local execution · ${info.crossOriginIsolated ? 'cross-origin isolated' : 'single-worker fallback'} · browser-reported system information`
 }
 
 function fileKey(file) {
@@ -497,12 +537,12 @@ function applicationStatePayload() {
 
 function historyStatePayload(workflow) {
   const results = {}
-  if (workflow === 'explore-qc-expression') results.qc = cloneJson(state.qcResult)
-  if (workflow === 'compare-groups-expression') results.compare = cloneJson(state.compareResult)
-  if (workflow === 'longitudinal-patient-signature-expression') results.longitudinal = cloneJson(state.longitudinalResult)
+  if (workflow === 'explore-qc-expression') results.qc = state.qcResult
+  if (workflow === 'compare-groups-expression') results.compare = state.compareResult
+  if (workflow === 'longitudinal-patient-signature-expression') results.longitudinal = state.longitudinalResult
   if (workflow === 'significant-hit-structure-expression') {
-    results.compare = cloneJson(state.compareResult)
-    results.hits = cloneJson(state.hitResult)
+    results.compare = state.compareResult
+    results.hits = state.hitResult
   }
   return {
     product: '4C Insight',
@@ -676,8 +716,6 @@ async function openHistoryEntry(id) {
   try {
     const snapshot = await loadHistorySnapshot(id)
     if (!snapshot) throw new Error('History snapshot is no longer available.')
-    state.historySelectedId = id
-    state.historySelectedSnapshot = snapshot
     restoreHistorySnapshot(snapshot)
   } catch (error) {
     state.historyMessage = `History entry could not be opened: ${error instanceof Error ? error.message : String(error)}`
@@ -772,7 +810,7 @@ function renderNav() {
 
   document.querySelector('#sidebar-status').innerHTML = `
     <span class="status-dot ${state.wasmReady ? 'ok' : ''}"></span>
-    <div><strong>${escapeHtml(state.engine)}</strong><span>${crossOriginIsolated ? 'Cross-origin isolated' : 'Single-worker compatible'}</span></div>`
+    <div><strong>${escapeHtml(state.engine)}</strong><span>${crossOriginIsolated ? 'Cross-origin isolated' : 'Single-worker compatible'}</span>${pending.size ? '<button id="stop-science-work" class="danger-text-button">Stop operation</button>' : ''}</div>`
 }
 
 function summaryCard(label, value, detail) {
@@ -989,12 +1027,23 @@ function plotLegend(plotId, caseLabel, controlLabel) {
   </div>`
 }
 
-function paddedExtent(values) {
-  let min = Math.min(...values)
-  let max = Math.max(...values)
+function paddedBounds(min, max) {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return [-1, 1]
   if (min === max) { min -= 1; max += 1 }
   const padding = (max - min) * 0.08
   return [min - padding, max + padding]
+}
+function paddedExtent(values) {
+  // No Math.min(...largeArray). Huge restored results can exceed call limits.
+  let min = Infinity
+  let max = -Infinity
+  for (const value of values) {
+    if (Number.isFinite(value)) {
+      if (value < min) min = value
+      if (value > max) max = value
+    }
+  }
+  return paddedBounds(min, max)
 }
 
 function tickValues(min, max, count = 5) {
@@ -1048,16 +1097,23 @@ function volcanoSvg(analysis, plotId) {
     x: Number(row.beta_group),
     y: -Math.log10(Math.max(Number(row.q_value), 1e-300)),
   }))
-  const xs = points.map((point) => point.x)
-  const ys = points.map((point) => point.y)
-  const [rawMinX, rawMaxX] = paddedExtent([...xs, -fc, fc])
+  let lowX = -fc
+  let highX = fc
+  let highY = -Math.log10(fdr)
+  for (const point of points) {
+    if (point.x < lowX) lowX = point.x
+    if (point.x > highX) highX = point.x
+    if (point.y > highY) highY = point.y
+  }
+  const [rawMinX, rawMaxX] = paddedBounds(lowX, highX)
   const minX = Math.min(rawMinX, -Math.max(0.5, fc * 1.15))
   const maxX = Math.max(rawMaxX, Math.max(0.5, fc * 1.15))
   const minY = 0
-  const maxY = Math.max(1, paddedExtent([...ys, -Math.log10(fdr)])[1])
+  const maxY = Math.max(1, paddedBounds(0, highY)[1])
   const sx = (x) => pad + ((x - minX) / (maxX - minX)) * (width - pad * 2)
   const sy = (y) => height - pad - ((y - minY) / (maxY - minY)) * (height - pad * 2)
-  const marks = points.map((point, index) => {
+  const displayedPoints = thinPlotPoints(points, state.resources.maxPlotPoints)
+  const marks = displayedPoints.map((point, index) => {
     const significant = point.row.q_value <= fdr && Math.abs(point.row.beta_group) >= fc
     const regulation = significant ? (point.row.beta_group >= 0 ? 'up' : 'down') : 'neutral'
     const klass = regulation === 'up' ? 'volcano-up' : regulation === 'down' ? 'volcano-down' : 'volcano-neutral'
@@ -1075,6 +1131,7 @@ function volcanoSvg(analysis, plotId) {
       <text class="plot-label" x="${width/2}" y="${height-10}" text-anchor="middle">Model log2 fold change</text>
       <text class="plot-label" x="16" y="${height/2}" text-anchor="middle" transform="rotate(-90 16 ${height/2})">−log10(BH q-value)</text>
     </svg></div>
+    ${points.length > displayedPoints.length ? `<p class="table-note">Showing ${displayedPoints.length.toLocaleString()} of ${points.length.toLocaleString()} points to limit browser memory. All tested features remain in the searchable table and export.</p>` : ''}
     <div class="plot-legend" aria-label="Volcano classification"><span><i class="legend-dot volcano-up"></i>Up-regulated</span><span><i class="legend-dot volcano-down"></i>Down-regulated</span><span><i class="legend-dot volcano-neutral"></i>Below threshold</span></div>
   </div>`
 }
@@ -1890,6 +1947,53 @@ function historyView() {
     </section>`
 }
 
+function settingsView() {
+  const r = state.resources
+  const info = state.systemInfo || detectSystemInfo()
+  const suggested = info.threads ? suggestedScienceThreads(info.threads, r) : 1
+  return `<section class="page-heading"><div><span class="eyebrow">Global settings</span><h2>System resource controls</h2><p>These settings apply to this browser profile. They are independent of saved cohort states. Changes to input limits affect new operations.</p></div><div class="local-card"><strong>Science execution</strong><span>Current browser WASM: one worker, not Rayon</span></div></section>
+    ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
+    <section class="card"><div class="card-heading"><div><h3>CPU and worker use</h3><p>Reserve part of the available logical CPU capacity for other work.</p></div></div>
+      <div class="form-grid resource-grid">
+        <label><span>CPU use target (%)</span><input id="resource-cpu" type="number" min="10" max="90" step="5" value="${r.cpuPercent}" /></label>
+        <label><span>Maximum science threads (future PX1)</span><input id="resource-threads" type="number" min="1" max="32" step="1" value="${r.maxThreads}" /></label>
+      </div>
+      <p class="method-note">${info.threads ? `${info.threads} browser-reported logical threads; planned PX1 ceiling: ${suggested} threads.` : 'Logical CPU count is unavailable.'} Current single-worker WASM cannot use this thread budget. A separate threaded-WASM build is required. These controls do not set a system CPU quota.</p>
+    </section>
+    <section class="card"><div class="card-heading"><div><h3>Memory and input safeguards</h3><p>Large files can expand significantly when decompressed and modeled in WASM. These are early input checks, not a hard RAM limit.</p></div></div>
+      <div class="form-grid resource-grid">
+        <label><span>Maximum input file (MiB)</span><input id="resource-file" type="number" min="16" max="4096" step="16" value="${r.maxFileMiB}" /></label>
+        <label><span>Input working budget (GiB)</span><input id="resource-budget" type="number" min="0.25" max="16" step="0.25" value="${r.workingBudgetGiB}" /></label>
+        <label><span>Physical RAM (GiB, optional manual entry)</span><input id="resource-ram" type="number" min="0" max="2048" step="0.5" value="${r.physicalRamGiB}" /></label>
+        <label><span>Maximum volcano points drawn</span><input id="resource-points" type="number" min="200" max="6000" step="200" value="${r.maxPlotPoints}" /></label>
+      </div>
+      <p class="method-note">Browser report: ${escapeHtml(info.memory)}. ${r.physicalRamGiB ? `Manually reported system RAM: ${r.physicalRamGiB} GiB (not independently verified).` : 'To record physical RAM, enter it manually.'} Neither number measures currently free RAM. The input working budget only checks file input copies; the scientific model can use more.</p>
+      <label class="resource-check"><input id="resource-recycle" type="checkbox" ${r.recycleWorker ? 'checked' : ''}/> <span>Release the science worker and WASM memory after each completed analysis (recommended).</span></label>
+      <div class="button-row resource-actions"><button id="save-resources" class="primary-button">Apply settings</button><button id="reset-resources" class="secondary-button">Reset defaults</button></div>
+    </section>`
+}
+function bindSettingsEvents() {
+  document.querySelector('#save-resources')?.addEventListener('click', () => {
+    state.resources = normalizeResources({
+      cpuPercent: document.querySelector('#resource-cpu')?.value,
+      maxThreads: document.querySelector('#resource-threads')?.value,
+      maxFileMiB: document.querySelector('#resource-file')?.value,
+      workingBudgetGiB: document.querySelector('#resource-budget')?.value,
+      physicalRamGiB: document.querySelector('#resource-ram')?.value,
+      maxPlotPoints: document.querySelector('#resource-points')?.value,
+      recycleWorker: Boolean(document.querySelector('#resource-recycle')?.checked),
+    })
+    persistResourceSettings()
+    state.error = null
+    render()
+  })
+  document.querySelector('#reset-resources')?.addEventListener('click', () => {
+    state.resources = { ...DEFAULT_RESOURCES }
+    persistResourceSettings()
+    render()
+  })
+}
+
 function docsView() {
   const references = methodDocs.reduce((total, section) => total + (section.references || []).length, 0)
   return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods, assumptions, and references</h2><p>Search the methods that are implemented in 4C Insight. Each section states what the application does, what it does not claim, and the literature that supports the method.</p></div><div class="local-card"><strong>Literature-backed methods</strong><span>${methodDocs.length} sections · ${references} linked references</span></div></section>
@@ -2386,6 +2490,7 @@ function render() {
     hits: significantHitsView,
     history: historyView,
     docs: docsView,
+    settings: settingsView,
   }
   main.innerHTML = (viewFactories[state.tab] || projectView)()
   if (state.tab === 'project') bindProjectEvents()
@@ -2398,15 +2503,18 @@ function render() {
     if (!state.historyLoaded && !state.historyBusy) void refreshHistory()
   }
   if (state.tab === 'docs') bindDocsEvents()
+  if (state.tab === 'settings') bindSettingsEvents()
   enhanceTables()
   renderSystemInfo()
+  document.querySelector('#system-chip')?.addEventListener('click', () => { state.tab = 'settings'; render() })
+  document.querySelector('#stop-science-work')?.addEventListener('click', stopScienceWork)
 }
 
 async function registerIsolationServiceWorker() {
   if (!('serviceWorker' in navigator) || !window.isSecureContext) return
   try {
     const workerUrl = new URL('./coi-serviceworker.js', window.location.href)
-    workerUrl.searchParams.set('v', '0.21.0-ux2')
+    workerUrl.searchParams.set('v', APP_VERSION)
     await navigator.serviceWorker.register(workerUrl.href, { scope: new URL('./', workerUrl).pathname })
     await navigator.serviceWorker.ready
     if (!navigator.serviceWorker.controller && sessionStorage.getItem('4c-insight-coi-reload') !== '1') {
