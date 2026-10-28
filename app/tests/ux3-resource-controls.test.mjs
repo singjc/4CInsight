@@ -55,7 +55,7 @@ test('resource page persists a separate browser-level policy without claiming OS
   assert.match(main, /Neither number measures currently free RAM/)
   assert.match(main, /id="save-resources"/)
   assert.match(main, /id="stop-science-work"/)
-  assert.match(html, /0\.21\.0-ux3-resources/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-ux\d+-[a-z-]+/)
 })
 
 test('completed science runs can release WASM memory; history avoids duplicate JSON clones', () => {

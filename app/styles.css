@@ -25,14 +25,13 @@ button { cursor: pointer; }
 button:focus-visible, input:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offset: 2px; }
 button:disabled { cursor: not-allowed; opacity: 0.52; }
 .app-shell { min-height: 100vh; }
-.topbar { height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 30px; background: #111827; color: #fff; border-bottom: 1px solid rgba(255,255,255,.08); }
-.brand-block { display: flex; align-items: center; gap: 14px; }
-.brand-mark { width: 42px; height: 42px; border-radius: 11px; display: grid; place-items: center; background: #fff; color: #18295f; font-weight: 800; letter-spacing: -.04em; }
-.brand-block h1 { font-size: 20px; line-height: 1.1; margin: 0 0 4px; letter-spacing: -.015em; }
-.brand-block p { margin: 0; color: #aeb8cc; font-size: 13px; }
+.topbar { height: 96px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 30px; background: #111827; color: #fff; border-bottom: 1px solid rgba(255,255,255,.08); }
+.brand-block { display: flex; align-items: center; min-width: 0; }
+.brand-heading { margin: 0; line-height: 0; }
+.brand-logo { display: block; width: auto; height: 80px; border-radius: 8px; background: #fff; object-fit: contain; }
 .privacy-chip { display: flex; align-items: center; gap: 8px; padding: 8px 11px; border-radius: 999px; background: rgba(255,255,255,.07); color: #e7ebf3; font-size: 12.5px; font-weight: 600; }
 .privacy-dot { width: 8px; height: 8px; border-radius: 999px; background: #52d7a5; box-shadow: 0 0 0 4px rgba(82,215,165,.12); }
-.workspace { display: grid; grid-template-columns: 238px minmax(0,1fr); min-height: calc(100vh - 76px); }
+.workspace { display: grid; grid-template-columns: 238px minmax(0,1fr); min-height: calc(100vh - 96px); }
 .sidebar { background: #fff; border-right: 1px solid var(--line); padding: 24px 14px 18px; display: flex; flex-direction: column; }
 .sidebar-label { padding: 0 12px 10px; color: #98a2b3; font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
 .workflow-nav { display: grid; gap: 4px; }
@@ -124,8 +123,8 @@ tr:last-child td { border-bottom: 0; }
   .summary-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 @media (max-width: 720px) {
-  .topbar { height: auto; min-height: 70px; padding: 12px 16px; }
-  .brand-block p { display: none; }
+  .topbar { height: auto; min-height: 80px; padding: 8px 12px; }
+  .brand-logo { height: 64px; }
   .privacy-chip { font-size: 0; padding: 9px; }
   .workspace { display: block; }
   .sidebar { position: sticky; top: 0; z-index: 10; border-right: 0; border-bottom: 1px solid var(--line); padding: 7px 10px; overflow-x: auto; }

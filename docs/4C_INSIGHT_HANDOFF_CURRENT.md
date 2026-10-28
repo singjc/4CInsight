@@ -2,14 +2,35 @@
 
 Date: 2026-10-28
 Scientific engine: v0.21.0 (unchanged)
-Most recent browser milestone: UX3 resource safeguards (source overlay; 29/29 tests)
-Deployment: NOT VERIFIED — do not claim Pages is updated
+Most recent browser milestone: UX4 logo branding (source overlay; 32/32 JS tests pass)
+Deployment: UX3 pushed to main at a26ff40; UX4 not deployed. Live Pages status not independently checked
 Remote: `singjc/4CInsight`
 Pages: `https://singjc.github.io/4CInsight/`
 
+## UX4: Brand SVG integration — 2026-10-28
+
+Status: **IMPLEMENTED IN LOCAL SOURCE OVERLAY; 32/32 JS TESTS PASS; NOT YET COMMITTED OR DEPLOYED**.
+Baseline: user's confirmed `main` commit `a26ff40` (UX3). Scientific engine remains v0.21.0.
+
+- Move the exact existing root SVG `4C_Insight_logo_practical_trace_balanced_tight_margin.svg` into the published static app as `app/assets/4c-insight-logo.svg`. Preserve the SVG bytes; Git recognizes a rename after staging.
+- The existing SVG contains the red 4, multi-colour C/human graphic, and the text Insight. Replace both the temporary 4C square and the visible 4C Insight title/subtitle with the full graphic.
+- Use a semantic `h1` containing an image with `alt="4C Insight"`. This provides the accessible page title without duplicate visible text.
+- Preserve the system information chip. Set desktop header height to 96 px with an 80 px logo; mobile logo height is 64 px. Update the workspace minimum height to match the changed desktop header.
+- Use a relative SVG URL for GitHub Pages subpath routing. Change the CSS/JS cache query to `0.21.0-ux4-branding`.
+- No Rust/WASM changes. Normal Pages deployment will still run the existing WASM build pipeline.
+
+Validation: `node --test app/tests/*.test.mjs` **32/32 PASS**; JavaScript syntax checks PASS; verified 100% Git SVG rename with clean UX3 dry-run installer. Interactive browser visual review and Pages deployment remain **NOT VERIFIED**. Test file: `app/tests/ux4-branding.test.mjs`.
+
+Next steps:
+1. Apply UX4 only to the UX3 checkout at commit `a26ff40` or an equivalent clean tree. Verify the old SVG exists and the new path does not before the move.
+2. Check image dimensions, clipping, contrast, layout at desktop and <=720 px widths, and system chip alignment in the browser.
+3. Check that `https://singjc.github.io/4CInsight/assets/4c-insight-logo.svg` loads without a 404 after Pages deployment.
+4. Stage both the deleted original and new SVG to record the rename; run `git diff --cached --check`; commit and push to `main`.
+5. Continue PX1 threaded WASM only after browser resource behaviour is stable; make no claims of Rayon in UX4.
+
 ## UX3: Browser resource safeguards — 2026-10-28
 
-Status: **IMPLEMENTED IN SOURCE OVERLAY, AUTOMATED TESTS PASS, USER DEPLOYMENT NOT VERIFIED**.
+Status: **UX3 committed and pushed by user at a26ff40. Live Pages deployment not independently checked.**
 Scientific engine: unchanged **v0.21.0**. No Rust/WASM science changes.
 Browser shell: `0.21.0-ux3-resources`.
 
@@ -386,3 +407,10 @@ Test:
 10. History remains functional
 11. Docs search and reference links
 12. stale-bundle protection after Pages redeploy
+
+## UX4 installation recovery — 2026-10-28
+- The user moved the SVG into app/assets manually.
+- Commit 99c382b already contains the SVG.
+- The original UX4 installer did not support this state.
+- Remaining UX4 source files were installed without moving the SVG again.
+- Browser smoke test and Pages deployment still require verification.
