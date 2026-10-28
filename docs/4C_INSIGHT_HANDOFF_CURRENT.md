@@ -414,3 +414,42 @@ Test:
 - The original UX4 installer did not support this state.
 - Remaining UX4 source files were installed without moving the SVG again.
 - Browser smoke test and Pages deployment still require verification.
+
+## UX5: Unlimited scientific input size and truthful browser memory — 2026-10-28
+
+Status: **UX5 source patch prepared; browser smoke test and real-cohort run pending.**
+Scientific engine: **v0.21.0 unchanged**. Browser shell: `0.21.0-ux5-unlimited-inputs`.
+User screenshots verified UX4 branding, UX3 Settings, and a transcript `20260820_merged_transcript_expression.tsv` rejected by the 1.5 GiB estimated-copy budget. That rejection is an avoidable UX3 policy limit; it is NOT proof the file cannot run in the browser.
+
+### Code changes
+
+- Delete the UX3 `maxFileMiB` maximum input-file setting and the `workingBudgetGiB` early-rejection setting. A file is no longer blocked because of byte size or an inferred 4x copy factor.
+- `validateLocalInputFile()` checks only valid `File.size` metadata; it has **no size cutoff**. The Web Worker then reads the file normally with `File.arrayBuffer()`. This does NOT make the read streaming or prevent WASM out-of-memory failures.
+- Previously saved browser Settings with `maxFileMiB` and `workingBudgetGiB` are normalized and those retired keys are silently discarded. The global CPU planning budget, optional manual physical RAM, maximum volcano points, and post-run worker termination are retained.
+- System chip distinguishes browser-reported **approximate device memory class**, **JavaScript heap limit**, **manual total RAM**, and **system RAM unavailable**. None is free Linux RAM.
+- Settings includes a user-triggered **Measure app memory** button. If supported and cross-origin isolated, `performance.measureUserAgentSpecificMemory()` estimates page and worker memory. Otherwise it may report `performance.memory.usedJSHeapSize` as *JS heap only*. When unavailable (e.g. Firefox), it reports that limitation without inventing a reading. This is not native RAM monitoring.
+- `sysinfo` cannot provide native Linux system information to the current sandboxed GitHub Pages browser process; it would require a distinct native desktop runtime or an explicitly installed local companion. Do not claim an OS probe exists in this browser build.
+- Retain bounded volcano *rendering* (default 2,000 points) to avoid DOM overload. It does not drop features from the model, searchable differential tables, or exports.
+- Portable **state JSON** has an existing separate 10 MiB loader check. This is unrelated to scientific expression input and is not changed in UX5.
+
+### Verification
+
+- JS syntax checked for modified modules.
+- `node --test app/tests/*.test.mjs`: **34/34 PASS** in the reconstructed UX4 tree.
+- A real Linux/Firefox large-input run and in-browser memory measurement are **NOT** verified. No memory-safe streaming parser or threaded-WASM pool is implemented.
+
+### Next steps
+
+1. Apply UX5 patch to the existing UX4 checkout, without moving the already committed SVG.
+2. Confirm the previous transcript input-warning banner no longer appears after loading/reselecting files; run a gene/transcript comparison with the intended large cohort.
+3. In Firefox Settings, expect physical RAM to remain browser-unavailable; manual 32 GiB appears as manual and the app-memory button may report unavailable. Test the memory sampler in Chromium only where available.
+4. Use browser process monitoring to record peak RSS, worker lifetime, execution time and failure stage. No fixed file limit means allocation pressure can still crash browser processes.
+5. Investigate streaming/chunked Rust/WASM input and transient copies when a real-cohort run is too large; keep scientific model and parity unchanged.
+6. Implement PX1 threaded-WASM only after independent single-worker performance and parity testing.
+
+### References
+
+- MDN `Navigator.deviceMemory`: https://developer.mozilla.org/en-US/docs/Web/API/Navigator/deviceMemory
+- MDN `Performance.memory`: https://developer.mozilla.org/en-US/docs/Web/API/Performance/memory
+- MDN `Performance.measureUserAgentSpecificMemory`: https://developer.mozilla.org/en-US/docs/Web/API/Performance/measureUserAgentSpecificMemory
+- Rust sysinfo: https://docs.rs/sysinfo/latest/sysinfo/

@@ -55,7 +55,7 @@ test('sidebar is fixed during desktop page scrolling and system info is browser-
   assert.match(styles, /@media \(min-width: 721px\)[\s\S]*\.sidebar \{ position: sticky; top: 0; height: 100vh;/)
   assert.match(main, /navigator\.hardwareConcurrency/)
   assert.match(main, /navigator\.deviceMemory/)
-  assert.match(main, /Memory not exposed/)
+  assert.match(main, /System RAM not exposed by browser/)
   assert.doesNotMatch(main, /Runs on this device/)
 })
 

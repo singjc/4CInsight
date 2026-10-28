@@ -1,6 +1,6 @@
 import { saveTextFile } from './save.js'
 import { methodDocs } from './docs-content.js'
-import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints } from './resource-controls.js'
+import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory } from './resource-controls.js'
 import {
   clearHistoryEntries,
   deleteHistoryEntry,
@@ -10,7 +10,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux3-resources'
+const APP_VERSION = '0.21.0-ux5-unlimited-inputs'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -72,6 +72,8 @@ const state = {
   docsQuery: '',
   globalThresholds: { fdr: 0.05, absLog2Fc: 1.0 },
   systemInfo: null,
+  appMemorySample: null,
+  appMemoryBusy: false,
   resources: loadResourceSettings(),
   hitConfig: {
     maxAnalysisFeatures: 500,
@@ -230,9 +232,9 @@ function detectSystemInfo() {
   const threads = Number(navigator.hardwareConcurrency || 0)
   const deviceMemory = Number(navigator.deviceMemory || 0)
   const heapLimit = Number(globalThis.performance?.memory?.jsHeapSizeLimit || 0)
-  let memory = 'Memory not exposed'
-  if (deviceMemory > 0) memory = `≈${formatNumber(deviceMemory, 1)} GiB device memory`
-  else if (heapLimit > 0) memory = `${humanBytes(heapLimit)} JS heap limit`
+  let memory = 'System RAM not exposed by browser'
+  if (deviceMemory > 0) memory = `≈${formatNumber(deviceMemory, 1)} GiB device memory class (approximate)`
+  else if (heapLimit > 0) memory = `${humanBytes(heapLimit)} JS heap limit (not RAM)`
   return {
     platform,
     threads,
@@ -1951,7 +1953,11 @@ function settingsView() {
   const r = state.resources
   const info = state.systemInfo || detectSystemInfo()
   const suggested = info.threads ? suggestedScienceThreads(info.threads, r) : 1
-  return `<section class="page-heading"><div><span class="eyebrow">Global settings</span><h2>System resource controls</h2><p>These settings apply to this browser profile. They are independent of saved cohort states. Changes to input limits affect new operations.</p></div><div class="local-card"><strong>Science execution</strong><span>Current browser WASM: one worker, not Rayon</span></div></section>
+  const sample = state.appMemorySample
+  const sampleText = sample?.available
+    ? `${humanBytes(sample.bytes)} · ${sample.source}`
+    : sample?.source || 'Not measured. Browser support varies.'
+  return `<section class="page-heading"><div><span class="eyebrow">Global settings</span><h2>System resource controls</h2><p>Settings apply to this browser profile, not to saved cohort states. Local scientific input files have no fixed size cap.</p></div><div class="local-card"><strong>Science execution</strong><span>Current browser WASM: one worker, not Rayon</span></div></section>
     ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
     <section class="card"><div class="card-heading"><div><h3>CPU and worker use</h3><p>Reserve part of the available logical CPU capacity for other work.</p></div></div>
       <div class="form-grid resource-grid">
@@ -1960,14 +1966,15 @@ function settingsView() {
       </div>
       <p class="method-note">${info.threads ? `${info.threads} browser-reported logical threads; planned PX1 ceiling: ${suggested} threads.` : 'Logical CPU count is unavailable.'} Current single-worker WASM cannot use this thread budget. A separate threaded-WASM build is required. These controls do not set a system CPU quota.</p>
     </section>
-    <section class="card"><div class="card-heading"><div><h3>Memory and input safeguards</h3><p>Large files can expand significantly when decompressed and modeled in WASM. These are early input checks, not a hard RAM limit.</p></div></div>
+    <section class="card"><div class="card-heading"><div><h3>Memory information and display limits</h3><p>Local input files are never rejected because of their size or an estimated copy budget. Large inputs can still exhaust the browser's WASM memory.</p></div></div>
       <div class="form-grid resource-grid">
-        <label><span>Maximum input file (MiB)</span><input id="resource-file" type="number" min="16" max="4096" step="16" value="${r.maxFileMiB}" /></label>
-        <label><span>Input working budget (GiB)</span><input id="resource-budget" type="number" min="0.25" max="16" step="0.25" value="${r.workingBudgetGiB}" /></label>
         <label><span>Physical RAM (GiB, optional manual entry)</span><input id="resource-ram" type="number" min="0" max="2048" step="0.5" value="${r.physicalRamGiB}" /></label>
         <label><span>Maximum volcano points drawn</span><input id="resource-points" type="number" min="200" max="6000" step="200" value="${r.maxPlotPoints}" /></label>
       </div>
-      <p class="method-note">Browser report: ${escapeHtml(info.memory)}. ${r.physicalRamGiB ? `Manually reported system RAM: ${r.physicalRamGiB} GiB (not independently verified).` : 'To record physical RAM, enter it manually.'} Neither number measures currently free RAM. The input working budget only checks file input copies; the scientific model can use more.</p>
+      <p class="method-note">System RAM: ${escapeHtml(info.memory)}. ${r.physicalRamGiB ? `Manually entered total RAM: ${r.physicalRamGiB} GiB (not independently verified).` : 'Enter total system RAM manually if you want to display it.'} Ordinary web pages, including GitHub Pages, cannot run native sysinfo to read Linux free/total RAM. Neither the manual value nor the browser's memory class measures available RAM.</p>
+      <div class="resource-memory-status" role="status"><strong>Browser application memory</strong><span>${escapeHtml(sampleText)}</span></div>
+      <p class="method-note">When supported, the measurement estimates application memory or the main JavaScript heap only. It is not physical RAM or currently free memory. Firefox may not expose either measurement.</p>
+      <div class="button-row"><button id="measure-app-memory" class="secondary-button" ${state.appMemoryBusy ? 'disabled' : ''}>${state.appMemoryBusy ? 'Measuring…' : 'Measure app memory'}</button></div>
       <label class="resource-check"><input id="resource-recycle" type="checkbox" ${r.recycleWorker ? 'checked' : ''}/> <span>Release the science worker and WASM memory after each completed analysis (recommended).</span></label>
       <div class="button-row resource-actions"><button id="save-resources" class="primary-button">Apply settings</button><button id="reset-resources" class="secondary-button">Reset defaults</button></div>
     </section>`
@@ -1977,8 +1984,6 @@ function bindSettingsEvents() {
     state.resources = normalizeResources({
       cpuPercent: document.querySelector('#resource-cpu')?.value,
       maxThreads: document.querySelector('#resource-threads')?.value,
-      maxFileMiB: document.querySelector('#resource-file')?.value,
-      workingBudgetGiB: document.querySelector('#resource-budget')?.value,
       physicalRamGiB: document.querySelector('#resource-ram')?.value,
       maxPlotPoints: document.querySelector('#resource-points')?.value,
       recycleWorker: Boolean(document.querySelector('#resource-recycle')?.checked),
@@ -1991,6 +1996,17 @@ function bindSettingsEvents() {
     state.resources = { ...DEFAULT_RESOURCES }
     persistResourceSettings()
     render()
+  })
+  document.querySelector('#measure-app-memory')?.addEventListener('click', async () => {
+    if (state.appMemoryBusy) return
+    state.appMemoryBusy = true
+    render()
+    try {
+      state.appMemorySample = await measureAppMemory(globalThis.performance, Boolean(globalThis.crossOriginIsolated))
+    } finally {
+      state.appMemoryBusy = false
+      if (state.tab === 'settings') render()
+    }
   })
 }
 

@@ -404,3 +404,8 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .resource-check { display: flex; align-items: baseline; gap: 10px; margin-top: 18px; font-size: 12px; color: #475467; }
 .resource-actions { margin-top: 18px; }
 @media (max-width: 720px) { .resource-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* UX5: browser memory reading is distinct from system RAM. */
+.resource-memory-status { display: flex; flex-direction: column; gap: 4px; margin: 14px 0 6px; font-size: 12px; }
+.resource-memory-status strong { color: #344054; }
+.resource-memory-status span { color: #667085; }

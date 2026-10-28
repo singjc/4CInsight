@@ -48,3 +48,15 @@ The SVG was committed in 99c382b at app/assets/4c-insight-logo.svg.
 Do not rerun the original UX4 installer.
 The remaining UX4 changes use the existing logo.
 Verify the browser header before deployment.
+
+## UX5: Remove hard local-file thresholds and correct RAM reporting (2026-10-28)
+
+User confirmed UX4 SVG branding and showed UX3 blocking a large transcript TSV because estimated copies exceed the default 1.5 GiB budget. Do not enforce fixed file-size or heuristic input-copy limits: large local cohort inputs are expected.
+
+Prepared UX5 patch (`0.21.0-ux5-unlimited-inputs`) removes both `maxFileMiB` and `workingBudgetGiB` from resource normalization, UI and WASM-worker preflight. Retains basic File metadata validation, CPU settings (still future PX1, not Rayon), optional manual total RAM, plot-point cap, and worker lifecycle cleanup. Existing old Settings are migrated by dropping retired keys.
+
+Added a button to measure app memory only where APIs support it. Distinguish app estimate, JS heap usage, approximate browser device-memory class, manual total RAM and system RAM unavailable. Web pages cannot call Linux sysinfo for physical/free RAM. Firefox may not expose memory APIs. No native companion added.
+
+Code tests: 34/34 JS PASS on reconstructed UX4 tree; live full-cohort load/browser memory use NOT tested. The existing 10 MiB limit on separate portable state JSON remains; scientific expression files have no arbitrary threshold. `File.arrayBuffer()` still loads the full file, so large inputs can exhaust browser/WASM memory; investigate streaming when necessary.
+
+Next: apply UX5 to the already-logo-integrated checkout (no SVG move). Run validation, commit and push. Confirm large transcript input no longer fails at UX3 guard; benchmark full cohort on Linux and test browser-specific memory diagnostics. Continue to PX1 only when single-worker baseline stable.
