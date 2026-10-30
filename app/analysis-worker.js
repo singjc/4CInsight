@@ -1,7 +1,23 @@
 import { classifyInputFilename } from './file-classifier.js'
 import { validateLocalInputFile } from './resource-controls.js'
+import { measureWasmAllocation } from './wasm-memory.js'
 
 let wasmModulePromise = null
+let wasmMemory = null
+let wasmPeakAllocated = 0
+let lastWasmMemorySent = 0
+let lastWasmMemoryAt = 0
+
+function postWasmMemory(requestId, force = false) {
+  const sample = measureWasmAllocation(wasmMemory, wasmPeakAllocated)
+  if (!sample) return
+  wasmPeakAllocated = sample.peakAllocatedBytes
+  const now = performance.now()
+  if (!force && sample.allocatedBytes === lastWasmMemorySent && now - lastWasmMemoryAt < 3000) return
+  lastWasmMemorySent = sample.allocatedBytes
+  lastWasmMemoryAt = now
+  self.postMessage({ type: 'wasm-memory', requestId, ...sample })
+}
 
 async function loadWasm() {
   if (!wasmModulePromise) {
@@ -9,7 +25,9 @@ async function loadWasm() {
       try {
         const moduleUrl = new URL('./wasm/four_c_insight_wasm.js', self.location.href).href
         const module = await import(moduleUrl)
-        await module.default()
+        const exports = await module.default()
+        // wasm-bindgen returns the instance exports, including its Memory.
+        wasmMemory = exports?.memory instanceof WebAssembly.Memory ? exports.memory : null
         return module
       } catch {
         return null
@@ -35,6 +53,7 @@ function postProgress(requestId, completed, total, message) {
     total,
     message,
   })
+  postWasmMemory(requestId)
 }
 
 async function wasmBytes(file) {
@@ -65,6 +84,7 @@ async function handlePreflight(request) {
     }
   }
 
+  postWasmMemory(request.requestId, true)
   self.postMessage({
     type: 'preflight-result',
     requestId: request.requestId,
@@ -82,6 +102,7 @@ async function handleMetadataInspection(request) {
   const result = JSON.parse(
     wasm.inspect_metadata_json(request.file.name, bytes, request.idColumn || ''),
   )
+  postWasmMemory(request.requestId, true)
   self.postMessage({
     type: 'metadata-inspection-result',
     requestId: request.requestId,
@@ -147,6 +168,7 @@ async function handleExpressionQc(request) {
     postProgress(request.requestId, completed, total, `Transcript expression ${completed}/${total}`)
   }
 
+  postWasmMemory(request.requestId, true)
   self.postMessage({
     type: 'expression-qc-result',
     requestId: request.requestId,
@@ -170,6 +192,7 @@ async function handleMetadataColumnValues(request) {
   const result = JSON.parse(
     wasm.metadata_column_values_json(request.file.name, bytes, request.column),
   )
+  postWasmMemory(request.requestId, true)
   self.postMessage({
     type: 'metadata-column-values-result',
     requestId: request.requestId,
@@ -222,6 +245,7 @@ async function handleExpressionComparison(request) {
   }
 
   result.completedAt = new Date().toISOString()
+  postWasmMemory(request.requestId, true)
   self.postMessage({
     type: 'expression-comparison-result',
     requestId: request.requestId,
@@ -274,6 +298,7 @@ async function handleLongitudinalExpression(request) {
   }
 
   result.completedAt = new Date().toISOString()
+  postWasmMemory(request.requestId, true)
   self.postMessage({
     type: 'longitudinal-expression-result',
     requestId: request.requestId,
@@ -328,6 +353,7 @@ async function handleSignificantHits(request) {
   }
 
   result.completedAt = new Date().toISOString()
+  postWasmMemory(request.requestId, true)
   self.postMessage({
     type: 'significant-hit-result',
     requestId: request.requestId,

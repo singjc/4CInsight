@@ -1,6 +1,7 @@
 import { saveTextFile } from './save.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
 import { methodDocs } from './docs-content.js'
+import { validateWasmMemoryReport } from './wasm-memory.js'
 import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory, detectBrowserResources } from './resource-controls.js'
 import {
   clearHistoryEntries,
@@ -11,7 +12,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux8-browser-metrics'
+const APP_VERSION = '0.21.0-ux9-wasm-memory'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -74,6 +75,7 @@ const state = {
   globalThresholds: { fdr: 0.05, absLog2Fc: 1.0 },
   systemInfo: null,
   appMemorySample: null,
+  wasmMemorySample: null,
   appMemoryBusy: false,
   resources: loadResourceSettings(),
   hitConfig: {
@@ -134,6 +136,16 @@ function attachScienceWorker() {
     if (current !== worker) return
     const request = pending.get(event.data.requestId)
     if (!request) return
+    if (event.data.type === 'wasm-memory') {
+      const report = validateWasmMemoryReport(event.data)
+      if (report) {
+        state.wasmMemorySample = { ...report, active: true }
+        renderSystemInfo()
+        const display = document.querySelector('#wasm-memory-status')
+        if (display) display.textContent = wasmMemoryDescription(state.wasmMemorySample)
+      }
+      return
+    }
     if (event.data.type === 'analysis-progress') {
       request.onProgress?.(event.data)
       return
@@ -162,6 +174,7 @@ function attachScienceWorker() {
 function replaceScienceWorker() {
   worker?.terminate()
   worker = null // Keep no worker alive when idle. The next request creates one.
+  if (state.wasmMemorySample) state.wasmMemorySample = { ...state.wasmMemorySample, active: false }
 }
 function stopScienceWork() {
   if (!pending.size) return
@@ -238,10 +251,11 @@ function renderSystemInfo() {
   if (!chip) return
   const info = state.systemInfo
   const threads = info.threads ? `${info.threads} browser-reported logical threads` : 'logical threads unavailable'
-  const appSample = state.appMemorySample
-  const appText = appSample?.available ? ` · ${humanBytes(appSample.bytes)} ${appSample.kind === 'heap' ? 'JS heap' : 'app estimate'}` : ''
-  chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(info.memory)}${escapeHtml(appText)} · ${escapeHtml(threads)} · WASM science: 1 worker · Settings</small></span>`
-  chip.title = `Open Settings · Browser-only metrics. No software installation or permission required. ${info.crossOriginIsolated ? 'Cross-origin isolated' : 'Single-worker fallback'}. RAM is reported only when the browser provides it.`
+  const wasmSample = state.wasmMemorySample
+  const wasmText = wasmSample ? ` · ${humanBytes(wasmSample.peakAllocatedBytes)} WASM ${wasmSample.active ? 'allocated' : 'last worker peak'}` : ''
+  const ramText = info.deviceMemoryGiB !== null ? `${info.memory} · ` : ''
+  chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(ramText)}${escapeHtml(threads)} · WASM science: 1 worker${escapeHtml(wasmText)} · Settings</small></span>`
+  chip.title = `Open Settings · Browser-only metrics; WASM memory is measured from the science engine, not total/free host RAM. ${info.crossOriginIsolated ? 'Cross-origin isolated' : 'Single-worker fallback'}. RAM is reported only when the browser provides it.`
 }
 
 // Measure application memory automatically without adding host access or a service.
@@ -263,6 +277,14 @@ async function refreshAutomaticAppMemory() {
 function appMemoryDescription(sample) {
   if (sample?.available) return `${humanBytes(sample.bytes)} · ${sample.source}`
   return sample?.source || 'Checking browser support…'
+}
+
+function wasmMemoryDescription(sample) {
+  if (!sample) return 'Measured when the scientific WASM engine runs.'
+  const amount = humanBytes(sample.peakAllocatedBytes)
+  return sample.active
+    ? `${amount} allocated in science worker (highest observed allocation)`
+    : `${amount} highest allocation in last science worker (worker released)`
 }
 
 function fileKey(file) {
@@ -1976,7 +1998,7 @@ function settingsView() {
   const info = state.systemInfo || detectSystemInfo()
   const suggested = info.threads ? suggestedScienceThreads(info.threads, r) : 1
   const sampleText = appMemoryDescription(state.appMemorySample)
-  return `<section class="page-heading"><div><span class="eyebrow">Global settings</span><h2>System resource controls</h2><p>Settings apply to this browser profile, not to saved cohort states. Local scientific input files have no fixed size cap.</p></div><div class="local-card"><strong>Science execution</strong><span>Current browser WASM: one worker, not Rayon</span></div></section>
+  return `<section class="page-heading"><div><span class="eyebrow">Global settings</span><h2>Browser resource controls</h2><p>Settings apply to this browser profile, not to saved cohort states. Local scientific input files have no fixed size cap.</p></div><div class="local-card"><strong>Science execution</strong><span>Current browser WASM: one worker, not Rayon</span></div></section>
     ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
     <section class="card"><div class="card-heading"><div><h3>CPU and worker use</h3><p>Reserve part of the available logical CPU capacity for other work.</p></div></div>
       <div class="form-grid resource-grid">
@@ -1989,9 +2011,11 @@ function settingsView() {
       <div class="form-grid resource-grid">
         <label><span>Maximum volcano points drawn</span><input id="resource-points" type="number" min="200" max="6000" step="200" value="${r.maxPlotPoints}" /></label>
       </div>
-      <div class="resource-memory-status" role="status"><strong>System RAM (browser-reported)</strong><span>${escapeHtml(info.memory)}</span><small>${escapeHtml(info.memoryNote)}</small></div>
-      <div class="resource-memory-status" role="status" aria-live="polite"><strong>Application memory (automatic when available)</strong><span id="automatic-memory-status">${escapeHtml(sampleText)}</span><small>Application estimates are not total physical RAM, available RAM, or WASM memory limits. In Firefox these APIs are unavailable. No installation or manual RAM entry is required.</small></div>
-      <div class="button-row"><button id="measure-app-memory" class="secondary-button" ${state.appMemoryBusy ? 'disabled' : ''}>${state.appMemoryBusy ? 'Measuring…' : 'Refresh app memory'}</button></div>
+      <div class="resource-memory-status" role="status" aria-live="polite"><strong>Scientific WASM memory</strong><span id="wasm-memory-status">${escapeHtml(wasmMemoryDescription(state.wasmMemorySample))}</span><small>Allocated WebAssembly linear-memory buffer. This includes unused WASM pages, but excludes JS objects, file copies, and other browser processes. Samples are taken between scientific stages; not a full process-memory or instantaneous peak measurement.</small></div>
+      ${info.deviceMemoryGiB !== null ? `<div class="resource-memory-status"><strong>Device RAM class (browser estimate)</strong><span>${escapeHtml(info.memory)}</span><small>${escapeHtml(info.memoryNote)}</small></div>` : ''}
+      ${state.appMemorySample?.available ? `<div class="resource-memory-status" role="status" aria-live="polite"><strong>Browser app memory estimate</strong><span id="automatic-memory-status">${escapeHtml(sampleText)}</span><small>Not total or free system RAM.</small></div>` : ''}
+      <p class="method-note">Firefox does not expose total/free host RAM. CPU capacity and WASM memory are reported without installing software. No installation or manual RAM entry is required.</p>
+      ${state.appMemorySample?.available ? `<div class="button-row"><button id="measure-app-memory" class="secondary-button" ${state.appMemoryBusy ? 'disabled' : ''}>${state.appMemoryBusy ? 'Measuring…' : 'Refresh app memory'}</button></div>` : ''}
       <label class="resource-check"><input id="resource-recycle" type="checkbox" ${r.recycleWorker ? 'checked' : ''}/> <span>Release the science worker and WASM memory after each completed analysis (recommended).</span></label>
       <div class="button-row resource-actions"><button id="save-resources" class="primary-button">Apply settings</button><button id="reset-resources" class="secondary-button">Reset defaults</button></div>
     </section>`

@@ -85,3 +85,11 @@ The user rejected the UX7 native sysinfo service. UX8 removes it. Do not suggest
 Validate UX8 in Firefox and Chromium, especially automatic sampling and readable source labels. Check that the complete 2,983-file state reconnection, fixed sidebar, analysis workflow, and memory cleanup still work. Run `node --test app/tests/*.test.mjs`, `git diff --check`, `cargo test --locked`, and WASM parity tests. Continue streaming input work and separately PX1 true threaded WASM. Update handoff each milestone.
 
 UX8 package smoke: 45/45 JS tests PASS; installer verifies UX7 source hashes and removes rejected native monitor code. Browser Firefox and Chromium smoke tests still required. There is no true physical/free-RAM reading in Firefox; never describe browser heap or RAM-class as available host RAM.
+
+## Current focus — UX9 browser-only WASM memory measurement
+
+UX9 follows UX8, rejects UX7 native companion, and uses the compiled wasm-bindgen exports' `memory.buffer.byteLength` in the science worker. This gives actual *allocated WASM linear-memory capacity*, not the computer's physical/free RAM. Firefox 158 cannot report physical RAM to ordinary websites. Do not claim sysinfo on wasm32 can access OS RAM. Do not attempt probing the browser to infer actual RAM. No installation or manual value entry.
+
+UX9 files: app/wasm-memory.js (new), app/analysis-worker.js, app/main.js, app/index.html, UX3/UX4/UX8 test updates and app/tests/ux9-wasm-memory.test.mjs (new). Browser shell `0.21.0-ux9-wasm-memory`; science v0.21.0 unchanged. UX9 tests: 50/50 JS PASS (including real existing WebAssembly Memory export). Native and live browser tests not run.
+
+First steps: apply archive after verifying expected UX8 hashes; run all JS tests. In Firefox load a saved state, reconnect the 2,983-file cohort once and run one science operation. Check that `Scientific WASM memory` updates during/after operations, that recycle labels last sample as released, and that header does not contain an unavailable-RAM warning. On Chromium compare coarse RAM class and app estimate when supported. Check Pages asset caching and scientific output parity. Continue streaming/chunked inputs and bounded memory; do not change science algorithms without parity validation. Keep this prompt and the rolling handoff current, and include Git add/commit commands with every overlay.

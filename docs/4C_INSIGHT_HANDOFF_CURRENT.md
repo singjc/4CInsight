@@ -496,3 +496,25 @@ Scientific engine remains v0.21.0. Browser shell v0.21.0-ux6-state-reconnect.
 - JavaScript test suite: **45/45 passed**, including Firefox unavailable, Chromium approximate-class, and no-native-helper contract tests.
 - No Rust scientific source or wasm-pack build changes. Rust parity and full browser/manual cohort runs remain unverified in this environment.
 - Source versions in `app/index.html` and `app/main.js`: `0.21.0-ux8-browser-metrics`.
+
+## UX9 — WASM memory measurements (2026-10-30)
+
+User observation: Firefox 158 still shows "System RAM unavailable" in UX8. This is a real browser restriction. The user requires zero install and no extra local process. Do not attempt browser `sysinfo`, memory guessing, probing RAM through allocations, or installing the rejected UX7 native companion.
+
+UX9 changes:
+- The top information chip no longer shows the unavailable-physical-RAM message in Firefox.
+- Settings prioritizes scientific WASM allocated linear-memory buffer in all browsers. The app reads `WebAssembly.Memory.buffer.byteLength` from the existing wasm-bindgen module's initialization exports inside `analysis-worker.js`.
+- Worker emits validated `wasm-memory` samples during scientific progress and before successful completion events. Main UI shows allocated bytes and highest observed WASM linear-memory allocation per science worker.
+- When an analysis worker is terminated, the last allocation is labelled released. This is not process RSS or actual live Rust heap usage; samples do not include JS/File buffers, worker overhead, OS RAM, or true free host RAM. Samples between scientific stages do not guarantee the true maximum process memory.
+- Chromium `deviceMemory` is still displayed as a coarse class when available. Optional browser-app estimates are displayed only when supported, with separate labels.
+- Firefox host RAM continues to be unavailable through website APIs. A small explanatory note remains in Settings instead of a repeated status warning.
+- No native helper, token, browser permission request, file caps, Rayon change, or scientific-engine change. UX8 browser-only approach remains.
+- Browser shell: `0.21.0-ux9-wasm-memory`; Rust scientific engine remains v0.21.0.
+
+Validation in authoring environment:
+- Source reconstructed from the uploaded archive and UX3/UX4/UX5/UX6/UX7/UX8 patches.
+- JS tests 50/50 PASS (includes real compiled WASM module's memory-export smoke test).
+- `node --check` on changed JS files PASS.
+- Browser Firefox/Chromium interactive memory observation and real 2,983-file cohort stress test NOT performed; user must smoke-test.
+
+Next: run actual Firefox smoke test with preflight, Compare Groups and worker recycle; check Settings and header, ensure no stale values. Benchmark real 2,983-file cohort; then work on streaming parser and bounded memory. Respect no file-size cap and single-worker fallback. PX1 threaded WASM remains a separate milestone.

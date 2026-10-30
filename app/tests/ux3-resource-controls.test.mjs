@@ -59,11 +59,11 @@ test('volcano drawing remains bounded without changing full scientific results',
 test('resource preferences persist without a native monitor or manual RAM requirement', () => {
   assert.match(main, /localStorage\.setItem\('4c-insight-resources'/)
   assert.doesNotMatch(main, /nativeMonitor|resource-ram|physicalRamGiB/)
-  assert.match(main, /System RAM \(browser-reported\)/)
+  assert.match(main, /Scientific WASM memory/)
   assert.match(main, /RAM is reported only when the browser provides it/)
   assert.match(main, /id="save-resources"/)
   assert.match(main, /id="stop-science-work"/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-ux8-browser-metrics/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-ux9-wasm-memory/)
 })
 
 test('completed science runs release WASM memory and History avoids duplicate JSON clones', () => {
