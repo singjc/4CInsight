@@ -25,6 +25,19 @@ jobs:
           targets: wasm32-unknown-unknown
       - run: cargo test --manifest-path wasm/Cargo.toml --locked
       - run: cargo check --manifest-path wasm/Cargo.toml --locked --target wasm32-unknown-unknown
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install wasm-pack for generated-bindings validation
+        run: cargo install wasm-pack --locked
+      - name: Build WASM and test generated memory export
+        run: |
+          wasm-pack build wasm \
+            --target web \
+            --out-dir ../app/wasm \
+            --out-name four_c_insight_wasm \
+            --release
+          CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/ux9-wasm-memory.test.mjs
 
   web-static:
     runs-on: ubuntu-latest

@@ -518,3 +518,18 @@ Validation in authoring environment:
 - Browser Firefox/Chromium interactive memory observation and real 2,983-file cohort stress test NOT performed; user must smoke-test.
 
 Next: run actual Firefox smoke test with preflight, Compare Groups and worker recycle; check Settings and header, ensure no stale values. Benchmark real 2,983-file cohort; then work on streaming parser and bounded memory. Respect no file-size cap and single-worker fallback. PX1 threaded WASM remains a separate milestone.
+
+## CI1 — Generated WASM artifact ordering (2026-10-30)
+
+User provided a GitHub Actions `web-static` failure: UX9 test 48 imported `app/wasm/four_c_insight_wasm.js` in a fresh checkout before WASM output had been generated. Result: Node `ERR_MODULE_NOT_FOUND`; 49 passing, 1 failing. The failure is in test setup, not evidence of a scientific engine regression.
+
+CI1 fix:
+- In `app/tests/ux9-wasm-memory.test.mjs`, verify both wasm-pack output paths exist. Skip only the generated-module test when **both** artifacts are absent and no build is required. If only one exists, fail rather than silently skipping an incomplete build.
+- Support `CFS_REQUIRE_WASM_ARTIFACTS=1`, which forces a failing test if generated output is missing. Use this mode after wasm-pack builds.
+- In `.github/workflows/ci.yml`, keep `web-static` source-only tests and add a real wasm-pack build and forced generated-module test in the `wasm-bridge` job. This maintains build-output checking on pull requests.
+- In `.github/workflows/pages.yml`, make the already post-build Node tests require the generated artifacts explicitly.
+- No Rust science, browser resource API, input file limit, or WASM runtime changes.
+
+Local simulation results: built module available: **50 passed, 0 failed**; source-only checkout: **49 passed, 1 intentionally skipped, 0 failed**; forced mode without output: **expected failure**. These checks use an existing compiled WASM module; live GitHub CI and fresh wasm-pack compilation remain unverified until a push.
+
+After applying: run tests, stage and commit `.github/workflows/ci.yml`, `.github/workflows/pages.yml`, `app/tests/ux9-wasm-memory.test.mjs`, and the rolling docs. Push and confirm both `web-static` and `wasm-bridge` jobs, then the Pages deployment build. A source-only skip is expected; a compiled WASM test skip is not permitted.

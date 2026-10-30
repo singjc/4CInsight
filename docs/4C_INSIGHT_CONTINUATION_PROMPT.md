@@ -93,3 +93,13 @@ UX9 follows UX8, rejects UX7 native companion, and uses the compiled wasm-bindge
 UX9 files: app/wasm-memory.js (new), app/analysis-worker.js, app/main.js, app/index.html, UX3/UX4/UX8 test updates and app/tests/ux9-wasm-memory.test.mjs (new). Browser shell `0.21.0-ux9-wasm-memory`; science v0.21.0 unchanged. UX9 tests: 50/50 JS PASS (including real existing WebAssembly Memory export). Native and live browser tests not run.
 
 First steps: apply archive after verifying expected UX8 hashes; run all JS tests. In Firefox load a saved state, reconnect the 2,983-file cohort once and run one science operation. Check that `Scientific WASM memory` updates during/after operations, that recycle labels last sample as released, and that header does not contain an unavailable-RAM warning. On Chromium compare coarse RAM class and app estimate when supported. Check Pages asset caching and scientific output parity. Continue streaming/chunked inputs and bounded memory; do not change science algorithms without parity validation. Keep this prompt and the rolling handoff current, and include Git add/commit commands with every overlay.
+
+## Current focus — CI1 generated-WASM test ordering (2026-10-30)
+
+User's GitHub Actions log shows UX9 JS 49 pass / 1 fail. Failure occurs at test 48, `ERR_MODULE_NOT_FOUND` for `app/wasm/four_c_insight_wasm.js`. Fresh Git checkout excludes generated `app/wasm` files, but `web-static` ran the test before building them. UX9 science itself was not shown to fail.
+
+CI1 patch changes three files: `app/tests/ux9-wasm-memory.test.mjs`, `.github/workflows/ci.yml`, and `.github/workflows/pages.yml`. The test skips only when both generated files are absent in source-only mode. It is required when `CFS_REQUIRE_WASM_ARTIFACTS=1`. CI `wasm-bridge` now runs wasm-pack and tests generated memory exports in strict mode; Pages uses strict mode after its existing wasm-pack build.
+
+Validated in local reproduced trees: compiled artifacts present: 50/50 pass; both absent: 49 pass, 1 skip, zero fail; artifacts required but absent: correctly fails. Local cargo/wasm-pack build was not run for this patch; deployed GitHub Action status needs validation after push.
+
+Next: apply guarded CI1 overlay, run Node tests, commit and push. Review CI `web-static`, `wasm-bridge` and Pages `build`. Do not 'fix' the CI by deleting the real compiled WASM integration test or checking generated artifacts into git. Keep UX9 memory display, UX8 browser-only principle, and v0.21.0 science unchanged. Keep rolling handoff and prompt current. After CI is green, resume browser memory/large-cohort work.

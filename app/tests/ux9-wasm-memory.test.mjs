@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, access } from 'node:fs/promises'
 import { measureWasmAllocation, validateWasmMemoryReport } from '../wasm-memory.js'
 
 const main = await readFile(new URL('../main.js', import.meta.url), 'utf8')
@@ -24,9 +24,31 @@ test('validates WASM memory reports before display', () => {
   }
 })
 
-test('deployed wasm-bindgen init exposes the actual WASM memory buffer', async () => {
-  const { default: init } = await import('../wasm/four_c_insight_wasm.js')
-  const binary = await readFile(new URL('../wasm/four_c_insight_wasm_bg.wasm', import.meta.url))
+// A fresh Git checkout contains source only. wasm-pack creates both files during
+// the WASM build. Run this test after the build in CI and on GitHub Pages.
+const generatedJsUrl = new URL('../wasm/four_c_insight_wasm.js', import.meta.url)
+const generatedWasmUrl = new URL('../wasm/four_c_insight_wasm_bg.wasm', import.meta.url)
+async function exists(url) {
+  try { await access(url); return true } catch (error) {
+    if (error?.code === 'ENOENT') return false
+    throw error
+  }
+}
+const [hasGeneratedJs, hasGeneratedWasm] = await Promise.all([
+  exists(generatedJsUrl), exists(generatedWasmUrl)
+])
+const requireGeneratedWasm = process.env.CFS_REQUIRE_WASM_ARTIFACTS === '1'
+const sourceOnlyCheckout = !hasGeneratedJs && !hasGeneratedWasm
+
+test('deployed wasm-bindgen init exposes the actual WASM memory buffer', {
+  skip: sourceOnlyCheckout && !requireGeneratedWasm
+    ? 'WASM output is generated during the build (not checked into Git)'
+    : false
+}, async () => {
+  assert.ok(hasGeneratedJs && hasGeneratedWasm,
+    'Generated WASM artifacts are missing. Run wasm-pack build before this test.')
+  const { default: init } = await import(generatedJsUrl)
+  const binary = await readFile(generatedWasmUrl)
   const exports = await init({ module_or_path: binary })
   assert.ok(exports.memory instanceof WebAssembly.Memory)
   const snapshot = measureWasmAllocation(exports.memory)

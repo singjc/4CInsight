@@ -46,8 +46,10 @@ jobs:
             --out-dir ../app/wasm \
             --out-name four_c_insight_wasm \
             --release
-      - name: Check local-first browser contract
+      - name: Check local-first browser contract and generated WASM
         run: node --test app/tests/*.test.mjs
+        env:
+          CFS_REQUIRE_WASM_ARTIFACTS: '1'
       - name: Check JavaScript syntax
         run: |
           node --check app/main.js
