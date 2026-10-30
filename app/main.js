@@ -1,8 +1,7 @@
 import { saveTextFile } from './save.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { createSystemMonitor } from './system-monitor.js'
 import { methodDocs } from './docs-content.js'
-import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory } from './resource-controls.js'
+import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory, detectBrowserResources } from './resource-controls.js'
 import {
   clearHistoryEntries,
   deleteHistoryEntry,
@@ -12,7 +11,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux7-native-monitor'
+const APP_VERSION = '0.21.0-ux8-browser-metrics'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -76,7 +75,6 @@ const state = {
   systemInfo: null,
   appMemorySample: null,
   appMemoryBusy: false,
-  monitorBusy: false,
   resources: loadResourceSettings(),
   hitConfig: {
     maxAnalysisFeatures: 500,
@@ -128,10 +126,6 @@ const state = {
   },
 }
 
-// Native monitoring is optional. No network access takes place before Connect.
-const nativeMonitor = createSystemMonitor()
-let monitorTimer = null
-let monitorRefreshing = false
 const pending = new Map()
 let worker = null
 function attachScienceWorker() {
@@ -235,19 +229,7 @@ function persistResourceSettings() {
 }
 
 function detectSystemInfo() {
-  const platform = navigator.userAgentData?.platform || navigator.platform || 'Unknown OS'
-  const threads = Number(navigator.hardwareConcurrency || 0)
-  const deviceMemory = Number(navigator.deviceMemory || 0)
-  const heapLimit = Number(globalThis.performance?.memory?.jsHeapSizeLimit || 0)
-  let memory = 'System RAM not exposed by browser'
-  if (deviceMemory > 0) memory = `≈${formatNumber(deviceMemory, 1)} GiB device memory class (approximate)`
-  else if (heapLimit > 0) memory = `${humanBytes(heapLimit)} JS heap limit (not RAM)`
-  return {
-    platform,
-    threads,
-    memory,
-    crossOriginIsolated: Boolean(globalThis.crossOriginIsolated),
-  }
+  return detectBrowserResources(navigator, globalThis.performance, Boolean(globalThis.crossOriginIsolated))
 }
 
 function renderSystemInfo() {
@@ -255,45 +237,32 @@ function renderSystemInfo() {
   const chip = document.querySelector('#system-chip')
   if (!chip) return
   const info = state.systemInfo
-  const threadText = info.threads ? `${info.threads} logical threads` : 'threads unavailable'
-  const monitor = nativeMonitor.getState()
-  const native = monitor.status === 'connected' ? monitor.last : null
-  const memoryText = native
-    ? `${humanBytes(native.available_memory_bytes)} RAM available / ${humanBytes(native.total_memory_bytes)} total (native)`
-    : state.resources.physicalRamGiB ? `${state.resources.physicalRamGiB} GiB RAM (manual)` : info.memory
-  chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(memoryText)} · ${escapeHtml(threadText)} · WASM science: 1 worker · Settings</small></span>`
-  chip.title = `Open Settings · ${native ? 'Native sysinfo connected, read-only host metrics' : 'No native system monitor connected'} · ${info.crossOriginIsolated ? 'cross-origin isolated' : 'single-worker fallback'}`
+  const threads = info.threads ? `${info.threads} browser-reported logical threads` : 'logical threads unavailable'
+  const appSample = state.appMemorySample
+  const appText = appSample?.available ? ` · ${humanBytes(appSample.bytes)} ${appSample.kind === 'heap' ? 'JS heap' : 'app estimate'}` : ''
+  chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(info.memory)}${escapeHtml(appText)} · ${escapeHtml(threads)} · WASM science: 1 worker · Settings</small></span>`
+  chip.title = `Open Settings · Browser-only metrics. No software installation or permission required. ${info.crossOriginIsolated ? 'Cross-origin isolated' : 'Single-worker fallback'}. RAM is reported only when the browser provides it.`
 }
 
-function monitorSummaryHtml() {
-  const monitor = nativeMonitor.getState()
-  const snapshot = monitor.status === 'connected' ? monitor.last : null
-  if (snapshot) {
-    const percent = (100 * snapshot.available_memory_bytes / snapshot.total_memory_bytes).toFixed(1)
-    return `<strong>Native system monitor connected</strong><span>Host RAM: ${humanBytes(snapshot.total_memory_bytes)} total · ${humanBytes(snapshot.available_memory_bytes)} available (${percent}%) · ${humanBytes(snapshot.used_memory_bytes)} used</span><span>CPU: ${formatNumber(snapshot.cpu_usage_percent, 1)}% total usage across ${snapshot.logical_cpus} logical CPUs · swap: ${humanBytes(snapshot.used_swap_bytes)} used of ${humanBytes(snapshot.total_swap_bytes)}</span><small>Host metrics from local sysinfo, not browser-process or WASM memory. Updated when the monitor responds.</small>`
+// Measure application memory automatically without adding host access or a service.
+// These values are an application estimate or JS heap size, never free system RAM.
+let memorySampleBusy = false
+async function refreshAutomaticAppMemory() {
+  if (memorySampleBusy || document.visibilityState === 'hidden') return
+  memorySampleBusy = true
+  try {
+    state.appMemorySample = await measureAppMemory(globalThis.performance, Boolean(globalThis.crossOriginIsolated))
+    renderSystemInfo()
+    const display = document.querySelector('#automatic-memory-status')
+    if (display) display.textContent = appMemoryDescription(state.appMemorySample)
+  } finally {
+    memorySampleBusy = false
   }
-  return `<strong>Native system monitor: ${escapeHtml(monitor.status)}</strong><span>${escapeHtml(monitor.error || 'Optional monitor is not connected. Browser-only operation remains available.')}</span>`
 }
 
-function updateMonitorDisplay() {
-  renderSystemInfo()
-  const status = document.querySelector('#native-monitor-status')
-  if (status) status.innerHTML = monitorSummaryHtml()
-}
-
-function stopMonitorPolling() {
-  if (monitorTimer !== null) { clearInterval(monitorTimer); monitorTimer = null }
-}
-
-async function pollNativeMonitor() {
-  if (monitorRefreshing || nativeMonitor.getState().status !== 'connected') return
-  monitorRefreshing = true
-  try { await nativeMonitor.refresh() }
-  finally {
-    monitorRefreshing = false
-    if (nativeMonitor.getState().status !== 'connected') stopMonitorPolling()
-    updateMonitorDisplay()
-  }
+function appMemoryDescription(sample) {
+  if (sample?.available) return `${humanBytes(sample.bytes)} · ${sample.source}`
+  return sample?.source || 'Checking browser support…'
 }
 
 function fileKey(file) {
@@ -2006,10 +1975,7 @@ function settingsView() {
   const r = state.resources
   const info = state.systemInfo || detectSystemInfo()
   const suggested = info.threads ? suggestedScienceThreads(info.threads, r) : 1
-  const sample = state.appMemorySample
-  const sampleText = sample?.available
-    ? `${humanBytes(sample.bytes)} · ${sample.source}`
-    : sample?.source || 'Not measured. Browser support varies.'
+  const sampleText = appMemoryDescription(state.appMemorySample)
   return `<section class="page-heading"><div><span class="eyebrow">Global settings</span><h2>System resource controls</h2><p>Settings apply to this browser profile, not to saved cohort states. Local scientific input files have no fixed size cap.</p></div><div class="local-card"><strong>Science execution</strong><span>Current browser WASM: one worker, not Rayon</span></div></section>
     ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
     <section class="card"><div class="card-heading"><div><h3>CPU and worker use</h3><p>Reserve part of the available logical CPU capacity for other work.</p></div></div>
@@ -2021,54 +1987,20 @@ function settingsView() {
     </section>
     <section class="card"><div class="card-heading"><div><h3>Memory information and display limits</h3><p>Local input files are never rejected because of their size or an estimated copy budget. Large inputs can still exhaust the browser's WASM memory.</p></div></div>
       <div class="form-grid resource-grid">
-        <label><span>Physical RAM (GiB, optional manual entry)</span><input id="resource-ram" type="number" min="0" max="2048" step="0.5" value="${r.physicalRamGiB}" /></label>
         <label><span>Maximum volcano points drawn</span><input id="resource-points" type="number" min="200" max="6000" step="200" value="${r.maxPlotPoints}" /></label>
       </div>
-      <p class="method-note">Browser system RAM report: ${escapeHtml(info.memory)}. ${r.physicalRamGiB ? `Manual RAM fallback: ${r.physicalRamGiB} GiB (not verified).` : 'Manual RAM is optional.'} An optional native Rust monitor can read actual system metrics; Firefox cannot access sysinfo directly.</p>
-      <div class="native-monitor-panel">
-        <div class="card-heading"><div><h3>Optional native system monitor</h3><p>Run the local Rust helper, then paste its session token. Connection is opt-in. Metrics stay on this computer; source files are not read.</p></div></div>
-        <div id="native-monitor-status" class="resource-memory-status" role="status" aria-live="polite">${monitorSummaryHtml()}</div>
-        <label class="native-monitor-token"><span>Local monitor session token (not saved)</span><input id="native-monitor-token" type="password" placeholder="Paste the 32-character token from the helper terminal" autocomplete="off" spellcheck="false" /></label>
-        <div class="button-row resource-actions"><button id="connect-native-monitor" class="secondary-button" ${state.monitorBusy ? 'disabled' : ''}>${state.monitorBusy ? 'Connecting…' : 'Connect native monitor'}</button><button id="disconnect-native-monitor" class="secondary-button" ${nativeMonitor.getState().status === 'disconnected' ? 'disabled' : ''}>Disconnect</button></div>
-        <p class="method-note">Start from the repository: <code>cargo run --release --manifest-path native/system-monitor/Cargo.toml</code>. The helper listens only on 127.0.0.1:47831 and accepts requests from the approved site with a session token. Your browser may request loopback-network permission. Stop the helper with Ctrl+C.</p>
-      </div>
-      <div class="resource-memory-status" role="status"><strong>Browser application memory</strong><span>${escapeHtml(sampleText)}</span></div>
-      <p class="method-note">When supported, the measurement estimates application memory or the main JavaScript heap only. It is not physical RAM or currently free memory. Firefox may not expose either measurement.</p>
-      <div class="button-row"><button id="measure-app-memory" class="secondary-button" ${state.appMemoryBusy ? 'disabled' : ''}>${state.appMemoryBusy ? 'Measuring…' : 'Measure app memory'}</button></div>
+      <div class="resource-memory-status" role="status"><strong>System RAM (browser-reported)</strong><span>${escapeHtml(info.memory)}</span><small>${escapeHtml(info.memoryNote)}</small></div>
+      <div class="resource-memory-status" role="status" aria-live="polite"><strong>Application memory (automatic when available)</strong><span id="automatic-memory-status">${escapeHtml(sampleText)}</span><small>Application estimates are not total physical RAM, available RAM, or WASM memory limits. In Firefox these APIs are unavailable. No installation or manual RAM entry is required.</small></div>
+      <div class="button-row"><button id="measure-app-memory" class="secondary-button" ${state.appMemoryBusy ? 'disabled' : ''}>${state.appMemoryBusy ? 'Measuring…' : 'Refresh app memory'}</button></div>
       <label class="resource-check"><input id="resource-recycle" type="checkbox" ${r.recycleWorker ? 'checked' : ''}/> <span>Release the science worker and WASM memory after each completed analysis (recommended).</span></label>
       <div class="button-row resource-actions"><button id="save-resources" class="primary-button">Apply settings</button><button id="reset-resources" class="secondary-button">Reset defaults</button></div>
     </section>`
 }
 function bindSettingsEvents() {
-  document.querySelector('#connect-native-monitor')?.addEventListener('click', async () => {
-    if (state.monitorBusy) return
-    const tokenInput = document.querySelector('#native-monitor-token')
-    const token = tokenInput?.value || ''
-    state.monitorBusy = true
-    if (tokenInput) tokenInput.value = ''
-    // Call connect from this user gesture. Some browsers ask for loopback access.
-    const connectRequest = nativeMonitor.connect(token)
-    const connectButton = document.querySelector('#connect-native-monitor')
-    if (connectButton) { connectButton.disabled = true; connectButton.textContent = 'Connecting…' }
-    await connectRequest
-    state.monitorBusy = false
-    stopMonitorPolling()
-    if (nativeMonitor.getState().status === 'connected') {
-      monitorTimer = setInterval(() => void pollNativeMonitor(), 3000)
-    }
-    if (state.tab === 'settings') render()
-    else updateMonitorDisplay()
-  })
-  document.querySelector('#disconnect-native-monitor')?.addEventListener('click', () => {
-    stopMonitorPolling()
-    nativeMonitor.disconnect()
-    render()
-  })
   document.querySelector('#save-resources')?.addEventListener('click', () => {
     state.resources = normalizeResources({
       cpuPercent: document.querySelector('#resource-cpu')?.value,
       maxThreads: document.querySelector('#resource-threads')?.value,
-      physicalRamGiB: document.querySelector('#resource-ram')?.value,
       maxPlotPoints: document.querySelector('#resource-points')?.value,
       recycleWorker: Boolean(document.querySelector('#resource-recycle')?.checked),
     })
@@ -2086,7 +2018,7 @@ function bindSettingsEvents() {
     state.appMemoryBusy = true
     render()
     try {
-      state.appMemorySample = await measureAppMemory(globalThis.performance, Boolean(globalThis.crossOriginIsolated))
+      await refreshAutomaticAppMemory()
     } finally {
       state.appMemoryBusy = false
       if (state.tab === 'settings') render()
@@ -2629,3 +2561,7 @@ async function registerIsolationServiceWorker() {
 
 void registerIsolationServiceWorker()
 render()
+// One automatic sample shortly after startup and a low-frequency refresh while visible.
+// Unavailable APIs return immediately; repeated checks cannot reveal physical RAM.
+setTimeout(() => { void refreshAutomaticAppMemory() }, 2500)
+setInterval(() => { void refreshAutomaticAppMemory() }, 120000)

@@ -40,14 +40,3 @@ jobs:
           node --check app/file-classifier.js
           node --check app/save.js
           node --check app/coi-serviceworker.js
-
-  native-system-monitor:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --manifest-path native/system-monitor/Cargo.toml -- --check
-      - run: cargo check --manifest-path native/system-monitor/Cargo.toml
-      - run: cargo test --manifest-path native/system-monitor/Cargo.toml

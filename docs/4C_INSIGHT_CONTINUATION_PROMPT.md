@@ -77,3 +77,11 @@ Next: review user's real-cohort smoke, especially path matching and restored met
 UX7 added an optional native Rust sysinfo companion. Folder: `native/system-monitor` (standalone Rust crate). New JS module: `app/system-monitor.js`; current shell `0.21.0-ux7-native-monitor`. No science engine change.
 
 47/47 JS tests passed on reconstructed source. Native compilation, rustfmt, and real browser↔localhost connection were NOT performed in this authoring environment because cargo/rustc were not available. Next: obtain user local `cargo fmt/check/test` output and Firefox/Chromium smoke test after launching helper, then fix issues and update rolling handoff. Do not claim automatic host memory is available when helper is not connected. No Rayon in WASM. Include full runnable shell validation and git add/commit commands for source overlays.
+
+## Current priority — UX8 browser-only metrics replaces UX7 helper
+
+The user rejected the UX7 native sysinfo service. UX8 removes it. Do not suggest installing or starting a local helper as a normal requirement. No browser technology can recover exact free physical RAM on Firefox 158 without native privileges; show unavailable rather than fabricate it. Chromium may expose a coarse RAM class, plus a distinct application-memory estimate.
+
+Validate UX8 in Firefox and Chromium, especially automatic sampling and readable source labels. Check that the complete 2,983-file state reconnection, fixed sidebar, analysis workflow, and memory cleanup still work. Run `node --test app/tests/*.test.mjs`, `git diff --check`, `cargo test --locked`, and WASM parity tests. Continue streaming input work and separately PX1 true threaded WASM. Update handoff each milestone.
+
+UX8 package smoke: 45/45 JS tests PASS; installer verifies UX7 source hashes and removes rejected native monitor code. Browser Firefox and Chromium smoke tests still required. There is no true physical/free-RAM reading in Firefox; never describe browser heap or RAM-class as available host RAM.

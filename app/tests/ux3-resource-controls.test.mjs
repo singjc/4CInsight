@@ -26,11 +26,11 @@ test('CPU budget is for future threaded-WASM, one browser science worker today',
 
 test('settings discard old hard input caps and recover invalid resource values', () => {
   const r = normalizeResources({ cpuPercent: 800, maxThreads: 1e8, maxFileMiB: 16, workingBudgetGiB: 0.25, physicalRamGiB: -4, maxPlotPoints: 1e9 })
-  assert.deepEqual([r.cpuPercent, r.maxThreads, r.physicalRamGiB, r.maxPlotPoints], [90, 32, 0, 6000])
+  assert.deepEqual([r.cpuPercent, r.maxThreads, r.maxPlotPoints], [90, 32, 6000])
   assert.equal(Object.hasOwn(r, 'maxFileMiB'), false)
   assert.equal(Object.hasOwn(r, 'workingBudgetGiB'), false)
   assert.deepEqual(normalizeResources(null), { ...DEFAULT_RESOURCES })
-  assert.equal(normalizeResources({ physicalRamGiB: '' }).physicalRamGiB, 0)
+  assert.equal(Object.hasOwn(normalizeResources({ physicalRamGiB: '32' }), 'physicalRamGiB'), false)
 })
 
 test('large local inputs do not fail a size/estimated-copy-pressure threshold', () => {
@@ -56,14 +56,14 @@ test('volcano drawing remains bounded without changing full scientific results',
   assert.match(main, /All tested features remain in the searchable table and export/)
 })
 
-test('resource preferences persist independently and native RAM requires the helper', () => {
+test('resource preferences persist without a native monitor or manual RAM requirement', () => {
   assert.match(main, /localStorage\.setItem\('4c-insight-resources'/)
-  assert.match(main, /physicalRamGiB/)
-  assert.match(main, /Firefox cannot access sysinfo directly/)
-  assert.match(main, /browser's memory class measures available RAM|not physical RAM or currently free memory/) // browser measurement differs from host RAM
+  assert.doesNotMatch(main, /nativeMonitor|resource-ram|physicalRamGiB/)
+  assert.match(main, /System RAM \(browser-reported\)/)
+  assert.match(main, /RAM is reported only when the browser provides it/)
   assert.match(main, /id="save-resources"/)
   assert.match(main, /id="stop-science-work"/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-ux7-native-monitor/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-ux8-browser-metrics/)
 })
 
 test('completed science runs release WASM memory and History avoids duplicate JSON clones', () => {

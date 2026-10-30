@@ -51,11 +51,12 @@ test('documentation is searchable and literature-backed', () => {
   assert.equal(methodDocs.every((section) => Array.isArray(section.references) && section.references.length > 0), true, 'every documentation section must include references')
 })
 
-test('sidebar is fixed during desktop page scrolling and system info is browser-reported', () => {
+test('sidebar is fixed during desktop page scrolling and system info is browser-reported', async () => {
   assert.match(styles, /@media \(min-width: 721px\)[\s\S]*\.sidebar \{ position: sticky; top: 0; height: 100vh;/)
-  assert.match(main, /navigator\.hardwareConcurrency/)
-  assert.match(main, /navigator\.deviceMemory/)
-  assert.match(main, /System RAM not exposed by browser/)
+  const resources = await readFile(new URL('../resource-controls.js', import.meta.url), 'utf8')
+  assert.match(resources, /nav\.hardwareConcurrency/)
+  assert.match(resources, /nav\.deviceMemory/)
+  assert.match(resources, /System RAM unavailable \(browser restriction\)/)
   assert.doesNotMatch(main, /Runs on this device/)
 })
 

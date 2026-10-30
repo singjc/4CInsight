@@ -3,7 +3,6 @@
 export const DEFAULT_RESOURCES = Object.freeze({
   cpuPercent: 85,
   maxThreads: 8,
-  physicalRamGiB: 0,
   maxPlotPoints: 2000,
   recycleWorker: true,
 })
@@ -20,7 +19,6 @@ export function normalizeResources(value = {}) {
   return {
     cpuPercent: clamp('cpuPercent', 10, 90, true),
     maxThreads: clamp('maxThreads', 1, 32, true),
-    physicalRamGiB: clamp('physicalRamGiB', 0, 2048),
     maxPlotPoints: clamp('maxPlotPoints', 200, 6000, true),
     recycleWorker: typeof source.recycleWorker === 'boolean' ? source.recycleWorker : true,
   }
@@ -66,4 +64,26 @@ export function thinPlotPoints(points, maximum = 2000) {
   if (points.length <= cap) return points
   // Fixed-step selection spans the full original result, without changing science.
   return Array.from({ length: cap }, (_, i) => points[Math.floor(i * (points.length - 1) / (cap - 1 || 1))])
+}
+
+// Strict browser capability report. Hardware concurrency is not a CPU-load meter.
+// Device Memory returns an approximate, privacy-rounded class when supported;
+// Firefox currently does not expose this API. Do not substitute disk quota,
+// WASM memory pages, or the JS heap limit for physical/free RAM.
+export function detectBrowserResources(nav = {}, perf = {}, isolated = false) {
+  const platform = String(nav.userAgentData?.platform || nav.platform || 'Unknown OS')
+  const rawThreads = Number(nav.hardwareConcurrency)
+  const threads = Number.isSafeInteger(rawThreads) && rawThreads > 0 ? rawThreads : 0
+  const rawMemory = Number(nav.deviceMemory)
+  const deviceMemoryGiB = Number.isFinite(rawMemory) && rawMemory > 0 ? rawMemory : null
+  const memory = deviceMemoryGiB === null
+    ? 'System RAM unavailable (browser restriction)'
+    : `≈${deviceMemoryGiB} GiB RAM class (approximate)`
+  const memoryNote = deviceMemoryGiB === null
+    ? 'This browser does not expose physical RAM or available system memory to websites.'
+    : 'Browser-reported RAM is rounded and may be capped. Free/available system RAM is not exposed.'
+  return {
+    platform, threads, deviceMemoryGiB, memory, memoryNote,
+    crossOriginIsolated: Boolean(isolated),
+  }
 }

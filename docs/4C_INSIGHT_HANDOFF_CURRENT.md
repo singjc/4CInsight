@@ -478,3 +478,21 @@ Scientific engine remains v0.21.0. Browser shell v0.21.0-ux6-state-reconnect.
 - UX7 does NOT implement Rayon, impose hard memory/CPU limits, or change scientific results.
 - UX7 tests: 47/47 JavaScript tests passed after reconstruction from uploaded base + UX3/UX4/UX5/UX6 overlays. Rust cargo/rustfmt unavailable in authoring environment, so native compile, formatting, and local browser integration remain UNVERIFIED. Native test job added to CI.
 - First live validation: `cargo fmt --manifest-path native/system-monitor/Cargo.toml` then `cargo test --manifest-path native/system-monitor/Cargo.toml`, start helper, use browser Settings Connect, test Linux Firefox and Chromium HTTPS Pages, check CORS/loopback prompts, inspect 3-second updates and disconnect; verify browser-only mode after killing helper.
+
+## UX8 — Browser-only automatic resource reporting (2026-10-28)
+
+- The user rejected the UX7 native sysinfo helper because it required installation, token entry, and a continuously running program. UX8 **supersedes UX7**; do not deploy or require its native helper.
+- Delete the UX7 `native/system-monitor` and `app/system-monitor.js` sources, UX7 tests, helper CI job, loopback polling, and token UI. No code attempts access to localhost.
+- On page load and every two minutes while visible, automatically sample application memory with `performance.measureUserAgentSpecificMemory` where available under cross-origin isolation, or Chromium `performance.memory.usedJSHeapSize` as an explicitly labelled JS-heap-only fallback. Firefox may provide neither.
+- Browser physical RAM is reported only when `navigator.deviceMemory` is available, as a **coarse/capped RAM class**, not exact physical or free RAM. In Firefox 158, physical RAM remains unavailable due to browser security/anti-fingerprinting restrictions. Do not invent RAM from CPU threads, WASM memory, JS heap, or disk quota.
+- Remove optional manual physical RAM field, and ignore old saved `physicalRamGiB` preference. No installation, token, setup, file-size cap, or manual entry is required to run analyses.
+- `navigator.hardwareConcurrency` gives logical processing capacity, not host CPU utilization; WASM science still uses one worker. Future PX1 will need a separate parallel WASM implementation.
+- The existing 2,983-file folder reconnection and fixed sidebar remain unchanged.
+- UX8 needs browser smoke tests in Firefox and Chromium, plus full cohort validation.
+
+### UX8 validation and distribution
+- Browser-only replacement archive: `4C_INSIGHT_UX8_BROWSER_ONLY_METRICS_20261028.tar.gz`.
+- Source overlay installer was tested on UX7 reconstruction; SHA preflight, cleanup, syntax, tests, and `git diff --check` passed.
+- JavaScript test suite: **45/45 passed**, including Firefox unavailable, Chromium approximate-class, and no-native-helper contract tests.
+- No Rust scientific source or wasm-pack build changes. Rust parity and full browser/manual cohort runs remain unverified in this environment.
+- Source versions in `app/index.html` and `app/main.js`: `0.21.0-ux8-browser-metrics`.
