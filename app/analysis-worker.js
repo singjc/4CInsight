@@ -1,6 +1,7 @@
 import { classifyInputFilename } from './file-classifier.js'
 import { validateLocalInputFile } from './resource-controls.js'
 import { measureWasmAllocation } from './wasm-memory.js'
+import { runPortableMerge } from './merge-worker.js'
 
 let wasmModulePromise = null
 let wasmMemory = null
@@ -372,6 +373,18 @@ self.addEventListener('message', async (event) => {
     }
     if (request.type === 'inspect-metadata') {
       await handleMetadataInspection(request)
+      return
+    }
+    if (request.type === 'run-merge-expression') {
+      const wasm = await loadWasm()
+      if (!wasm?.merge_begin_json || !wasm?.merge_sample_packed) throw new Error('Rebuild the M1 Rust/WASM merger before merging XLSX workbooks')
+      const { file, summary } = await runPortableMerge({
+        wasm, request,
+        postProgress: (completed, total, message) => postProgress(request.requestId, completed, total, message),
+        postWasmMemory: force => postWasmMemory(request.requestId, force),
+      })
+      postWasmMemory(request.requestId, true)
+      self.postMessage({ type: 'merge-expression-result', requestId: request.requestId, file, summary })
       return
     }
     if (request.type === 'run-expression-qc') {

@@ -103,3 +103,19 @@ CI1 patch changes three files: `app/tests/ux9-wasm-memory.test.mjs`, `.github/wo
 Validated in local reproduced trees: compiled artifacts present: 50/50 pass; both absent: 49 pass, 1 skip, zero fail; artifacts required but absent: correctly fails. Local cargo/wasm-pack build was not run for this patch; deployed GitHub Action status needs validation after push.
 
 Next: apply guarded CI1 overlay, run Node tests, commit and push. Review CI `web-static`, `wasm-bridge` and Pages `build`. Do not 'fix' the CI by deleting the real compiled WASM integration test or checking generated artifacts into git. Keep UX9 memory display, UX8 browser-only principle, and v0.21.0 science unchanged. Keep rolling handoff and prompt current. After CI is green, resume browser memory/large-cohort work.
+
+## M1 continuation (2026-10-30)
+
+Current priority: finish validation of browser-local gene/transcript XLSX merging on top of UX9/CI1. User requested restoration of original Rust merger to 4C Insight without local service or input size caps.
+
+Patch archive: `4C_INSIGHT_M1_XLSX_MERGER_20261030.tar.gz` with `m1.patch`, safe installer, and QA instructions. Shared source from uploaded v0.21.0 archive. JS tests and patch smoke check PASS. Rust, wasm-pack and browser tests are NOT yet verified.
+
+1. Apply patch to current `cfs-expression-merger` checkout (not to a different/older tree), then `cargo fmt --all` and wasm fmt.
+2. Run root Rust compile and native/portable parity fixtures. Correct any Rust compiler errors while preserving original first-workbook canonical row behavior and exact TSV output.
+3. Build WASM and run all JS tests with `CFS_REQUIRE_WASM_ARTIFACTS=1`. Do not skip generated-module test in release build.
+4. Verify browser OPFS `createWritable` and `getFile` in Firefox, merge two gene fixtures and one transcript fixture; select generated TSV in Compare Groups without picker.
+5. Test full-scale 300+ workbook cohort, peak WASM memory and IndexedDB/OPFS quota, Stop cancellation, and resumed state. No hard input caps.
+6. Verify exclusive Web Lock and cleanup of abandoned OPFS scratch after a forcibly terminated worker. Older browsers without Web Locks still lack automatic scratch cleanup.
+7. Update the rolling handoff, CI logs, and status as each validation passes. Provide copy-paste safe commands and git add/commit/push after green checks. Always use ASD-STE100.
+
+Preserve native Rust v0.21.0 science and UX9 worker-memory behavior. Do not claim that adding a large merged File to project inventory makes downstream `file.arrayBuffer` stream-safe. Later M2 milestone should stream merged table into the corrected Rust analysis engine.

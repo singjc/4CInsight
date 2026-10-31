@@ -15,6 +15,7 @@ pub mod portable_compare;
 pub mod portable_hit_structure;
 pub mod portable_io;
 pub mod portable_longitudinal;
+pub mod portable_merge;
 pub mod report;
 
 use anyhow::{Context, Result, anyhow, bail};

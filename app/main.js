@@ -1,4 +1,5 @@
 import { saveTextFile } from './save.js'
+import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
 import { methodDocs } from './docs-content.js'
 import { validateWasmMemoryReport } from './wasm-memory.js'
@@ -12,7 +13,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux9-wasm-memory'
+const APP_VERSION = '0.21.0-m1-merge'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -50,6 +51,10 @@ const state = {
   busy: false,
   error: null,
   projectMessage: '',
+  mergeBusy: false,
+  mergeProgress: '',
+  mergeReports: { gene: null, transcript: null },
+  mergeSettings: { gene: ['raw-count', 'tpm'], transcript: ['total-reads', 'tpm'], order: 'adjacent-by-sample' },
   engine: 'Waiting for local inputs',
   wasmReady: false,
   metadataInspectBusy: false,
@@ -131,7 +136,7 @@ const state = {
 const pending = new Map()
 let worker = null
 function attachScienceWorker() {
-  const current = new Worker(new URL('./analysis-worker.js', import.meta.url), { type: 'module' })
+  const current = new Worker(new URL(`./analysis-worker.js?v=${APP_VERSION}`, import.meta.url), { type: 'module' })
   current.addEventListener('message', (event) => {
     if (current !== worker) return
     const request = pending.get(event.data.requestId)
@@ -361,7 +366,8 @@ function resetQcStateAfterInputsChange() {
   state.compareConfig.customExclusionValues = []
 }
 
-async function refreshFiles(nextFiles) {
+async function refreshFiles(nextFiles, preserveConfig = false) {
+  const previousConfig = preserveConfig ? configSnapshot() : null
   state.files = nextFiles
   state.busy = true
   state.error = null
@@ -374,6 +380,7 @@ async function refreshFiles(nextFiles) {
       ? `Rust/WASM ${response.engineVersion || ''}`.trim()
       : 'JavaScript preflight fallback'
     resetQcStateAfterInputsChange()
+    if (previousConfig) applyConfigSnapshot(previousConfig)
     applyPendingStateConfig()
     if (state.loadedStateManifest) state.projectMessage = reconnectMessage()
   } catch (error) {
@@ -385,19 +392,103 @@ async function refreshFiles(nextFiles) {
 }
 
 function addFiles(fileList) {
-  if (!fileList) return
+  if (!fileList || state.mergeBusy) return
   const next = new Map(state.files)
   for (const file of Array.from(fileList)) next.set(fileKey(file), file)
   void refreshFiles(next)
 }
 
+
+async function runExpressionMerge(kind) {
+  if (state.mergeBusy || state.busy) return
+  const settings = state.mergeSettings
+  try {
+    validateMergeConfig(kind, settings[kind], settings.order)
+    const files = sortedMergeFiles(state.records, state.files, kind)
+    if (!files.length) throw new Error(`No ${kind} workbooks are selected`)
+    if (!state.wasmReady) throw new Error('The Rust/WASM science engine must be available to merge workbooks')
+    state.mergeBusy = true
+    state.busy = true
+    state.mergeProgress = `Starting ${kind} merge (${files.length} workbooks)`
+    state.error = null
+    render()
+    const response = await workerRequest('run-merge-expression', {
+      kind, files, metrics: settings[kind], order: settings.order,
+    }, event => {
+      state.mergeProgress = event.message
+      const status = document.querySelector('#merge-progress')
+      if (status) status.textContent = state.mergeProgress
+    })
+    if (!response.file || !response.summary) throw new Error('The merge worker did not return a generated TSV')
+    const newFiles = new Map(state.files)
+    newFiles.set(fileKey(response.file), response.file)
+    // The worker returns an OPFS-backed File. No download or second picker is
+    // needed for Compare Groups, QC, Longitudinal, or Significant Hits.
+    await refreshFiles(newFiles, true)
+    if (kind === 'gene') {
+      state.compareConfig.geneMergedId = fileKey(response.file)
+      state.longitudinalConfig.geneMergedId = fileKey(response.file)
+    } else {
+      state.compareConfig.transcriptMergedId = fileKey(response.file)
+      state.longitudinalConfig.transcriptMergedId = fileKey(response.file)
+    }
+    state.mergeReports[kind] = { ...response.summary, fileId: fileKey(response.file) }
+    state.projectMessage = `Merged ${response.summary.samples} ${kind} workbooks into ${response.summary.name}. Canonical features: ${response.summary.rows}. Missing: ${response.summary.missingRows}; unknown: ${response.summary.unknownRows}.`
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    state.mergeBusy = false
+    state.busy = false
+    state.mergeProgress = ''
+    render()
+  }
+}
+
+async function downloadMergedTable(kind) {
+  const report = state.mergeReports[kind]
+  const file = report && selectedFile(report.fileId)
+  if (!file) { state.error = 'The generated table is not available. Restore generated tables in Project.'; render(); return }
+  const url = URL.createObjectURL(file)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = file.name
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  // File-backed blob URL. Do not revoke before the browser starts its download.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+async function restoreMergedTables() {
+  try {
+    if (!navigator.storage?.getDirectory) throw new Error('Browser-local storage is unavailable')
+    const root = await navigator.storage.getDirectory()
+    const directory = await root.getDirectoryHandle('4c-insight-merged-tables')
+    const next = new Map(state.files)
+    let restored = 0
+    for await (const [name, handle] of directory.entries()) {
+      if (handle.kind !== 'file' || !/_merged_(gene|transcript)_expression\.tsv$/i.test(name)) continue
+      const file = await handle.getFile()
+      if (!next.has(fileKey(file))) { next.set(fileKey(file), file); restored++ }
+    }
+    await refreshFiles(next)
+    state.projectMessage = `Restored ${restored} browser-generated merged tables. Raw XLSX inputs still require folder permission if they were saved in a prior state.`
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error)
+  }
+  render()
+}
+
 function removeFile(id) {
+  if (state.mergeBusy) return
   const next = new Map(state.files)
   next.delete(id)
   void refreshFiles(next)
 }
 
 function clearProject() {
+  if (state.mergeBusy) return
+  state.mergeReports = { gene: null, transcript: null }
   state.files = new Map()
   state.records = []
   state.error = null
@@ -552,7 +643,7 @@ function configSnapshot() {
   delete compare.transcriptMergedId
   delete longitudinal.geneMergedId
   delete longitudinal.transcriptMergedId
-  return { qc, compare, longitudinal, hit, thresholds: cloneJson(state.globalThresholds), fileRefs }
+  return { qc, compare, longitudinal, hit, merge: cloneJson(state.mergeSettings), thresholds: cloneJson(state.globalThresholds), fileRefs }
 }
 
 function applicationStatePayload() {
@@ -629,6 +720,15 @@ function applyConfigSnapshot(configs) {
     transcriptMergedId: resolveSavedFileRef(refs.longitudinalTranscript),
   }
   state.hitConfig = { ...state.hitConfig, ...(configs.hit || {}) }
+  if (configs.merge && typeof configs.merge === 'object') {
+    for (const kind of ['gene', 'transcript']) {
+      const metrics = configs.merge[kind]
+      if (Array.isArray(metrics)) {
+        try { validateMergeConfig(kind, metrics, configs.merge.order || state.mergeSettings.order); state.mergeSettings[kind] = [...metrics] } catch { /* do not restore invalid options */ }
+      }
+    }
+    if (['adjacent-by-sample', 'grouped-by-measurement'].includes(configs.merge.order)) state.mergeSettings.order = configs.merge.order
+  }
   state.globalThresholds = { ...state.globalThresholds, ...(configs.thresholds || {}) }
   if (configs.hit?.qThreshold !== undefined && configs.thresholds?.fdr === undefined) state.globalThresholds.fdr = Number(configs.hit.qThreshold)
   if (configs.hit?.minAbsEffect !== undefined && configs.thresholds?.absLog2Fc === undefined) state.globalThresholds.absLog2Fc = Number(configs.hit.minAbsEffect)
@@ -897,6 +997,7 @@ function projectView() {
       ${summaryCard('Processing', state.busy ? 'Checking…' : 'Ready', reconnect ? `${reconnect.matched.toLocaleString()}/${expected.toLocaleString()} state files matched` : 'Preflight runs in a Web Worker')}
     </section>
     ${counts.length ? `<section class="card"><div class="card-heading"><div><h3>Detected data</h3><p>Review the automatic classification before you configure an analysis.</p></div></div><div class="modality-list">${counts.map(([label,count]) => `<div class="modality-pill"><span>${escapeHtml(label)}</span><strong>${count}</strong></div>`).join('')}</div></section>` : ''}
+    ${projectMergeSection()}
     <section id="input-drop-zone" class="card table-card input-drop-zone" aria-label="Input inventory drop zone">
       <div class="card-heading"><div><h3>Input inventory</h3><p>Drop files here or use the system picker above. Files are referenced in place; nothing is uploaded or copied into the application.</p></div>
       ${state.records.length ? '<div class="button-row compact"><button id="save-manifest" class="text-button">Save manifest</button><button id="clear-project" class="danger-text-button">Clear all</button></div>' : ''}</div>
@@ -907,6 +1008,31 @@ function projectView() {
       </tbody></table></div>`}
     </section>
     <div class="page-actions"><div><strong>${recognized > 0 ? 'Inputs are ready for workflow configuration.' : 'Select recognized cohort inputs to continue.'}</strong><span>Unrecognized files can be resolved in a later input-mapping step.</span></div><button id="continue-qc" class="primary-button" ${recognized === 0 || state.busy ? 'disabled' : ''}>Continue to Explore & QC</button></div>`
+}
+
+function projectMergeSection() {
+  const entries = ['gene', 'transcript'].map(kind => {
+    const count = recordsOfKind(kind === 'gene' ? 'gene-expression' : 'transcript-expression').length
+    const selected = state.mergeSettings[kind]
+    const report = state.mergeReports[kind]
+    return `<div class="config-block stacked">
+      <div class="config-heading"><div><strong>${kind === 'gene' ? 'Merge gene expression' : 'Merge transcript expression'}</strong><span>${count} detected sample workbooks · first sorted workbook defines the feature universe</span></div><span class="tag ${count ? 'success' : 'neutral'}">${count ? 'Ready' : 'No workbooks'}</span></div>
+      <div class="merge-metric-list">${mergeMetrics[kind].map(([value, label]) => `<label class="check-label"><input type="checkbox" class="merge-metric" data-kind="${kind}" value="${value}" ${selected.includes(value) ? 'checked' : ''} ${state.mergeBusy ? 'disabled' : ''} />${escapeHtml(label)}</label>`).join('')}</div>
+      <div class="button-row"><button class="primary-button run-merge" data-kind="${kind}" ${count && state.wasmReady && !state.busy && !state.mergeBusy ? '' : 'disabled'}>Merge ${kind} workbooks</button>${report && selectedFile(report.fileId) ? `<button class="secondary-button download-merge" data-kind="${kind}">Download TSV</button>` : ''}</div>
+      ${report ? `<small>${report.samples} samples · ${report.rows} features · missing ${report.missingRows} · unknown ${report.unknownRows} · ${humanBytes(report.bytes)}</small>` : ''}
+    </div>`
+  }).join('')
+  return `<section class="card"><div class="card-heading"><div><h3>Merge individual expression workbooks</h3><p>Local Rust/WASM merger. One XLSX workbook at a time, with browser-local temporary files. Generated TSV tables are available immediately to downstream workflows.</p></div><span class="tag success">No upload</span></div>
+    <div class="form-grid merge-settings-grid"><label><span>Output column order</span><select id="merge-column-order" ${state.mergeBusy ? 'disabled' : ''}>
+      <option value="adjacent-by-sample" ${state.mergeSettings.order === 'adjacent-by-sample' ? 'selected' : ''}>Measurements adjacent by sample</option>
+      <option value="grouped-by-measurement" ${state.mergeSettings.order === 'grouped-by-measurement' ? 'selected' : ''}>Samples grouped by measurement</option>
+    </select></label></div>
+    <div class="form-grid">${entries}</div>
+    <div id="merge-progress" role="status" aria-live="polite">${escapeHtml(state.mergeProgress)}</div>
+    ${state.mergeBusy ? '<button id="stop-merge" class="danger-text-button">Stop merging</button>' : ''}
+    <div class="button-row"><button id="restore-merged" class="secondary-button" ${state.mergeBusy ? 'disabled' : ''}>Restore browser-generated tables</button></div>
+    <p class="muted-note">First workbook determines canonical feature rows. Features absent from later workbooks are empty. Unknown later features are counted, not added. Temporary tables use browser origin storage; do not clear site data before downloading important results. Stop does not modify source files.</p>
+  </section>`
 }
 
 function metricOptions(options, selected) {
@@ -2485,6 +2611,18 @@ function bindProjectEvents() {
   }
   document.querySelector('#save-manifest')?.addEventListener('click', () => void exportManifest())
   document.querySelector('#clear-project')?.addEventListener('click', clearProject)
+  document.querySelector('#merge-column-order')?.addEventListener('change', event => { state.mergeSettings.order = event.currentTarget.value })
+  document.querySelectorAll('.merge-metric').forEach(input => input.addEventListener('change', event => {
+    const { kind } = event.currentTarget.dataset
+    const selected = new Set(state.mergeSettings[kind])
+    if (event.currentTarget.checked) selected.add(event.currentTarget.value)
+    else selected.delete(event.currentTarget.value)
+    state.mergeSettings[kind] = mergeMetrics[kind].map(([value]) => value).filter(value => selected.has(value))
+  }))
+  document.querySelectorAll('.run-merge').forEach(button => button.addEventListener('click', () => void runExpressionMerge(button.dataset.kind)))
+  document.querySelectorAll('.download-merge').forEach(button => button.addEventListener('click', () => void downloadMergedTable(button.dataset.kind)))
+  document.querySelector('#restore-merged')?.addEventListener('click', () => void restoreMergedTables())
+  document.querySelector('#stop-merge')?.addEventListener('click', stopScienceWork)
   document.querySelector('#continue-qc')?.addEventListener('click', () => { state.tab = 'qc'; render() })
   document.querySelectorAll('.remove-file').forEach((button) => button.addEventListener('click', () => removeFile(button.dataset.fileId)))
 }

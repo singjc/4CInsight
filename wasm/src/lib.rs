@@ -19,46 +19,44 @@ mod analysis {
     }
 }
 
-#[path = "../../src/input_conventions.rs"]
-mod input_conventions;
 #[allow(dead_code)]
 #[path = "../../src/cohort.rs"]
 mod cohort;
 #[allow(dead_code)]
-#[path = "../../src/metadata.rs"]
-mod metadata;
-#[allow(dead_code)]
 #[path = "../../src/corrected.rs"]
 mod corrected;
 #[allow(dead_code)]
-#[path = "../../src/portable_io.rs"]
-mod portable_io;
+#[path = "../../src/hit_structure_core.rs"]
+mod hit_structure_core;
+#[path = "../../src/input_conventions.rs"]
+mod input_conventions;
 #[allow(dead_code)]
 #[path = "../../src/longitudinal.rs"]
 mod longitudinal;
+#[allow(dead_code)]
+#[path = "../../src/metadata.rs"]
+mod metadata;
 #[path = "../../src/portable_compare.rs"]
 mod portable_compare;
-#[path = "../../src/portable_longitudinal.rs"]
-mod portable_longitudinal;
-#[allow(dead_code)]
-#[path = "../../src/hit_structure_core.rs"]
-mod hit_structure_core;
 #[path = "../../src/portable_hit_structure.rs"]
 mod portable_hit_structure;
+#[allow(dead_code)]
+#[path = "../../src/portable_io.rs"]
+mod portable_io;
+#[path = "../../src/portable_longitudinal.rs"]
+mod portable_longitudinal;
+#[path = "../../src/portable_merge.rs"]
+mod portable_merge;
 
-use input_conventions::{FilenameInputKind, classify_input_filename};
-use portable_compare::{
-    PortableExpressionComparisonConfig, run_portable_expression_comparison,
-};
-use portable_longitudinal::{
-    PortableLongitudinalConfig, run_portable_expression_longitudinal,
-};
-use portable_hit_structure::run_portable_expression_hit_structure;
 use hit_structure_core::SignificantHitStructureConfig;
+use input_conventions::{FilenameInputKind, classify_input_filename};
+use portable_compare::{PortableExpressionComparisonConfig, run_portable_expression_comparison};
+use portable_hit_structure::run_portable_expression_hit_structure;
 use portable_io::{
     PortableExpressionKind, PortableExpressionMetric, inspect_metadata_bytes,
     metadata_column_values_bytes, summarize_expression_bytes,
 };
+use portable_longitudinal::{PortableLongitudinalConfig, run_portable_expression_longitudinal};
 
 #[derive(Serialize)]
 struct EngineInfo<'a> {
@@ -134,7 +132,8 @@ pub fn classify_filename_json(name: &str) -> String {
         },
     };
 
-    serde_json::to_string(&classification).expect("filename classification serialization is infallible")
+    serde_json::to_string(&classification)
+        .expect("filename classification serialization is infallible")
 }
 
 #[wasm_bindgen]
@@ -158,17 +157,11 @@ pub fn summarize_expression_json(
 ) -> Result<String, JsValue> {
     let requested_kind = PortableExpressionKind::parse(requested_kind).map_err(js_error)?;
     let metric = PortableExpressionMetric::parse(metric).map_err(js_error)?;
-    let summary = summarize_expression_bytes(
-        file_name,
-        bytes,
-        requested_kind,
-        metric,
-        ignore_zeros,
-    )
-    .map_err(js_error)?;
+    let summary =
+        summarize_expression_bytes(file_name, bytes, requested_kind, metric, ignore_zeros)
+            .map_err(js_error)?;
     serde_json::to_string(&summary).map_err(js_error)
 }
-
 
 #[wasm_bindgen]
 pub fn metadata_column_values_json(
@@ -219,7 +212,6 @@ pub fn run_expression_comparison_json(
     .map_err(js_error)
 }
 
-
 fn run_expression_longitudinal_json_core(
     metadata_file_name: &str,
     metadata_bytes: &[u8],
@@ -258,7 +250,6 @@ pub fn run_expression_longitudinal_json(
     )
     .map_err(js_error)
 }
-
 
 fn run_expression_hit_structure_json_core(
     metadata_file_name: &str,
@@ -345,7 +336,6 @@ mod tests {
         assert!(json.contains("\"median\":3.0"));
     }
 
-
     #[test]
     fn w3_gene_comparison_runs_through_wasm_bridge() {
         let metadata = include_bytes!("../../tests/fixtures/w3_metadata.tsv");
@@ -411,7 +401,6 @@ mod tests {
         assert!(json.contains("\"samples\":7"));
     }
 
-
     #[test]
     fn w5_gene_significant_hit_structure_runs_through_wasm_bridge() {
         let metadata = include_bytes!("../../tests/fixtures/w3_metadata.tsv");
@@ -457,5 +446,78 @@ mod tests {
         assert!(json.contains("\"silhouette\""));
         assert!(json.contains("\"nearest_neighbor_group_accuracy\""));
     }
+}
 
+// M1: Portable XLSX merger. One workbook is read per call. The JS worker owns
+// browser-local scratch, so neither Rust nor WASM retains the cohort matrix.
+use portable_merge::{PortableMergeKind, PortableMergeMetric, PortableMergeOrder, PortableMerger};
+use std::cell::RefCell;
+thread_local! {
+    static MERGE_SESSION: RefCell<Option<PortableMerger>> = const { RefCell::new(None) };
+    static LAST_MERGE_SAMPLE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+#[wasm_bindgen]
+pub fn merge_begin_json(
+    first_bytes: &[u8],
+    kind_json: &str,
+    metrics_json: &str,
+    order_json: &str,
+    names_json: &str,
+) -> Result<String, JsValue> {
+    let kind: PortableMergeKind = serde_json::from_str(kind_json).map_err(js_error)?;
+    let metrics: Vec<PortableMergeMetric> = serde_json::from_str(metrics_json).map_err(js_error)?;
+    let order: PortableMergeOrder = serde_json::from_str(order_json).map_err(js_error)?;
+    let names: Vec<String> = serde_json::from_str(names_json).map_err(js_error)?;
+    let session =
+        PortableMerger::begin(first_bytes, kind, metrics, order, &names).map_err(js_error)?;
+    let plan = serde_json::to_string(&session.plan()).map_err(js_error)?;
+    MERGE_SESSION.with(|cell| *cell.borrow_mut() = Some(session));
+    Ok(plan)
+}
+
+#[wasm_bindgen]
+pub fn merge_sample_packed(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+    MERGE_SESSION.with(|cell| {
+        let borrow = cell.borrow();
+        let session = borrow
+            .as_ref()
+            .ok_or_else(|| js_error("merge session not started"))?;
+        let (packed, report) = session.sample(bytes).map_err(js_error)?;
+        let json = serde_json::to_string(&report).map_err(js_error)?;
+        LAST_MERGE_SAMPLE.with(|last| *last.borrow_mut() = Some(json));
+        Ok(packed)
+    })
+}
+
+#[wasm_bindgen]
+pub fn merge_last_sample_json() -> String {
+    LAST_MERGE_SAMPLE.with(|cell| cell.borrow().clone().unwrap_or_else(|| "{}".to_string()))
+}
+
+#[wasm_bindgen]
+pub fn merge_header_tsv() -> Result<String, JsValue> {
+    MERGE_SESSION.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(PortableMerger::header)
+            .ok_or_else(|| js_error("merge session not started"))
+    })
+}
+
+#[wasm_bindgen]
+pub fn merge_render_rows_tsv(start: usize, count: usize, packed: &[u8]) -> Result<String, JsValue> {
+    MERGE_SESSION.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .ok_or_else(|| js_error("merge session not started"))?
+            .rows_tsv(start, count, packed)
+            .map_err(js_error)
+    })
+}
+
+#[wasm_bindgen]
+pub fn merge_reset() {
+    MERGE_SESSION.with(|cell| *cell.borrow_mut() = None);
+    LAST_MERGE_SAMPLE.with(|cell| *cell.borrow_mut() = None);
 }

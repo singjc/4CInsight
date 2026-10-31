@@ -37,7 +37,7 @@ jobs:
             --out-dir ../app/wasm \
             --out-name four_c_insight_wasm \
             --release
-          CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/ux9-wasm-memory.test.mjs
+          CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/ux9-wasm-memory.test.mjs app/tests/m1-wasm-integration.test.mjs
 
   web-static:
     runs-on: ubuntu-latest
@@ -52,4 +52,6 @@ jobs:
           node --check app/analysis-worker.js
           node --check app/file-classifier.js
           node --check app/save.js
+          node --check app/merge-helpers.js
+          node --check app/merge-worker.js
           node --check app/coi-serviceworker.js

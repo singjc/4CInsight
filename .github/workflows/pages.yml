@@ -9,6 +9,7 @@ on:
       - 'wasm/**'
       - 'src/input_conventions.rs'
       - 'src/portable_io.rs'
+      - 'src/portable_merge.rs'
       - 'src/portable_compare.rs'
       - 'src/portable_longitudinal.rs'
       - 'src/portable_hit_structure.rs'
@@ -58,6 +59,8 @@ jobs:
           node --check app/save.js
           node --check app/persistence.js
           node --check app/resource-controls.js
+          node --check app/merge-helpers.js
+          node --check app/merge-worker.js
           node --check app/docs-content.js
           node --check app/coi-serviceworker.js
       - uses: actions/configure-pages@v5

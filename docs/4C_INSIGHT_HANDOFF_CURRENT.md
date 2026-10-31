@@ -533,3 +533,50 @@ CI1 fix:
 Local simulation results: built module available: **50 passed, 0 failed**; source-only checkout: **49 passed, 1 intentionally skipped, 0 failed**; forced mode without output: **expected failure**. These checks use an existing compiled WASM module; live GitHub CI and fresh wasm-pack compilation remain unverified until a push.
 
 After applying: run tests, stage and commit `.github/workflows/ci.yml`, `.github/workflows/pages.yml`, `app/tests/ux9-wasm-memory.test.mjs`, and the rolling docs. Push and confirm both `web-static` and `wasm-bridge` jobs, then the Pages deployment build. A source-only skip is expected; a compiled WASM test skip is not permitted.
+
+## M1 — Browser gene/transcript XLSX merger (2026-10-30)
+
+Implementation source patch prepared against the post-UX9/CI1 application, based on the user's earlier `cfs-expression-merger.tar.gz` engine. The source-only patch has **not** been compiled in Rust in this environment. It must not be described as scientifically validated until cargo and generated-WASM tests pass.
+
+### Added Rust shared portable merge core
+
+- `src/portable_merge.rs`, used by native root crate and `wasm/src/lib.rs`.
+- Portable XLSX parsing with `calamine::Xlsx<Cursor<&[u8]>>`, one input workbook per operation.
+- Strict first-sorted-workbook feature universe, duplicate canonical entity check, normalized unique sample names.
+- Same gene/transcript metrics and common output formatting as original `merge_wide()`.
+- Packed 9-byte measurement cells and row-batch TSV renderer that avoids retaining every sample matrix in WASM.
+- WASM exports `merge_begin_json`, `merge_sample_packed`, `merge_last_sample_json`, `merge_header_tsv`, `merge_render_rows_tsv`, `merge_reset`.
+- `tests/merge_portable_parity.rs` compares native `merge_wide()` TSV output against the portable code using real fixture XLSX files. BOTH adjacent/grouped orders and gene/transcript presets are covered, plus malformed configuration checks.
+
+### Browser workflow
+
+- `app/merge-helpers.js`, `app/merge-worker.js`.
+- Project page: merge gene or transcript workbooks, select available metrics, select column order, progress, Stop, Download TSV, Restore browser-generated tables.
+- Browser worker reads one XLSX at a time and writes temporary compact sample matrices to origin-private file system (OPFS). Output TSV assembled in memory-bounded row slices (2 MiB packed input target), stored in OPFS and returned as a native browser `File`.
+- Merged output is added to project inventory; Compare Groups and Longitudinal merged-table selections are updated automatically. Existing comparison selections and model configuration are preserved when adding a merged table.
+- No upload, native helper, new input size cap, or Rayon introduced. Scientific engine stays v0.21.0; capability is M1.
+- Full workbook contents still must fit in memory **one workbook at a time** during XLSX parsing. Downstream scientific analysis still uses `file.arrayBuffer()` on the full merged TSV. This milestone does **not** claim fully streaming end-to-end analysis.
+- Temporary OPFS runs delete on success/error. On browsers that support Web Locks, the next merge runs under an exclusive lock and removes abandoned scratch folders from terminated merges. On browsers without Web Locks, forced cancellation can leave scratch folders; cleanup remains a future task.
+- Generated merged output is saved in browser site storage, not the source folder. Download TSV for durable storage. A saved `.4cstate` contains only its reference; restore generated tables on the same browser profile, or use the file picker with the exported TSV.
+
+### Validation performed in creation environment
+
+- JS syntax checks: PASS.
+- `node --test app/tests/*.test.mjs`: 48 pass, 2 skip (generated-WASM tests), 0 fail on clean source-only checkout.
+- Patch application and `git diff --check`: PASS.
+- Rust compilation / native merger parity / generated-WASM integration / Firefox OPFS / 300+ workbook peak memory: **NOT RUN** (Rust toolchain absent from creation environment).
+
+### Required release gate
+
+```
+cargo fmt --all
+cargo fmt --manifest-path wasm/Cargo.toml --all
+cargo check --locked
+cargo test --locked --test merge_portable_parity
+cargo test --manifest-path wasm/Cargo.toml --locked
+cargo check --manifest-path wasm/Cargo.toml --locked --target wasm32-unknown-unknown
+wasm-pack build wasm --target web --out-dir ../app/wasm --out-name four_c_insight_wasm --release
+CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/*.test.mjs
+```
+
+Run local Firefox/Chrome UI with the 2 gene fixture XLSX files and one transcript XLSX fixture. Confirm merge output data and provenance, downstream comparison selection, downloadable TSV, and restore after reload. Test at least one large cohort (300+ workbooks), measure OPFS use, browser peak memory, and result parity before deploying broadly.
