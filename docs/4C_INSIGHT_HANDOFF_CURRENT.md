@@ -580,3 +580,56 @@ CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/*.test.mjs
 ```
 
 Run local Firefox/Chrome UI with the 2 gene fixture XLSX files and one transcript XLSX fixture. Confirm merge output data and provenance, downstream comparison selection, downloadable TSV, and restore after reload. Test at least one large cohort (300+ workbooks), measure OPFS use, browser peak memory, and result parity before deploying broadly.
+
+---
+
+## MD1 — Sample Metadata workspace (2026-11-02)
+
+### Goal and status
+
+Implement a browser-local sample metadata viewer, creator, editor, and file-to-sample mapper in 4C Insight, while preserving the Rust/WASM scientific engine v0.21.0. MD1 is a **source implementation awaiting native/WASM rebuild, CI validation, and real-cohort browser smoke testing**. No network upload, local daemon, physical RAM dependency, or fixed file-count cap is introduced.
+
+### Source implementation
+
+- `app/sample-metadata.js` (new): pure metadata-table model, quoted TSV/CSV parsing and serialization, duplicate/blank ID validation, edit operations, full-table search/filter/sort, deterministic sample rows from recognized individual workbooks, exact file ID mapping, alias writes with collision protection, file-map TSV export.
+- `app/main.js`: new Sample Metadata navigation/workspace and Project entry. Load existing metadata (TSV/CSV/XLSX), create from discovered sample workbooks, create empty table, edit cells/rows/columns, bulk edit filtered rows with confirmation, search/sort/paginate, map individual report files to samples, download metadata and mappings, and select generated metadata TSV for existing QC/Compare Groups/Longitudinal via `refreshFiles(next, true)`. Generated File must be downloaded for persistence across browser restarts. Saved state still contains references/settings only.
+- `wasm/src/lib.rs`: new `read_metadata_table_json` export through the **existing** `parse_metadata_bytes` Rust parser, retaining full rows including XLSX. Existing `inspect_metadata_json` continues to provide scientific ID checks. The scientific analysis models are not changed.
+- `app/analysis-worker.js`: `load-metadata-table` request decodes the complete selected metadata file in Rust/WASM and returns its rows. XLSX requires rebuilt WASM; JS-only file name classification is insufficient.
+- `app/styles.css`: capped visible rows per page (60) and mapping rows (40), sticky table headers, column scrolling and mobile layout. This is a render bound, not a file-size or metadata-row count limit.
+- `app/index.html`: cache version set to `0.21.0-md1-sample-metadata`.
+- CI/Pages workflow: syntax-check new JS module; generated WASM export checked in `wasm-bridge` after build and in Pages build; source-only CI skips binding check without generated files.
+- `app/tests/md1-sample-metadata.test.mjs`: checks schema, TSV/CSV quotes, duplicate IDs, editing, exact matching, ambiguous mappings, alias conflicts, 2,983-file scaling, integration contract and WASM-export gating. Rust tests in `wasm/src/lib.rs` cover TSV and XLSX full-table reads.
+
+### Scientific and UX boundaries
+
+- Canonical `sample_id` is the recommended unique biological sample identifier. Imported metadata can use another selected sample/observation ID column, compatible with the existing role-based QC/Compare Groups/Longitudinal configuration.
+- File-to-sample assignments can populate standard `gene_expression_id`, `transcript_expression_id`, `bcr_id`, etc. alias columns. They can also be exported with original file relative paths in a separate TSV mapping manifest.
+- **Current downstream corrected analysis still matches expression-table sample columns to the selected metadata ID column.** The mapping manifest does not itself rewrite expression table headers or alter the statistical model. Do not claim full cross-modality alias resolution is enabled until implemented and independently tested.
+- Imported XLSX decoding and generated TSV science binding require native/WASM rebuild; do not claim compilation or scientific parity has passed in this environment.
+- Draft edits stay in browser memory in this version. The user must download the metadata TSV and mapping manifest to retain edits after a page reload. The generated File added to the project inventory is session-only until the user saves and re-selects it. Never describe saved application-state JSON as containing metadata data cells.
+- Only one sample workbook per modality/sample maps to a single alias; conflicting source IDs for the same sample and modality are blocked, never silently overwritten.
+- Tests need both a basic empty-project create/edit/export and a real 300+ workbook + collaborator XLSX import/browser check. Verify button disable/enable after fixing duplicate IDs, cross-platform quoted TSV handling, and that edited metadata is active in Compare Groups.
+
+### Source-only validation done here
+
+- Reconstructed source from the uploaded archive plus UX3–UX9/CI1 and M1 overlays.
+- JavaScript syntax checks passed.
+- Node test suite: **71 total, 69 pass, 2 generated-WASM artifact tests skip, 0 fail**.
+- Rust toolchain unavailable in this workspace: native Rust tests and WASM rebuild not executed.
+- Browser headless localhost smoke blocked by this environment's browser network restrictions: interactive acceptance not verified.
+
+### MD1 release gates and next work
+
+1. Apply the MD1 patch to the user's current M1 checkout (verify `git apply --check`).
+2. Run `cargo fmt --all -- --check`, `cargo check --locked`, `cargo test --locked`; then `cargo test --manifest-path wasm/Cargo.toml --locked`.
+3. Build `wasm-pack build wasm --target web --out-dir ../app/wasm --out-name four_c_insight_wasm --release`.
+4. Run `CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/*.test.mjs`.
+5. In browser, load an XLSX sample sheet, filter and edit, resolve duplicate sample IDs, match workbooks to samples, add alias columns, download TSVs, and confirm generated metadata is selected for W3 and W4. Validate with real cohort; no silent semantic changes.
+6. Check GitHub Actions CI and Pages deployment after commit.
+7. Next suggested MD2: bulk mapping/import file paths from a manifest, undo/redo and resilient IndexedDB draft recovery, full alias resolution in scientific input bridge with independent parity tests, and very large metadata table editing without full-file roundtrip.
+
+## MD1 installer source-format recovery — 2026-11-02
+- First MD1 installer was blocked while applying `wasm/src/lib.rs` because Rust formatting differed from the pre-format M1 patch baseline.
+- Root cause is a source-context mismatch; the user's working tree was clean. No source was overwritten by the first installer.
+- Recovery installer applies the unchanged non-WASM MD1 patch and adds the same metadata bridge and two Rust tests with formatting-independent anchors.
+- Release remains conditional on native Rust tests, wasm32 compilation, generated-WASM tests, and a real-cohort browser smoke test.

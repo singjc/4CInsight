@@ -54,7 +54,7 @@ use portable_compare::{PortableExpressionComparisonConfig, run_portable_expressi
 use portable_hit_structure::run_portable_expression_hit_structure;
 use portable_io::{
     PortableExpressionKind, PortableExpressionMetric, inspect_metadata_bytes,
-    metadata_column_values_bytes, summarize_expression_bytes,
+    metadata_column_values_bytes, parse_metadata_bytes, summarize_expression_bytes,
 };
 use portable_longitudinal::{PortableLongitudinalConfig, run_portable_expression_longitudinal};
 
@@ -145,6 +145,14 @@ pub fn inspect_metadata_json(
     let selected_id = (!id_column.trim().is_empty()).then_some(id_column);
     let inspection = inspect_metadata_bytes(file_name, bytes, selected_id).map_err(js_error)?;
     serde_json::to_string(&inspection).map_err(js_error)
+}
+
+/// Read all metadata rows for the browser editor. The same parser is used by
+/// native and WASM science, including XLSX, TSV, and CSV.
+#[wasm_bindgen]
+pub fn read_metadata_table_json(file_name: &str, bytes: &[u8]) -> Result<String, JsValue> {
+    let table = parse_metadata_bytes(file_name, bytes).map_err(js_error)?;
+    serde_json::to_string(&table).map_err(js_error)
 }
 
 #[wasm_bindgen]
@@ -319,6 +327,24 @@ mod tests {
         let json = inspect_metadata_json("w2_metadata.tsv", bytes, "sample_id").unwrap();
         assert!(json.contains("\"rows\":3"));
         assert!(json.contains("\"id_column\":\"sample_id\""));
+    }
+
+    #[test]
+    fn full_metadata_table_preserves_all_rows() {
+        let bytes = include_bytes!("../../tests/fixtures/w2_metadata.tsv");
+        let json = read_metadata_table_json("w2_metadata.tsv", bytes).unwrap();
+        let table: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(table["columns"][0], "sample_id");
+        assert_eq!(table["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(table["id_column"], "sample_id");
+    }
+
+    #[test]
+    fn full_metadata_table_reads_xlsx_fixture() {
+        let bytes = include_bytes!("../../tests/fixtures/w2_metadata.xlsx");
+        let json = read_metadata_table_json("w2_metadata.xlsx", bytes).unwrap();
+        let table: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(table["rows"].as_array().unwrap().len(), 3);
     }
 
     #[test]

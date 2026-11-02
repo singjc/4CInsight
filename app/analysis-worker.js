@@ -111,6 +111,17 @@ async function handleMetadataInspection(request) {
   })
 }
 
+async function handleMetadataTable(request) {
+  const wasm = await loadWasm()
+  if (!wasm?.read_metadata_table_json) {
+    throw new Error('Rebuild the 4C Insight WASM module to enable the full metadata editor')
+  }
+  const bytes = await wasmBytes(request.file)
+  const table = JSON.parse(wasm.read_metadata_table_json(request.file.name, bytes))
+  postWasmMemory(request.requestId, true)
+  self.postMessage({ type: 'metadata-table-result', requestId: request.requestId, table })
+}
+
 async function handleExpressionQc(request) {
   const wasm = await loadWasm()
   if (!wasm) throw new Error('Rust/WASM is required for expression QC. Build or deploy app/wasm first.')
@@ -369,6 +380,10 @@ self.addEventListener('message', async (event) => {
   try {
     if (request.type === 'preflight') {
       await handlePreflight(request)
+      return
+    }
+    if (request.type === 'load-metadata-table') {
+      await handleMetadataTable(request)
       return
     }
     if (request.type === 'inspect-metadata') {

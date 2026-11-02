@@ -46,7 +46,7 @@ test('UX8 has no native monitor download, token, localhost connection or native 
   assert.doesNotMatch(main, /127\.0\.0\.1|http:\/\//)
   assert.doesNotMatch(ci, /native-system-monitor/)
   assert.doesNotMatch(pages, /system-monitor\.js/)
-  assert.match(html, /m1-merge/)
+  assert.match(html, /md1-sample-metadata/)
   await assert.rejects(access(new URL('../system-monitor.js', import.meta.url)), /ENOENT/)
   await assert.rejects(access(new URL('../../native/system-monitor/Cargo.toml', import.meta.url)), /ENOENT/)
 })

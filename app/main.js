@@ -1,3 +1,9 @@
+import {
+  CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
+  draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
+  addRow, setCell, removeRow, autoMapFiles, mappingSummary, mappingManifest,
+  matchingFiles, filterRows, serializeDelimited, applyMappingsToAliases,
+} from './sample-metadata.js'
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
@@ -13,12 +19,13 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-m1-merge'
+const APP_VERSION = '0.21.0-md1-sample-metadata'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
 const tabs = [
   ['project', 'Project', '1'],
+  ['metadata', 'Sample Metadata', 'M'],
   ['qc', 'Explore & QC', '2'],
   ['compare', 'Compare Groups', '3'],
   ['longitudinal', 'Longitudinal', '4'],
@@ -55,6 +62,12 @@ const state = {
   mergeProgress: '',
   mergeReports: { gene: null, transcript: null },
   mergeSettings: { gene: ['raw-count', 'tpm'], transcript: ['total-reads', 'tpm'], order: 'adjacent-by-sample' },
+  metadataEditor: {
+    table: null, sourceName: '', sourceId: '', generatedId: '', mappings: {},
+    idColumn: 'sample_id', dirty: false, status: '', filter: '', filterColumn: '',
+    filterValue: '', sortColumn: '', descending: false, page: 0,
+    mapFilter: '', mapUnmatched: false, mapPage: 0,
+  },
   engine: 'Waiting for local inputs',
   wasmReady: false,
   metadataInspectBusy: false,
@@ -375,6 +388,11 @@ async function refreshFiles(nextFiles, preserveConfig = false) {
   try {
     const response = await preflightFiles([...nextFiles.values()].map(fileMetadata))
     state.records = response.records
+    if (state.metadataEditor.table) {
+      state.metadataEditor.mappings = autoMapFiles(
+        state.records, state.metadataEditor.table, state.metadataEditor.idColumn, state.metadataEditor.mappings,
+      )
+    }
     state.wasmReady = response.wasmReady
     state.engine = response.wasmReady
       ? `Rust/WASM ${response.engineVersion || ''}`.trim()
@@ -489,6 +507,7 @@ function removeFile(id) {
 function clearProject() {
   if (state.mergeBusy) return
   state.mergeReports = { gene: null, transcript: null }
+  state.metadataEditor = { ...state.metadataEditor, table: null, sourceName: '', sourceId: '', generatedId: '', mappings: {}, dirty: false, status: '' }
   state.files = new Map()
   state.records = []
   state.error = null
@@ -997,6 +1016,7 @@ function projectView() {
       ${summaryCard('Processing', state.busy ? 'Checking…' : 'Ready', reconnect ? `${reconnect.matched.toLocaleString()}/${expected.toLocaleString()} state files matched` : 'Preflight runs in a Web Worker')}
     </section>
     ${counts.length ? `<section class="card"><div class="card-heading"><div><h3>Detected data</h3><p>Review the automatic classification before you configure an analysis.</p></div></div><div class="modality-list">${counts.map(([label,count]) => `<div class="modality-pill"><span>${escapeHtml(label)}</span><strong>${count}</strong></div>`).join('')}</div></section>` : ''}
+    ${projectMetadataSection()}
     ${projectMergeSection()}
     <section id="input-drop-zone" class="card table-card input-drop-zone" aria-label="Input inventory drop zone">
       <div class="card-heading"><div><h3>Input inventory</h3><p>Drop files here or use the system picker above. Files are referenced in place; nothing is uploaded or copied into the application.</p></div>
@@ -1008,6 +1028,94 @@ function projectView() {
       </tbody></table></div>`}
     </section>
     <div class="page-actions"><div><strong>${recognized > 0 ? 'Inputs are ready for workflow configuration.' : 'Select recognized cohort inputs to continue.'}</strong><span>Unrecognized files can be resolved in a later input-mapping step.</span></div><button id="continue-qc" class="primary-button" ${recognized === 0 || state.busy ? 'disabled' : ''}>Continue to Explore & QC</button></div>`
+}
+
+function projectMetadataSection() {
+  const metadataCount = recordsOfKind('metadata-candidate').length
+  const discovered = matchingFiles(state.records).length
+  return `<section class="action-panel" aria-label="Sample metadata workspace">
+    <div class="action-copy"><h3>Sample Metadata</h3><p>View or create a sample sheet, edit cohort fields, and map ${discovered.toLocaleString()} individual report files to biological samples. ${metadataCount} metadata file(s) detected.</p></div>
+    <div class="button-row"><button id="open-sample-metadata" class="secondary-button" type="button">Open metadata workspace</button></div>
+  </section>`
+}
+
+function metadataEditorOrNull() { return state.metadataEditor.table }
+function metadataSelectOptions(columns, chosen, includeBlank = false) {
+  return `${includeBlank ? '<option value="">All columns</option>' : ''}${columns.map(column => `<option value="${escapeHtml(column)}" ${column === chosen ? 'selected' : ''}>${escapeHtml(column)}</option>`).join('')}`
+}
+function metadataFilteredRows() {
+  const editor = state.metadataEditor
+  if (!editor.table) return []
+  return filterRows(editor.table, editor.filter, editor.filterColumn, editor.filterValue, editor.sortColumn, editor.descending)
+}
+function metadataFilterValues(editor) {
+  const index = editor.table?.columns.indexOf(editor.filterColumn) ?? -1
+  if (index < 0) return []
+  return [...new Set(editor.table.rows.map(row => row[index]).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).slice(0, 250)
+}
+function metadataTableRows() {
+  const editor = state.metadataEditor
+  const matches = metadataFilteredRows()
+  const pageSize = 60, maxPage = Math.max(0, Math.ceil(matches.length / pageSize) - 1)
+  editor.page = Math.min(editor.page, maxPage)
+  const pageRows = matches.slice(editor.page * pageSize, (editor.page + 1) * pageSize)
+  return `<div class="metadata-list-meta"><span>Showing ${pageRows.length} of ${matches.length.toLocaleString()} matching rows · ${editor.table.rows.length.toLocaleString()} total</span><div class="button-row compact"><button class="secondary-button" id="metadata-page-prev" ${editor.page === 0 ? 'disabled' : ''}>Previous</button><span>Page ${editor.page + 1} / ${maxPage + 1}</span><button class="secondary-button" id="metadata-page-next" ${editor.page >= maxPage ? 'disabled' : ''}>Next</button></div></div>
+    <div class="table-scroll metadata-grid-scroll" role="region" aria-label="Editable sample metadata" tabindex="0">
+    <table class="metadata-editor-table"><thead><tr><th>Row</th>${editor.table.columns.map(column => `<th>${escapeHtml(column)} <button class="metadata-sort" data-column="${escapeHtml(column)}" type="button" aria-label="Sort by ${escapeHtml(column)}">${editor.sortColumn === column ? (editor.descending ? '↓' : '↑') : '↕'}</button></th>`).join('')}<th>Actions</th></tr></thead>
+    <tbody>${pageRows.map(({ row, index }) => `<tr><td class="metadata-row-index">${index + 1}</td>${editor.table.columns.map((column, col) => `<td><input class="metadata-cell" data-row="${index}" data-col="${col}" aria-label="${escapeHtml(column)} row ${index + 1}" value="${escapeHtml(row[col] ?? '')}" autocomplete="off" /></td>`).join('')}<td><button class="danger-text-button metadata-remove-row" data-row="${index}" aria-label="Remove row ${index + 1}" type="button">Remove</button></td></tr>`).join('')}</tbody></table></div>`
+}
+function metadataMappingRows() {
+  const editor = state.metadataEditor
+  const rows = matchingFiles(state.records).filter(record => {
+    const matches = (record.relativePath || record.name).toLocaleLowerCase().includes(editor.mapFilter.toLocaleLowerCase()) || String(record.sampleId || '').toLocaleLowerCase().includes(editor.mapFilter.toLocaleLowerCase())
+    return matches && (!editor.mapUnmatched || !editor.mappings[record.id])
+  })
+  const size = 40, maxPage = Math.max(0, Math.ceil(rows.length / size) - 1)
+  editor.mapPage = Math.min(editor.mapPage, maxPage)
+  const shown = rows.slice(editor.mapPage * size, (editor.mapPage + 1) * size)
+  return `<div class="metadata-list-meta"><span>Showing ${shown.length} of ${rows.length.toLocaleString()} file mappings</span><div class="button-row compact"><button id="mapping-prev" class="secondary-button" ${editor.mapPage === 0 ? 'disabled' : ''}>Previous</button><span>${editor.mapPage + 1} / ${maxPage + 1}</span><button id="mapping-next" class="secondary-button" ${editor.mapPage >= maxPage ? 'disabled' : ''}>Next</button></div></div>
+  <div class="table-scroll metadata-grid-scroll" role="region" aria-label="File to sample mapping" tabindex="0"><table class="metadata-editor-table"><thead><tr><th>File</th><th>Modality</th><th>Detected sample</th><th>Mapped biological sample</th><th>Status</th></tr></thead><tbody>
+  ${shown.map(record => `<tr><td title="${escapeHtml(record.relativePath)}">${escapeHtml(record.name)}</td><td>${escapeHtml(record.label || record.kind)}</td><td>${escapeHtml(record.sampleId || '—')}</td><td><input class="mapping-sample" data-file-id="${escapeHtml(record.id)}" list="sample-mapping-ids" value="${escapeHtml(editor.mappings[record.id] || '')}" placeholder="Select or enter sample ID" aria-label="Sample for ${escapeHtml(record.name)}" /></td><td><span class="tag ${editor.mappings[record.id] ? 'success' : 'warning'}">${editor.mappings[record.id] ? 'Matched' : 'Unmapped'}</span></td></tr>`).join('')}</tbody></table></div>`
+}
+function metadataView() {
+  const editor = state.metadataEditor
+  const table = metadataEditorOrNull()
+  const candidates = recordsOfKind('metadata-candidate')
+  const sampleReports = matchingFiles(state.records)
+  const assessment = table ? validateMetadata(table, editor.idColumn) : null
+  const summary = table ? mappingSummary(state.records, editor.mappings, table, editor.idColumn) : null
+  const values = table ? metadataFilterValues(editor) : []
+  return `<section class="page-heading"><div><span class="eyebrow">Project · Sample Metadata</span><h2>View, create, and edit sample metadata</h2><p>Review sample identity and group annotations, edit columns, and link individual files to samples. All changes stay on this device.</p></div><div class="local-card"><strong>One row per sample</strong><span>Export a TSV to keep your edits. No data is uploaded.</span></div></section>
+  ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
+  <section class="card"><div class="card-heading"><div><h3>1. Start a metadata sheet</h3><p>Open an existing TSV, CSV, or Excel sample sheet, or build rows from detected expression and immune reports.</p></div>${table ? `<span class="tag ${editor.dirty ? 'warning' : 'success'}">${editor.dirty ? 'Unsaved draft' : 'Draft ready'}</span>` : ''}</div>
+    <div class="form-grid metadata-start-grid"><label><span>Existing metadata file</span><select id="metadata-editor-source"><option value="">Select a file…</option>${candidates.map(record => `<option value="${escapeHtml(record.id)}" ${editor.sourceId === record.id ? 'selected' : ''}>${escapeHtml(record.name)}</option>`).join('')}</select></label>
+    <div class="button-row metadata-start-buttons"><button id="metadata-load" class="secondary-button" ${!candidates.length || state.busy ? 'disabled' : ''}>Open selected metadata</button><button id="metadata-create" class="primary-button" ${state.busy ? 'disabled' : ''}>Create from ${sampleReports.length} files</button><button id="metadata-blank" class="secondary-button" ${state.busy ? 'disabled' : ''}>New empty sheet</button></div></div>
+    <p class="method-note">Import uses the shared Rust/WASM metadata reader. Loading a new sheet replaces the current unsaved draft. Download edited metadata before you replace it.</p>
+    ${editor.status ? `<div class="notice-banner" role="status"><strong>Metadata</strong><span>${escapeHtml(editor.status)}</span></div>` : ''}
+  </section>
+  ${table ? `<section class="summary-grid metadata-summary-grid" aria-label="Metadata checks">
+    ${summaryCard('Samples', table.rows.length.toLocaleString(), 'Metadata rows')}
+    ${summaryCard('Columns', table.columns.length, 'Editable fields')}
+    ${summaryCard('ID problems', assessment.blankIds.length + assessment.duplicates.length, `${assessment.blankIds.length} blank · ${assessment.duplicates.length} duplicate`)}
+    ${summaryCard('Files mapped', `${summary.matched}/${summary.matched + summary.missing}`, 'Exact sample assignment')}
+  </section>
+  ${assessment.errors.length || assessment.blankIds.length || assessment.duplicates.length ? `<div class="notice-banner" role="alert"><strong>Review sample IDs</strong><span>${escapeHtml([...assessment.errors, assessment.blankIds.length ? `${assessment.blankIds.length} blank ID row(s)` : '', assessment.duplicates.length ? `Duplicate: ${assessment.duplicates.slice(0, 5).join(', ')}` : ''].filter(Boolean).join(' · '))}</span></div>` : ''}
+  <section class="card"><div class="card-heading"><div><h3>2. Edit sample metadata</h3><p>Search all rows, filter by a field, and edit cells directly. The table displays 60 rows per page to reduce browser memory use.</p></div><div class="button-row"><button id="metadata-add-row" class="secondary-button">Add sample</button><button id="metadata-download" class="primary-button" ${assessment.errors.length || assessment.blankIds.length || assessment.duplicates.length ? 'disabled' : ''}>Download metadata TSV</button><button id="metadata-use" class="secondary-button" ${assessment.errors.length || assessment.blankIds.length || assessment.duplicates.length || state.busy ? 'disabled' : ''}>Use in analyses</button></div></div>
+    <div class="form-grid metadata-filter-grid"><label><span>Search all columns</span><input id="metadata-search" type="search" value="${escapeHtml(editor.filter)}" placeholder="Sample ID, group, batch…" /></label><label><span>Filter column</span><select id="metadata-filter-column">${metadataSelectOptions(table.columns, editor.filterColumn, true)}</select></label><label><span>Filter value</span><select id="metadata-filter-value"><option value="">All values</option>${values.map(value => `<option value="${escapeHtml(value)}" ${value === editor.filterValue ? 'selected' : ''}>${escapeHtml(value)}</option>`).join('')}</select></label></div>
+    <p id="metadata-check-issues" class="method-note" role="status">${assessment.blankIds.length} blank sample IDs · ${assessment.duplicates.length} duplicate sample IDs</p>
+    <div id="metadata-row-holder">${metadataTableRows()}</div>
+    <details class="details-block metadata-columns"><summary>Manage columns and apply a value to multiple samples</summary><div class="form-grid metadata-action-grid"><label><span>Add a common field</span><select id="metadata-common-column"><option value="">Choose optional field…</option>${OPTIONAL_COLUMNS.filter(name => !table.columns.includes(name)).map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')}</select></label><label><span>Custom column name</span><input id="metadata-new-column" placeholder="e.g. batch_id" /></label><button id="metadata-add-column" class="secondary-button" type="button">Add column</button></div>
+    <div class="form-grid metadata-action-grid"><label><span>Existing column</span><select id="metadata-manage-column">${metadataSelectOptions(table.columns, editor.idColumn)}</select></label><label><span>New column name</span><input id="metadata-rename-input" placeholder="Enter new name" /></label><div class="button-row"><button id="metadata-rename-column" class="secondary-button">Rename</button><button id="metadata-remove-column" class="danger-text-button">Remove column</button></div></div>
+    <div class="form-grid metadata-action-grid"><label><span>Bulk edit column</span><select id="metadata-bulk-column">${metadataSelectOptions(table.columns, 'analysis_group')}</select></label><label><span>Value for matching rows</span><input id="metadata-bulk-value" placeholder="e.g. Case" /></label><button id="metadata-bulk-apply" class="secondary-button">Apply to filtered rows</button></div>
+    <p class="method-note">Bulk edits affect all filtered rows, not only the visible page. Confirm the count before applying. Blank values clear the selected field.</p></details>
+  </section>
+  <section class="card"><div class="card-heading"><div><h3>3. Match files to samples</h3><p>Detected file IDs are matched to the selected metadata sample-ID column. Correct assignments manually when sample names differ.</p></div><div class="button-row"><button id="mapping-auto" class="secondary-button">Match by sample ID</button><button id="mapping-aliases" class="secondary-button">Add aliases to metadata</button><button id="mapping-download" class="secondary-button">Download file map TSV</button></div></div>
+    <div class="form-grid metadata-filter-grid"><label><span>Sample identifier column</span><select id="metadata-id-column-editor">${metadataSelectOptions(table.columns, editor.idColumn)}</select></label><label><span>Find a file or detected ID</span><input id="mapping-search" type="search" value="${escapeHtml(editor.mapFilter)}" placeholder="Search ${sampleReports.length} reports…" /></label><label class="check-label metadata-check"><input id="mapping-unmatched" type="checkbox" ${editor.mapUnmatched ? 'checked' : ''} /> Only unmapped</label></div>
+    <datalist id="sample-mapping-ids">${table.rows.map(row => String(row[table.columns.indexOf(editor.idColumn)] || '').trim()).filter(Boolean).map(id => `<option value="${escapeHtml(id)}"></option>`).join('')}</datalist>
+    <div id="metadata-mapping-holder">${metadataMappingRows()}</div>
+    <p class="method-note">File mappings are saved as a separate manifest for review and provenance. Existing analysis code still matches expression-table sample columns to the selected metadata ID. Exporting a file map does not rename sources or change fitted models.</p>
+  </section>
+  <div class="page-actions"><div><strong>Keep a permanent copy</strong><span>Download the metadata TSV and file map. Saved application state contains file references, not unsaved metadata cells.</span></div><button id="metadata-return-project" class="secondary-button">Back to Project</button></div>` : `<section class="card"><div class="empty-state"><strong>No metadata sheet open</strong><span>Start from detected files or select an existing metadata file.</span></div></section>`}`
 }
 
 function projectMergeSection() {
@@ -2225,7 +2333,7 @@ function compareSortableValues(a, b) {
 function enhanceTables() {
   document.querySelectorAll('.table-scroll').forEach((scroll, tableIndex) => {
     const table = scroll.querySelector('table')
-    if (!table || table.classList.contains('significant-heatmap') || table.dataset.enhanced === 'true') return
+    if (!table || table.classList.contains('metadata-editor-table') || table.classList.contains('significant-heatmap') || table.dataset.enhanced === 'true') return
     table.dataset.enhanced = 'true'
     const headers = [...table.querySelectorAll('thead tr:first-child th')]
     const tbody = table.querySelector('tbody')
@@ -2580,6 +2688,297 @@ function bindCompareEvents() {
   }
 }
 
+function metadataReplaceDraft(table, sourceName = '', sourceId = '') {
+  if (!Array.isArray(table?.columns) || !Array.isArray(table?.rows) || !table.columns.length) {
+    throw new Error('The metadata table has no columns')
+  }
+  if (new Set(table.columns).size !== table.columns.length || table.columns.some(name => !name)) {
+    throw new Error('Metadata column names must be unique and nonempty')
+  }
+  const editor = state.metadataEditor
+  editor.table = { columns: [...table.columns], rows: table.rows.map(row => table.columns.map((_, i) => String(row[i] ?? ''))) }
+  editor.sourceName = sourceName
+  editor.sourceId = sourceId
+  editor.idColumn = table.columns.includes(table.id_column) ? table.id_column
+    : table.columns.includes('sample_id') ? 'sample_id'
+      : table.columns.find(name => /^(4c_id|sample.?id|observation.?id|subject.?id)$/i.test(name)) || table.columns[0]
+  editor.mappings = autoMapFiles(state.records, editor.table, editor.idColumn, {})
+  editor.page = 0
+  editor.mapPage = 0
+  editor.filter = ''
+  editor.filterColumn = ''
+  editor.filterValue = ''
+  editor.mapFilter = ''
+  editor.mapUnmatched = false
+  editor.sortColumn = ''
+  editor.descending = false
+  editor.dirty = Boolean(!sourceId)
+  editor.status = sourceName ? `Opened ${sourceName}: ${editor.table.rows.length.toLocaleString()} rows. Edits are local until you download the TSV.`
+    : `Created ${editor.table.rows.length.toLocaleString()} sample rows from local files.`
+  render()
+}
+
+function metadataConfirmReplace() {
+  return !state.metadataEditor.table || !state.metadataEditor.dirty || window.confirm('Replace the unsaved metadata draft? Download your edited TSV first if you need it.')
+}
+
+async function metadataOpenSelected(fileId) {
+  const file = selectedFile(fileId)
+  if (!file || !metadataConfirmReplace()) return
+  state.busy = true
+  state.error = null
+  render()
+  try {
+    const response = await workerRequest('load-metadata-table', { file })
+    metadataReplaceDraft(response.table, file.name, fileId)
+  } catch (error) {
+    state.error = `Open metadata: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    state.busy = false
+    render()
+  }
+}
+
+function metadataEdit(nextTable, status = 'Metadata draft updated. Download the TSV to save your changes.') {
+  state.metadataEditor.table = nextTable
+  state.metadataEditor.dirty = true
+  state.metadataEditor.status = status
+  // Preserve existing exact file assignments when a non-ID field changes.
+  state.metadataEditor.mappings = autoMapFiles(state.records, nextTable, state.metadataEditor.idColumn, state.metadataEditor.mappings)
+  render()
+}
+
+function metadataDownload(filename, text, mime = 'text/tab-separated-values') {
+  const url = URL.createObjectURL(new Blob([text], { type: `${mime};charset=utf-8` }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.append(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
+
+function metadataExportTsv() {
+  const editor = state.metadataEditor
+  if (!editor.table) return
+  const check = validateMetadata(editor.table, editor.idColumn)
+  if (check.errors.length || check.blankIds.length || check.duplicates.length) {
+    state.error = 'Correct blank or duplicate sample IDs before exporting the metadata TSV.'
+    render()
+    return
+  }
+  metadataDownload('4c_sample_metadata.tsv', serializeDelimited(editor.table))
+  editor.status = 'Metadata TSV download requested. The file can also be added to Project to use in analyses.'
+  editor.dirty = false
+  render()
+}
+
+function metadataExportMap() {
+  const editor = state.metadataEditor
+  if (!editor.table) return
+  metadataDownload('4c_sample_file_mapping.tsv', serializeDelimited(mappingManifest(state.records, editor.mappings)))
+  editor.status = 'File-mapping TSV download requested. Unmapped files have blank sample IDs.'
+  render()
+}
+
+async function metadataUseInAnalyses() {
+  const editor = state.metadataEditor
+  if (!editor.table || state.busy) return
+  const check = validateMetadata(editor.table, editor.idColumn)
+  if (check.errors.length || check.blankIds.length || check.duplicates.length) {
+    state.error = 'Correct sample IDs before you use this sheet for analysis.'
+    render()
+    return
+  }
+  try {
+    const file = new File([serializeDelimited(editor.table)], '4c_sample_metadata.tsv', {
+      type: 'text/tab-separated-values', lastModified: Date.now(),
+    })
+    const updated = new Map(state.files)
+    if (editor.generatedId) updated.delete(editor.generatedId)
+    updated.set(fileKey(file), file)
+    await refreshFiles(updated, true)
+    if (state.error) throw new Error(state.error)
+    editor.generatedId = fileKey(file)
+    state.qcConfig.metadataId = editor.generatedId
+    state.qcConfig.metadataIdColumn = editor.idColumn
+    editor.sourceName = file.name
+    editor.sourceId = editor.generatedId
+    editor.status = 'Edited metadata is selected for QC, Compare Groups, and Longitudinal in this browser session. Download the TSV to keep a copy.'
+    // Do not mark saved: an in-memory File does not survive a browser restart.
+    editor.dirty = true
+    await inspectSelectedMetadata()
+    state.tab = 'metadata'
+    render()
+  } catch (error) {
+    state.error = `Use metadata: ${error instanceof Error ? error.message : String(error)}`
+    render()
+  }
+}
+
+function bindMetadataEvents() {
+  const editor = state.metadataEditor
+  const table = editor.table
+  const displayError = error => { state.error = error instanceof Error ? error.message : String(error); render() }
+  document.querySelector('#metadata-load')?.addEventListener('click', () => void metadataOpenSelected(document.querySelector('#metadata-editor-source')?.value))
+  document.querySelector('#metadata-create')?.addEventListener('click', () => {
+    if (metadataConfirmReplace()) metadataReplaceDraft(draftFromSamples(state.records))
+  })
+  document.querySelector('#metadata-blank')?.addEventListener('click', () => {
+    if (metadataConfirmReplace()) metadataReplaceDraft(createBlankMetadata())
+  })
+  if (!table) return
+  const rerender = () => { state.error = null; render() }
+  document.querySelector('#metadata-search')?.addEventListener('input', event => {
+    editor.filter = event.currentTarget.value
+    editor.page = 0
+    renderMetadataTableOnly()
+  })
+  document.querySelector('#metadata-filter-column')?.addEventListener('change', event => {
+    editor.filterColumn = event.currentTarget.value; editor.filterValue = ''; editor.page = 0; rerender()
+  })
+  document.querySelector('#metadata-filter-value')?.addEventListener('change', event => {
+    editor.filterValue = event.currentTarget.value; editor.page = 0; renderMetadataTableOnly()
+  })
+  document.querySelector('#metadata-add-row')?.addEventListener('click', () => metadataEdit(addRow(editor.table), 'Added a blank sample. Enter its sample ID.'))
+  document.querySelector('#metadata-download')?.addEventListener('click', metadataExportTsv)
+  document.querySelector('#metadata-use')?.addEventListener('click', () => void metadataUseInAnalyses())
+  document.querySelector('#metadata-add-column')?.addEventListener('click', () => {
+    try {
+      const name = document.querySelector('#metadata-new-column')?.value.trim() || document.querySelector('#metadata-common-column')?.value
+      metadataEdit(addColumn(editor.table, name), `Added column: ${name}`)
+    } catch (error) { displayError(error) }
+  })
+  document.querySelector('#metadata-rename-column')?.addEventListener('click', () => {
+    try {
+      const name = document.querySelector('#metadata-manage-column')?.value
+      const index = table.columns.indexOf(name)
+      const replacement = document.querySelector('#metadata-rename-input')?.value
+      const renamed = renameColumn(editor.table, index, replacement)
+      if (editor.idColumn === name) editor.idColumn = replacement.trim()
+      metadataEdit(renamed, `Renamed ${name} to ${replacement}`)
+    } catch (error) { displayError(error) }
+  })
+  document.querySelector('#metadata-remove-column')?.addEventListener('click', () => {
+    try {
+      const name = document.querySelector('#metadata-manage-column')?.value
+      if (name === editor.idColumn) throw new Error('Select a different sample ID column before removing this one')
+      if (!window.confirm(`Remove column '${name}' and all of its values?`)) return
+      metadataEdit(removeColumn(editor.table, table.columns.indexOf(name)), `Removed column ${name}`)
+    } catch (error) { displayError(error) }
+  })
+  document.querySelector('#metadata-bulk-apply')?.addEventListener('click', () => {
+    const name = document.querySelector('#metadata-bulk-column')?.value
+    const index = table.columns.indexOf(name)
+    const value = document.querySelector('#metadata-bulk-value')?.value ?? ''
+    const matches = metadataFilteredRows()
+    if (index < 0 || !matches.length) return
+    if (!window.confirm(`Replace '${name}' for ${matches.length} filtered sample rows?`)) return
+    const indices = new Set(matches.map(match => match.index))
+    const updated = { columns: [...editor.table.columns], rows: editor.table.rows.map((row, i) => indices.has(i) ? row.map((cell, j) => j === index ? value : cell) : row) }
+    metadataEdit(updated, `Updated ${matches.length} rows in ${name}`)
+  })
+  document.querySelector('#metadata-id-column-editor')?.addEventListener('change', event => {
+    editor.idColumn = event.currentTarget.value
+    editor.mappings = autoMapFiles(state.records, table, editor.idColumn, editor.mappings)
+    rerender()
+  })
+  document.querySelector('#mapping-auto')?.addEventListener('click', () => {
+    editor.mappings = autoMapFiles(state.records, table, editor.idColumn, {})
+    editor.status = 'Matched file names to sample IDs where an exact ID exists. Review unmatched files.'
+    rerender()
+  })
+  document.querySelector('#mapping-aliases')?.addEventListener('click', () => {
+    try {
+      const result = applyMappingsToAliases(editor.table, state.records, editor.mappings, editor.idColumn)
+      metadataEdit(result.table, `Added ${result.aliasesWritten} mapped source IDs to modality alias columns. Download the edited metadata TSV to keep them.`)
+    } catch (error) { displayError(error) }
+  })
+  document.querySelector('#mapping-download')?.addEventListener('click', metadataExportMap)
+  document.querySelector('#mapping-search')?.addEventListener('input', event => { editor.mapFilter = event.currentTarget.value; editor.mapPage = 0; renderMetadataMappingsOnly() })
+  document.querySelector('#mapping-unmatched')?.addEventListener('change', event => { editor.mapUnmatched = event.currentTarget.checked; editor.mapPage = 0; renderMetadataMappingsOnly() })
+  document.querySelector('#metadata-return-project')?.addEventListener('click', () => { state.tab = 'project'; render() })
+  bindMetadataGridEvents()
+  bindMetadataMappingEvents()
+}
+
+function refreshMetadataValidationDisplay() {
+  const editor = state.metadataEditor
+  if (!editor.table) return
+  const health = validateMetadata(editor.table, editor.idColumn)
+  const blocked = Boolean(health.errors.length || health.blankIds.length || health.duplicates.length)
+  const validation = document.querySelector('#metadata-check-issues')
+  if (validation) validation.textContent = `${health.blankIds.length} blank sample IDs · ${health.duplicates.length} duplicate sample IDs${health.errors.length ? ` · ${health.errors.join('; ')}` : ''}`
+  const download = document.querySelector('#metadata-download')
+  if (download) download.disabled = blocked
+  const use = document.querySelector('#metadata-use')
+  if (use) use.disabled = blocked || state.busy
+}
+function renderMetadataTableOnly() {
+  const holder = document.querySelector('#metadata-row-holder')
+  if (!holder) return
+  holder.innerHTML = metadataTableRows()
+  bindMetadataGridEvents()
+}
+function bindMetadataGridEvents() {
+  const editor = state.metadataEditor
+  document.querySelectorAll('.metadata-cell').forEach(input => input.addEventListener('change', event => {
+    const { row, col } = event.currentTarget.dataset
+    const currentValue = editor.table.rows[Number(row)]?.[Number(col)]
+    if (currentValue !== event.currentTarget.value) {
+      editor.table = setCell(editor.table, Number(row), Number(col), event.currentTarget.value)
+      editor.dirty = true
+      editor.status = 'Unsaved changes: download the metadata TSV to keep a copy.'
+      if (editor.table.columns[Number(col)] === editor.idColumn) {
+        editor.mappings = autoMapFiles(state.records, editor.table, editor.idColumn, editor.mappings)
+      }
+      // Update validation after the edit; preserve scroll instead of redrawing on each keystroke.
+      const badge = document.querySelector('.metadata-summary-grid')
+      if (badge) badge.dataset.edited = 'true'
+      refreshMetadataValidationDisplay()
+    }
+  }))
+  document.querySelectorAll('.metadata-remove-row').forEach(button => button.addEventListener('click', () => {
+    const row = Number(button.dataset.row)
+    if (window.confirm(`Remove metadata row ${row + 1}?`)) metadataEdit(removeRow(editor.table, row), 'Removed sample row')
+  }))
+  document.querySelectorAll('.metadata-sort').forEach(button => button.addEventListener('click', () => {
+    const col = button.dataset.column
+    editor.descending = editor.sortColumn === col ? !editor.descending : false
+    editor.sortColumn = col; editor.page = 0
+    renderMetadataTableOnly()
+  }))
+  document.querySelector('#metadata-page-prev')?.addEventListener('click', () => { editor.page = Math.max(0, editor.page - 1); renderMetadataTableOnly() })
+  document.querySelector('#metadata-page-next')?.addEventListener('click', () => { editor.page++; renderMetadataTableOnly() })
+}
+function renderMetadataMappingsOnly() {
+  const holder = document.querySelector('#metadata-mapping-holder')
+  if (!holder) return
+  holder.innerHTML = metadataMappingRows()
+  bindMetadataMappingEvents()
+}
+function bindMetadataMappingEvents() {
+  const editor = state.metadataEditor
+  document.querySelectorAll('.mapping-sample').forEach(input => input.addEventListener('change', event => {
+    const id = event.currentTarget.dataset.fileId
+    const value = event.currentTarget.value.trim()
+    const validIds = new Set(editor.table.rows.map(row => String(row[editor.table.columns.indexOf(editor.idColumn)] || '').trim()).filter(Boolean))
+    if (value && !validIds.has(value)) {
+      event.currentTarget.setCustomValidity('Choose an existing sample ID')
+      event.currentTarget.reportValidity()
+      return
+    }
+    event.currentTarget.setCustomValidity('')
+    editor.mappings[id] = value
+    editor.status = 'Updated local file-to-sample assignments. Download the mapping manifest to keep them.'
+    const cell = event.currentTarget.closest('tr')?.querySelector('td:last-child .tag')
+    if (cell) { cell.textContent = value ? 'Matched' : 'Unmapped'; cell.className = `tag ${value ? 'success' : 'warning'}` }
+  }))
+  document.querySelector('#mapping-prev')?.addEventListener('click', () => { editor.mapPage = Math.max(0, editor.mapPage - 1); renderMetadataMappingsOnly() })
+  document.querySelector('#mapping-next')?.addEventListener('click', () => { editor.mapPage++; renderMetadataMappingsOnly() })
+}
+
 function bindProjectEvents() {
   const fileInput = document.querySelector('#file-input')
   const folderInput = document.querySelector('#folder-input')
@@ -2609,6 +3008,7 @@ function bindProjectEvents() {
       if (files?.length) addFiles(files)
     })
   }
+  document.querySelector('#open-sample-metadata')?.addEventListener('click', () => { state.tab = 'metadata'; render() })
   document.querySelector('#save-manifest')?.addEventListener('click', () => void exportManifest())
   document.querySelector('#clear-project')?.addEventListener('click', clearProject)
   document.querySelector('#merge-column-order')?.addEventListener('change', event => { state.mergeSettings.order = event.currentTarget.value })
@@ -2679,6 +3079,7 @@ function render() {
   const main = document.querySelector('#main-content')
   const viewFactories = {
     project: projectView,
+    metadata: metadataView,
     qc: qcView,
     compare: compareView,
     longitudinal: longitudinalView,
@@ -2689,6 +3090,7 @@ function render() {
   }
   main.innerHTML = (viewFactories[state.tab] || projectView)()
   if (state.tab === 'project') bindProjectEvents()
+  if (state.tab === 'metadata') bindMetadataEvents()
   if (state.tab === 'qc') bindQcEvents()
   if (state.tab === 'compare') bindCompareEvents()
   if (state.tab === 'longitudinal') bindLongitudinalEvents()

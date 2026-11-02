@@ -119,3 +119,10 @@ Patch archive: `4C_INSIGHT_M1_XLSX_MERGER_20261030.tar.gz` with `m1.patch`, safe
 7. Update the rolling handoff, CI logs, and status as each validation passes. Provide copy-paste safe commands and git add/commit/push after green checks. Always use ASD-STE100.
 
 Preserve native Rust v0.21.0 science and UX9 worker-memory behavior. Do not claim that adding a large merged File to project inventory makes downstream `file.arrayBuffer` stream-safe. Later M2 milestone should stream merged table into the corrected Rust analysis engine.
+
+## New milestone — MD1 Sample Metadata (2026-11-02)
+
+Continue the MD1 source implementation in 4C Insight after M1 workbook merger. The archive was prepared against reconstructed UX9/CI1 + M1 current source; do NOT revert recent changes. The MD1 patch adds a Sample Metadata workspace in Project with create/open/edit/filter/sort, duplicate sample checks, file assignment, modality aliases, and TSV exports. It adds a Rust/WASM export `read_metadata_table_json` sharing `parse_metadata_bytes`. JavaScript suite passes 69/71 with two generated-WASM checks skipped; scientific build and browser tests are not yet verified. First task: run Rust + WASM build/parity checks, then test real collaborator metadata XLSX and hundreds of sample workbooks, including file mapping, active metadata selection for Compare Groups, and TSV downloads. Keep application state metadata-only and do not silently change scientific matching. See MD1 section in `docs/4C_INSIGHT_HANDOFF_CURRENT.md`. Use ASD-STE100. Always update both handoff and continuation prompt after substantive progress.
+
+## MD1 recovery note
+Use the MD1 formatted-source recovery rather than the original `apply_md1.sh` when Git M1 source has been formatted. The recovery stages all files in a temporary Git worktree and tests before modifying the main checkout. Validate the Rust metadata reader and browser workflow before release.

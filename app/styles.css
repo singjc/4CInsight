@@ -442,3 +442,29 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 #merge-progress:not(:empty) { margin: 14px 0; padding: 10px 12px; background: #f5f8ff; color: #30435e; border-radius: 8px; font-size: 12px; }
 .muted-note { color: #667085; font-size: 11px; line-height: 1.6; margin-top: 12px; }
 @media (max-width: 720px) { .merge-metric-list { grid-template-columns: 1fr; } }
+
+/* MD1 — local sample metadata workspace. Keep the table compact for large cohorts. */
+.metadata-start-grid { grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.6fr); }
+.metadata-start-buttons { align-self: end; }
+.metadata-summary-grid { margin-top: 6px; }
+.metadata-filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
+.metadata-action-grid { grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) auto; align-items: end; margin: 14px 0; }
+.metadata-columns { margin-top: 16px; }
+.metadata-check { align-self: end; padding: 10px 0; }
+.metadata-list-meta { display: flex; gap: 12px; flex-wrap: wrap; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; margin: 12px 0 9px; }
+.metadata-grid-scroll { max-height: 520px; overflow: auto; border: 1px solid var(--line); border-radius: 9px; }
+.metadata-editor-table { border-collapse: separate; border-spacing: 0; min-width: 100%; width: max-content; }
+.metadata-editor-table thead th { position: sticky; top: 0; z-index: 2; background: #f3f6fb; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--line); }
+.metadata-editor-table th, .metadata-editor-table td { padding: 5px 8px; border-right: 1px solid #edf0f5; border-bottom: 1px solid #edf0f5; font-size: 12px; max-width: 380px; }
+.metadata-editor-table tr:hover td { background: #f9fbff; }
+.metadata-editor-table td:first-child { background: #f8fafc; color: var(--muted); }
+.metadata-editor-table input { min-width: 110px; width: 170px; padding: 7px 8px; border: 1px solid transparent; border-radius: 5px; color: var(--navy); background: transparent; font: inherit; }
+.metadata-editor-table input:hover { border-color: #d0d9e9; background: #fff; }
+.metadata-editor-table input:focus { background: #fff; border-color: #3159d9; outline: 2px solid rgba(49,89,217,.18); }
+.metadata-editor-table .mapping-sample { width: 230px; }
+.metadata-sort { padding: 2px 4px; margin-left: 4px; border: 0; background: transparent; color: var(--accent); }
+.metadata-row-index { min-width: 45px; }
+@media (max-width: 920px) {
+  .metadata-start-grid, .metadata-filter-grid, .metadata-action-grid { grid-template-columns: 1fr; }
+  .metadata-start-buttons { flex-wrap: wrap; }
+}

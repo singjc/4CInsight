@@ -63,7 +63,7 @@ test('resource preferences persist without a native monitor or manual RAM requir
   assert.match(main, /RAM is reported only when the browser provides it/)
   assert.match(main, /id="save-resources"/)
   assert.match(main, /id="stop-science-work"/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-m1-merge/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-md1-sample-metadata/)
 })
 
 test('completed science runs release WASM memory and History avoids duplicate JSON clones', () => {
