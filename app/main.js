@@ -9,6 +9,7 @@ import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfi
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
 import { methodDocs } from './docs-content.js'
 import { validateWasmMemoryReport } from './wasm-memory.js'
+import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
 import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory, detectBrowserResources } from './resource-controls.js'
 import {
   clearHistoryEntries,
@@ -19,7 +20,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-md1-sample-metadata'
+const APP_VERSION = '0.21.0-md2-continuous-tables'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -65,8 +66,8 @@ const state = {
   metadataEditor: {
     table: null, sourceName: '', sourceId: '', generatedId: '', mappings: {},
     idColumn: 'sample_id', dirty: false, status: '', filter: '', filterColumn: '',
-    filterValue: '', sortColumn: '', descending: false, page: 0,
-    mapFilter: '', mapUnmatched: false, mapPage: 0,
+    filterValue: '', sortColumn: '', descending: false,
+    metadataScrollTop: 0, mapFilter: '', mapUnmatched: false, mappingScrollTop: 0,
   },
   engine: 'Waiting for local inputs',
   wasmReady: false,
@@ -1053,29 +1054,67 @@ function metadataFilterValues(editor) {
   if (index < 0) return []
   return [...new Set(editor.table.rows.map(row => row[index]).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).slice(0, 250)
 }
+function virtualSpacer(colspan, height) {
+  return height > 0 ? `<tr class="virtual-spacer" aria-hidden="true"><td colspan="${colspan}" style="height:${height}px"></td></tr>` : ''
+}
 function metadataTableRows() {
   const editor = state.metadataEditor
-  const matches = metadataFilteredRows()
-  const pageSize = 60, maxPage = Math.max(0, Math.ceil(matches.length / pageSize) - 1)
-  editor.page = Math.min(editor.page, maxPage)
-  const pageRows = matches.slice(editor.page * pageSize, (editor.page + 1) * pageSize)
-  return `<div class="metadata-list-meta"><span>Showing ${pageRows.length} of ${matches.length.toLocaleString()} matching rows · ${editor.table.rows.length.toLocaleString()} total</span><div class="button-row compact"><button class="secondary-button" id="metadata-page-prev" ${editor.page === 0 ? 'disabled' : ''}>Previous</button><span>Page ${editor.page + 1} / ${maxPage + 1}</span><button class="secondary-button" id="metadata-page-next" ${editor.page >= maxPage ? 'disabled' : ''}>Next</button></div></div>
-    <div class="table-scroll metadata-grid-scroll" role="region" aria-label="Editable sample metadata" tabindex="0">
-    <table class="metadata-editor-table"><thead><tr><th>Row</th>${editor.table.columns.map(column => `<th>${escapeHtml(column)} <button class="metadata-sort" data-column="${escapeHtml(column)}" type="button" aria-label="Sort by ${escapeHtml(column)}">${editor.sortColumn === column ? (editor.descending ? '↓' : '↑') : '↕'}</button></th>`).join('')}<th>Actions</th></tr></thead>
-    <tbody>${pageRows.map(({ row, index }) => `<tr><td class="metadata-row-index">${index + 1}</td>${editor.table.columns.map((column, col) => `<td><input class="metadata-cell" data-row="${index}" data-col="${col}" aria-label="${escapeHtml(column)} row ${index + 1}" value="${escapeHtml(row[col] ?? '')}" autocomplete="off" /></td>`).join('')}<td><button class="danger-text-button metadata-remove-row" data-row="${index}" aria-label="Remove row ${index + 1}" type="button">Remove</button></td></tr>`).join('')}</tbody></table></div>`
+  const width = 62 + 188 * editor.table.columns.length + 108
+  return `<div class="metadata-list-meta"><span class="metadata-viewport-status" role="status">Continuous sample table</span><span>Scroll to see all matching rows</span></div>
+    <div class="table-scroll metadata-grid-scroll" data-virtual-kind="metadata" role="region" aria-label="Editable sample metadata" tabindex="0">
+    <table class="metadata-editor-table" style="width:${width}px;table-layout:fixed"><thead><tr><th style="width:62px">Row</th>${editor.table.columns.map(column => `<th style="width:188px">${escapeHtml(column)} <button class="metadata-sort" data-column="${escapeHtml(column)}" type="button" aria-label="Sort by ${escapeHtml(column)}">${editor.sortColumn === column ? (editor.descending ? '↓' : '↑') : '↕'}</button></th>`).join('')}<th style="width:108px">Actions</th></tr></thead><tbody></tbody></table></div>`
 }
-function metadataMappingRows() {
+function metadataMappingFilteredRows() {
   const editor = state.metadataEditor
-  const rows = matchingFiles(state.records).filter(record => {
-    const matches = (record.relativePath || record.name).toLocaleLowerCase().includes(editor.mapFilter.toLocaleLowerCase()) || String(record.sampleId || '').toLocaleLowerCase().includes(editor.mapFilter.toLocaleLowerCase())
+  const filter = editor.mapFilter.toLocaleLowerCase()
+  return matchingFiles(state.records).filter(record => {
+    const matches = (record.relativePath || record.name).toLocaleLowerCase().includes(filter) || String(record.sampleId || '').toLocaleLowerCase().includes(filter)
     return matches && (!editor.mapUnmatched || !editor.mappings[record.id])
   })
-  const size = 40, maxPage = Math.max(0, Math.ceil(rows.length / size) - 1)
-  editor.mapPage = Math.min(editor.mapPage, maxPage)
-  const shown = rows.slice(editor.mapPage * size, (editor.mapPage + 1) * size)
-  return `<div class="metadata-list-meta"><span>Showing ${shown.length} of ${rows.length.toLocaleString()} file mappings</span><div class="button-row compact"><button id="mapping-prev" class="secondary-button" ${editor.mapPage === 0 ? 'disabled' : ''}>Previous</button><span>${editor.mapPage + 1} / ${maxPage + 1}</span><button id="mapping-next" class="secondary-button" ${editor.mapPage >= maxPage ? 'disabled' : ''}>Next</button></div></div>
-  <div class="table-scroll metadata-grid-scroll" role="region" aria-label="File to sample mapping" tabindex="0"><table class="metadata-editor-table"><thead><tr><th>File</th><th>Modality</th><th>Detected sample</th><th>Mapped biological sample</th><th>Status</th></tr></thead><tbody>
-  ${shown.map(record => `<tr><td title="${escapeHtml(record.relativePath)}">${escapeHtml(record.name)}</td><td>${escapeHtml(record.label || record.kind)}</td><td>${escapeHtml(record.sampleId || '—')}</td><td><input class="mapping-sample" data-file-id="${escapeHtml(record.id)}" list="sample-mapping-ids" value="${escapeHtml(editor.mappings[record.id] || '')}" placeholder="Select or enter sample ID" aria-label="Sample for ${escapeHtml(record.name)}" /></td><td><span class="tag ${editor.mappings[record.id] ? 'success' : 'warning'}">${editor.mappings[record.id] ? 'Matched' : 'Unmapped'}</span></td></tr>`).join('')}</tbody></table></div>`
+}
+function metadataMappingRows() {
+  return `<div class="metadata-list-meta"><span class="metadata-viewport-status" role="status">Continuous file mapping table</span><span>Scroll to see all matching files</span></div>
+  <div class="table-scroll metadata-grid-scroll" data-virtual-kind="mapping" role="region" aria-label="File to sample mapping" tabindex="0"><table class="metadata-editor-table metadata-file-map-table" style="width:1120px;table-layout:fixed"><thead><tr><th style="width:360px">File</th><th style="width:170px">Modality</th><th style="width:180px">Detected sample</th><th style="width:255px">Mapped biological sample</th><th style="width:155px">Status</th></tr></thead><tbody></tbody></table></div>`
+}
+function renderMetadataVisibleRow({ row, index }, columns) {
+  return `<tr><td class="metadata-row-index">${index + 1}</td>${columns.map((column, col) => `<td><input class="metadata-cell" data-row="${index}" data-col="${col}" aria-label="${escapeHtml(column)} row ${index + 1}" value="${escapeHtml(row[col] ?? '')}" autocomplete="off" /></td>`).join('')}<td><button class="danger-text-button metadata-remove-row" data-row="${index}" aria-label="Remove row ${index + 1}" type="button">Remove</button></td></tr>`
+}
+function renderMetadataVisibleMapping(record) {
+  const mappings = state.metadataEditor.mappings
+  return `<tr><td title="${escapeHtml(record.relativePath || record.name)}">${escapeHtml(record.name)}</td><td>${escapeHtml(record.label || record.kind)}</td><td>${escapeHtml(record.sampleId || '—')}</td><td><input class="mapping-sample" data-file-id="${escapeHtml(record.id)}" list="sample-mapping-ids" value="${escapeHtml(mappings[record.id] || '')}" placeholder="Select or enter sample ID" aria-label="Sample for ${escapeHtml(record.name)}" /></td><td><span class="tag ${mappings[record.id] ? 'success' : 'warning'}">${mappings[record.id] ? 'Matched' : 'Unmapped'}</span></td></tr>`
+}
+
+/** Attach virtual scrolling to a stable holder. Filters and sort run once per
+ * new view, not on every scroll event. Source indices survive sorting. */
+function initializeMetadataViewport(holder, kind) {
+  const scroller = holder.querySelector('.metadata-grid-scroll')
+  const tbody = scroller?.querySelector('tbody')
+  const status = holder.querySelector('.metadata-viewport-status')
+  if (!scroller || !tbody || !status) return
+  const rows = kind === 'metadata' ? metadataFilteredRows() : metadataMappingFilteredRows()
+  const scrollProperty = kind === 'metadata' ? 'metadataScrollTop' : 'mappingScrollTop'
+  scroller.scrollTop = state.metadataEditor[scrollProperty] || 0
+  const cols = kind === 'metadata' ? state.metadataEditor.table.columns.length + 2 : 5
+  let previous = null
+  const renderWindow = () => {
+    const window = tableWindow(rows.length, scroller.scrollTop, scroller.clientHeight || 520)
+    if (previous && window.first === previous.first && window.end === previous.end) return
+    // Do not discard uncommitted input when a focused row leaves the viewport.
+    const active = document.activeElement
+    if (active && scroller.contains(active) && active.matches('input')) active.blur()
+    tbody.innerHTML = virtualSpacer(cols, window.topPadding)
+      + rows.slice(window.first, window.end).map(item => kind === 'metadata'
+        ? renderMetadataVisibleRow(item, state.metadataEditor.table.columns)
+        : renderMetadataVisibleMapping(item)).join('')
+      + virtualSpacer(cols, window.bottomPadding)
+    status.textContent = `${tableRowRange(window)} · ${kind === 'metadata' ? state.metadataEditor.table.rows.length.toLocaleString() + ' total samples' : 'matching files'}`
+    previous = window
+  }
+  scroller.addEventListener('scroll', () => {
+    state.metadataEditor[scrollProperty] = scroller.scrollTop
+    renderWindow()
+  }, { passive: true })
+  renderWindow()
 }
 function metadataView() {
   const editor = state.metadataEditor
@@ -1100,14 +1139,14 @@ function metadataView() {
     ${summaryCard('Files mapped', `${summary.matched}/${summary.matched + summary.missing}`, 'Exact sample assignment')}
   </section>
   ${assessment.errors.length || assessment.blankIds.length || assessment.duplicates.length ? `<div class="notice-banner" role="alert"><strong>Review sample IDs</strong><span>${escapeHtml([...assessment.errors, assessment.blankIds.length ? `${assessment.blankIds.length} blank ID row(s)` : '', assessment.duplicates.length ? `Duplicate: ${assessment.duplicates.slice(0, 5).join(', ')}` : ''].filter(Boolean).join(' · '))}</span></div>` : ''}
-  <section class="card"><div class="card-heading"><div><h3>2. Edit sample metadata</h3><p>Search all rows, filter by a field, and edit cells directly. The table displays 60 rows per page to reduce browser memory use.</p></div><div class="button-row"><button id="metadata-add-row" class="secondary-button">Add sample</button><button id="metadata-download" class="primary-button" ${assessment.errors.length || assessment.blankIds.length || assessment.duplicates.length ? 'disabled' : ''}>Download metadata TSV</button><button id="metadata-use" class="secondary-button" ${assessment.errors.length || assessment.blankIds.length || assessment.duplicates.length || state.busy ? 'disabled' : ''}>Use in analyses</button></div></div>
+  <section class="card"><div class="card-heading"><div><h3>2. Edit sample metadata</h3><p>Search all rows, filter by a field, and edit cells directly. Scroll through all matching rows. Only visible rows are drawn to keep browser memory use low.</p></div><div class="button-row"><button id="metadata-add-row" class="secondary-button">Add sample</button><button id="metadata-download" class="primary-button" ${assessment.errors.length || assessment.blankIds.length || assessment.duplicates.length ? 'disabled' : ''}>Download metadata TSV</button><button id="metadata-use" class="secondary-button" ${assessment.errors.length || assessment.blankIds.length || assessment.duplicates.length || state.busy ? 'disabled' : ''}>Use in analyses</button></div></div>
     <div class="form-grid metadata-filter-grid"><label><span>Search all columns</span><input id="metadata-search" type="search" value="${escapeHtml(editor.filter)}" placeholder="Sample ID, group, batch…" /></label><label><span>Filter column</span><select id="metadata-filter-column">${metadataSelectOptions(table.columns, editor.filterColumn, true)}</select></label><label><span>Filter value</span><select id="metadata-filter-value"><option value="">All values</option>${values.map(value => `<option value="${escapeHtml(value)}" ${value === editor.filterValue ? 'selected' : ''}>${escapeHtml(value)}</option>`).join('')}</select></label></div>
     <p id="metadata-check-issues" class="method-note" role="status">${assessment.blankIds.length} blank sample IDs · ${assessment.duplicates.length} duplicate sample IDs</p>
     <div id="metadata-row-holder">${metadataTableRows()}</div>
     <details class="details-block metadata-columns"><summary>Manage columns and apply a value to multiple samples</summary><div class="form-grid metadata-action-grid"><label><span>Add a common field</span><select id="metadata-common-column"><option value="">Choose optional field…</option>${OPTIONAL_COLUMNS.filter(name => !table.columns.includes(name)).map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')}</select></label><label><span>Custom column name</span><input id="metadata-new-column" placeholder="e.g. batch_id" /></label><button id="metadata-add-column" class="secondary-button" type="button">Add column</button></div>
     <div class="form-grid metadata-action-grid"><label><span>Existing column</span><select id="metadata-manage-column">${metadataSelectOptions(table.columns, editor.idColumn)}</select></label><label><span>New column name</span><input id="metadata-rename-input" placeholder="Enter new name" /></label><div class="button-row"><button id="metadata-rename-column" class="secondary-button">Rename</button><button id="metadata-remove-column" class="danger-text-button">Remove column</button></div></div>
     <div class="form-grid metadata-action-grid"><label><span>Bulk edit column</span><select id="metadata-bulk-column">${metadataSelectOptions(table.columns, 'analysis_group')}</select></label><label><span>Value for matching rows</span><input id="metadata-bulk-value" placeholder="e.g. Case" /></label><button id="metadata-bulk-apply" class="secondary-button">Apply to filtered rows</button></div>
-    <p class="method-note">Bulk edits affect all filtered rows, not only the visible page. Confirm the count before applying. Blank values clear the selected field.</p></details>
+    <p class="method-note">Bulk edits affect all filtered rows, including rows outside the visible viewport. Confirm the count before applying. Blank values clear the selected field.</p></details>
   </section>
   <section class="card"><div class="card-heading"><div><h3>3. Match files to samples</h3><p>Detected file IDs are matched to the selected metadata sample-ID column. Correct assignments manually when sample names differ.</p></div><div class="button-row"><button id="mapping-auto" class="secondary-button">Match by sample ID</button><button id="mapping-aliases" class="secondary-button">Add aliases to metadata</button><button id="mapping-download" class="secondary-button">Download file map TSV</button></div></div>
     <div class="form-grid metadata-filter-grid"><label><span>Sample identifier column</span><select id="metadata-id-column-editor">${metadataSelectOptions(table.columns, editor.idColumn)}</select></label><label><span>Find a file or detected ID</span><input id="mapping-search" type="search" value="${escapeHtml(editor.mapFilter)}" placeholder="Search ${sampleReports.length} reports…" /></label><label class="check-label metadata-check"><input id="mapping-unmatched" type="checkbox" ${editor.mapUnmatched ? 'checked' : ''} /> Only unmapped</label></div>
@@ -1680,9 +1719,8 @@ function differentialRowHtml(row) {
 function differentialTable(analysis, tableId) {
   const rows = analysis?.tests || []
   if (!rows.length) return '<div class="plot-empty">No tested features are available.</div>'
-  dynamicTableSources.set(tableId, { rows, cells: differentialRowCells, rowHtml: differentialRowHtml, limit: 500 })
-  const initial = rows.slice(0, 500)
-  return `<div class="table-scroll differential-table" data-dynamic-table="${escapeHtml(tableId)}"><table><thead><tr><th>Feature</th><th>Secondary ID</th><th>Case mean</th><th>Control mean</th><th>log2 group effect</th><th>SE</th><th>q-value</th><th>Subject effect</th><th>Subject q</th></tr></thead><tbody>${initial.map(differentialRowHtml).join('')}</tbody></table></div><p class="table-note">Search and sort operate across all ${rows.length.toLocaleString()} tested features. Up to 500 matching rows are drawn at once; the JSON export contains all rows.</p>`
+  dynamicTableSources.set(tableId, { rows, cells: differentialRowCells, rowHtml: differentialRowHtml })
+  return `<div class="table-scroll differential-table" data-dynamic-table="${escapeHtml(tableId)}"><table><thead><tr><th>Feature</th><th>Secondary ID</th><th>Case mean</th><th>Control mean</th><th>log2 group effect</th><th>SE</th><th>q-value</th><th>Subject effect</th><th>Subject q</th></tr></thead><tbody></tbody></table></div><p class="table-note">Search and sort operate across all ${rows.length.toLocaleString()} tested features. Scroll through all matching rows; only the visible rows are drawn. The JSON export contains all rows.</p>`
 }
 
 function dtuGeneRowCells(row) {
@@ -1696,8 +1734,8 @@ function dtuGeneRowHtml(row) {
 function dtuGeneTable(dtu, tableId) {
   const rows = dtu?.gene_tests || []
   if (!rows.length) return '<div class="plot-empty">No transcript-usage gene tests are available.</div>'
-  dynamicTableSources.set(tableId, { rows, cells: dtuGeneRowCells, rowHtml: dtuGeneRowHtml, limit: 500 })
-  return `<div class="table-scroll" data-dynamic-table="${escapeHtml(tableId)}"><table><thead><tr><th>Gene</th><th>Transcripts</th><th>q-value</th><th>Max |CLR effect|</th></tr></thead><tbody>${rows.slice(0, 500).map(dtuGeneRowHtml).join('')}</tbody></table></div><p class="table-note">Search and sort operate across all ${rows.length.toLocaleString()} tested genes. Up to 500 matching rows are drawn at once.</p>`
+  dynamicTableSources.set(tableId, { rows, cells: dtuGeneRowCells, rowHtml: dtuGeneRowHtml })
+  return `<div class="table-scroll" data-dynamic-table="${escapeHtml(tableId)}"><table><thead><tr><th>Gene</th><th>Transcripts</th><th>q-value</th><th>Max |CLR effect|</th></tr></thead><tbody></tbody></table></div><p class="table-note">Search and sort operate across all ${rows.length.toLocaleString()} tested genes. Scroll through all matching rows; only the visible rows are drawn.</p>`
 }
 
 function comparisonResultSection(title, result) {
@@ -1867,10 +1905,19 @@ function longitudinalRankingTable(result) {
   return `<section class="card"><div class="card-heading"><div><h3>Cross-modality patient-signature ranking</h3><p>Higher identity AUC and nearest-neighbour accuracy, together with a lower within/between distance ratio, indicate stronger patient-specific stability.</p></div><span class="tag success">Unsupervised</span></div><div class="table-scroll"><table><thead><tr><th>Data type</th><th>Samples</th><th>Longitudinal patients</th><th>Identity AUC</th><th>NN patient accuracy</th><th>Within / between distance</th></tr></thead><tbody>${rows.map(({ label, modality }) => `<tr><td><strong>${escapeHtml(label)}</strong></td><td>${modality.samples}</td><td>${modality.longitudinal_patients}</td><td>${formatNumber(modality.identity_auc)}</td><td>${Number.isFinite(Number(modality.nearest_neighbor_accuracy)) ? `${(Number(modality.nearest_neighbor_accuracy) * 100).toFixed(1)}%` : '—'}</td><td>${formatNumber(modality.within_between_ratio)}</td></tr>`).join('')}</tbody></table></div></section>`
 }
 
+function longitudinalAnnotationCells(row) {
+  return [row.sample_id, row.observation_id, row.patient_id, row.time_value, row.qc_value]
+}
+function longitudinalAnnotationRow(row) {
+  return `<tr><td>${escapeHtml(row.sample_id)}</td><td>${escapeHtml(row.observation_id)}</td><td><strong>${escapeHtml(row.patient_id)}</strong></td><td>${escapeHtml(row.time_value || '—')}</td><td>${escapeHtml(row.qc_value || '—')}</td></tr>`
+}
+
 function longitudinalResultSection(title, result) {
   if (!result?.modality) return ''
   const modality = result.modality
   const warnings = [...new Set([...(result.warnings || []), ...(modality.warnings || [])])]
+  const annotationId = title.toLowerCase().startsWith('gene') ? 'gene-annotations' : 'transcript-annotations'
+  dynamicTableSources.set(annotationId, { rows: modality.annotations || [], cells: longitudinalAnnotationCells, rowHtml: longitudinalAnnotationRow })
   return `<section class="card comparison-result longitudinal-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(modality.distance_label)} · patient identity is not used to construct the distance matrix.</p></div><span class="tag success">Rust/WASM</span></div>
     <div class="summary-grid compact-grid">
       ${summaryCard('Samples', modality.samples, `${modality.patients} patient/person IDs`)}
@@ -1884,7 +1931,7 @@ function longitudinalResultSection(title, result) {
     </div>
     ${warnings.length ? `<div class="analysis-warnings">${warnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join('')}</div>` : ''}
     <article class="plot-card longitudinal-tree-card"><div class="plot-heading"><strong>Patient-specific hierarchical clustering</strong><span>Average linkage. Same-patient observations should appear close together when this modality preserves a stable patient signature.</span></div>${longitudinalDendrogramSvg(modality.dendrogram, modality.annotations)}</article>
-    <details class="details-block result-details"><summary>Sample annotations (${modality.annotations.length})</summary><div class="table-scroll longitudinal-table"><table><thead><tr><th>Data sample</th><th>Metadata observation</th><th>Patient/person</th><th>Time / visit</th><th>QC value</th></tr></thead><tbody>${modality.annotations.slice(0, 500).map((row) => `<tr><td>${escapeHtml(row.sample_id)}</td><td>${escapeHtml(row.observation_id)}</td><td><strong>${escapeHtml(row.patient_id)}</strong></td><td>${escapeHtml(row.time_value || '—')}</td><td>${escapeHtml(row.qc_value || '—')}</td></tr>`).join('')}</tbody></table></div></details>
+    <details class="details-block result-details"><summary>Sample annotations (${modality.annotations.length})</summary><div class="table-scroll longitudinal-table" data-dynamic-table="${annotationId}"><table><thead><tr><th>Data sample</th><th>Metadata observation</th><th>Patient/person</th><th>Time / visit</th><th>QC value</th></tr></thead><tbody></tbody></table></div></details>
   </section>`
 }
 
@@ -2360,13 +2407,26 @@ function enhanceTables() {
       })
     }
 
+    let dynamicRows = []
+    let previousWindow = null
+    const drawDynamicWindow = () => {
+      if (!source) return
+      const window = tableWindow(dynamicRows.length, scroll.scrollTop, scroll.clientHeight || 520, 40)
+      if (previousWindow && previousWindow.first === window.first && previousWindow.end === window.end) return
+      tbody.innerHTML = virtualSpacer(headers.length, window.topPadding)
+        + dynamicRows.slice(window.first, window.end).map(source.rowHtml).join('')
+        + virtualSpacer(headers.length, window.bottomPadding)
+      status.textContent = `${tableRowRange(window)} matching · ${source.rows.length.toLocaleString()} total`
+      previousWindow = window
+    }
+    if (source) scroll.addEventListener('scroll', drawDynamicWindow, { passive: true })
     const apply = () => {
       if (source) {
-        let rows = source.rows.filter((row) => !query || source.cells(row).some((value) => String(value ?? '').toLowerCase().includes(query)))
-        if (sortIndex >= 0) rows = [...rows].sort((a, b) => compareSortableValues(source.cells(a)[sortIndex], source.cells(b)[sortIndex]) * sortDirection)
-        const limit = source.limit || 500
-        tbody.innerHTML = rows.slice(0, limit).map(source.rowHtml).join('')
-        status.textContent = `Showing ${Math.min(rows.length, limit).toLocaleString()} of ${rows.length.toLocaleString()} matching · ${source.rows.length.toLocaleString()} total`
+        dynamicRows = source.rows.filter((row) => !query || source.cells(row).some((value) => String(value ?? '').toLowerCase().includes(query)))
+        if (sortIndex >= 0) dynamicRows.sort((a, b) => compareSortableValues(source.cells(a)[sortIndex], source.cells(b)[sortIndex]) * sortDirection)
+        scroll.scrollTop = 0
+        previousWindow = null
+        drawDynamicWindow()
       } else {
         const matches = staticRows.filter((row) => !query || row.textContent.toLowerCase().includes(query))
         if (sortIndex >= 0) matches.sort((a, b) => compareSortableValues(a.cells[sortIndex]?.textContent, b.cells[sortIndex]?.textContent) * sortDirection)
@@ -2703,8 +2763,8 @@ function metadataReplaceDraft(table, sourceName = '', sourceId = '') {
     : table.columns.includes('sample_id') ? 'sample_id'
       : table.columns.find(name => /^(4c_id|sample.?id|observation.?id|subject.?id)$/i.test(name)) || table.columns[0]
   editor.mappings = autoMapFiles(state.records, editor.table, editor.idColumn, {})
-  editor.page = 0
-  editor.mapPage = 0
+  editor.metadataScrollTop = 0
+  editor.mappingScrollTop = 0
   editor.filter = ''
   editor.filterColumn = ''
   editor.filterValue = ''
@@ -2832,14 +2892,14 @@ function bindMetadataEvents() {
   const rerender = () => { state.error = null; render() }
   document.querySelector('#metadata-search')?.addEventListener('input', event => {
     editor.filter = event.currentTarget.value
-    editor.page = 0
+    editor.metadataScrollTop = 0
     renderMetadataTableOnly()
   })
   document.querySelector('#metadata-filter-column')?.addEventListener('change', event => {
-    editor.filterColumn = event.currentTarget.value; editor.filterValue = ''; editor.page = 0; rerender()
+    editor.filterColumn = event.currentTarget.value; editor.filterValue = ''; editor.metadataScrollTop = 0; rerender()
   })
   document.querySelector('#metadata-filter-value')?.addEventListener('change', event => {
-    editor.filterValue = event.currentTarget.value; editor.page = 0; renderMetadataTableOnly()
+    editor.filterValue = event.currentTarget.value; editor.metadataScrollTop = 0; renderMetadataTableOnly()
   })
   document.querySelector('#metadata-add-row')?.addEventListener('click', () => metadataEdit(addRow(editor.table), 'Added a blank sample. Enter its sample ID.'))
   document.querySelector('#metadata-download')?.addEventListener('click', metadataExportTsv)
@@ -2896,8 +2956,8 @@ function bindMetadataEvents() {
     } catch (error) { displayError(error) }
   })
   document.querySelector('#mapping-download')?.addEventListener('click', metadataExportMap)
-  document.querySelector('#mapping-search')?.addEventListener('input', event => { editor.mapFilter = event.currentTarget.value; editor.mapPage = 0; renderMetadataMappingsOnly() })
-  document.querySelector('#mapping-unmatched')?.addEventListener('change', event => { editor.mapUnmatched = event.currentTarget.checked; editor.mapPage = 0; renderMetadataMappingsOnly() })
+  document.querySelector('#mapping-search')?.addEventListener('input', event => { editor.mapFilter = event.currentTarget.value; editor.mappingScrollTop = 0; renderMetadataMappingsOnly() })
+  document.querySelector('#mapping-unmatched')?.addEventListener('change', event => { editor.mapUnmatched = event.currentTarget.checked; editor.mappingScrollTop = 0; renderMetadataMappingsOnly() })
   document.querySelector('#metadata-return-project')?.addEventListener('click', () => { state.tab = 'project'; render() })
   bindMetadataGridEvents()
   bindMetadataMappingEvents()
@@ -2922,35 +2982,47 @@ function renderMetadataTableOnly() {
   bindMetadataGridEvents()
 }
 function bindMetadataGridEvents() {
+  const holder = document.querySelector('#metadata-row-holder')
+  if (!holder) return
   const editor = state.metadataEditor
-  document.querySelectorAll('.metadata-cell').forEach(input => input.addEventListener('change', event => {
-    const { row, col } = event.currentTarget.dataset
-    const currentValue = editor.table.rows[Number(row)]?.[Number(col)]
-    if (currentValue !== event.currentTarget.value) {
-      editor.table = setCell(editor.table, Number(row), Number(col), event.currentTarget.value)
-      editor.dirty = true
-      editor.status = 'Unsaved changes: download the metadata TSV to keep a copy.'
-      if (editor.table.columns[Number(col)] === editor.idColumn) {
-        editor.mappings = autoMapFiles(state.records, editor.table, editor.idColumn, editor.mappings)
+  if (!holder.dataset.eventsBound) {
+    holder.dataset.eventsBound = 'true'
+    // Delegation survives virtual-row replacement on scroll.
+    holder.addEventListener('change', event => {
+      const input = event.target.closest('.metadata-cell')
+      if (!input) return
+      const { row, col } = input.dataset
+      const index = Number(row), column = Number(col)
+      if (editor.table.rows[index]?.[column] !== input.value) {
+        editor.table = setCell(editor.table, index, column, input.value)
+        editor.dirty = true
+        editor.status = 'Unsaved changes: download the metadata TSV to keep a copy.'
+        if (editor.table.columns[column] === editor.idColumn) {
+          editor.mappings = autoMapFiles(state.records, editor.table, editor.idColumn, editor.mappings)
+        }
+        const badge = document.querySelector('.metadata-summary-grid')
+        if (badge) badge.dataset.edited = 'true'
+        refreshMetadataValidationDisplay()
       }
-      // Update validation after the edit; preserve scroll instead of redrawing on each keystroke.
-      const badge = document.querySelector('.metadata-summary-grid')
-      if (badge) badge.dataset.edited = 'true'
-      refreshMetadataValidationDisplay()
-    }
-  }))
-  document.querySelectorAll('.metadata-remove-row').forEach(button => button.addEventListener('click', () => {
-    const row = Number(button.dataset.row)
-    if (window.confirm(`Remove metadata row ${row + 1}?`)) metadataEdit(removeRow(editor.table, row), 'Removed sample row')
-  }))
-  document.querySelectorAll('.metadata-sort').forEach(button => button.addEventListener('click', () => {
-    const col = button.dataset.column
-    editor.descending = editor.sortColumn === col ? !editor.descending : false
-    editor.sortColumn = col; editor.page = 0
-    renderMetadataTableOnly()
-  }))
-  document.querySelector('#metadata-page-prev')?.addEventListener('click', () => { editor.page = Math.max(0, editor.page - 1); renderMetadataTableOnly() })
-  document.querySelector('#metadata-page-next')?.addEventListener('click', () => { editor.page++; renderMetadataTableOnly() })
+    })
+    holder.addEventListener('click', event => {
+      const remove = event.target.closest('.metadata-remove-row')
+      if (remove) {
+        const index = Number(remove.dataset.row)
+        if (window.confirm(`Remove metadata row ${index + 1}?`)) metadataEdit(removeRow(editor.table, index), 'Removed sample row')
+        return
+      }
+      const sort = event.target.closest('.metadata-sort')
+      if (sort) {
+        const col = sort.dataset.column
+        editor.descending = editor.sortColumn === col ? !editor.descending : false
+        editor.sortColumn = col
+        editor.metadataScrollTop = 0
+        renderMetadataTableOnly()
+      }
+    })
+  }
+  initializeMetadataViewport(holder, 'metadata')
 }
 function renderMetadataMappingsOnly() {
   const holder = document.querySelector('#metadata-mapping-holder')
@@ -2959,24 +3031,30 @@ function renderMetadataMappingsOnly() {
   bindMetadataMappingEvents()
 }
 function bindMetadataMappingEvents() {
+  const holder = document.querySelector('#metadata-mapping-holder')
+  if (!holder) return
   const editor = state.metadataEditor
-  document.querySelectorAll('.mapping-sample').forEach(input => input.addEventListener('change', event => {
-    const id = event.currentTarget.dataset.fileId
-    const value = event.currentTarget.value.trim()
-    const validIds = new Set(editor.table.rows.map(row => String(row[editor.table.columns.indexOf(editor.idColumn)] || '').trim()).filter(Boolean))
-    if (value && !validIds.has(value)) {
-      event.currentTarget.setCustomValidity('Choose an existing sample ID')
-      event.currentTarget.reportValidity()
-      return
-    }
-    event.currentTarget.setCustomValidity('')
-    editor.mappings[id] = value
-    editor.status = 'Updated local file-to-sample assignments. Download the mapping manifest to keep them.'
-    const cell = event.currentTarget.closest('tr')?.querySelector('td:last-child .tag')
-    if (cell) { cell.textContent = value ? 'Matched' : 'Unmapped'; cell.className = `tag ${value ? 'success' : 'warning'}` }
-  }))
-  document.querySelector('#mapping-prev')?.addEventListener('click', () => { editor.mapPage = Math.max(0, editor.mapPage - 1); renderMetadataMappingsOnly() })
-  document.querySelector('#mapping-next')?.addEventListener('click', () => { editor.mapPage++; renderMetadataMappingsOnly() })
+  if (!holder.dataset.eventsBound) {
+    holder.dataset.eventsBound = 'true'
+    holder.addEventListener('change', event => {
+      const input = event.target.closest('.mapping-sample')
+      if (!input) return
+      const id = input.dataset.fileId
+      const value = input.value.trim()
+      const validIds = new Set(editor.table.rows.map(row => String(row[editor.table.columns.indexOf(editor.idColumn)] || '').trim()).filter(Boolean))
+      if (value && !validIds.has(value)) {
+        input.setCustomValidity('Choose an existing sample ID')
+        input.reportValidity()
+        return
+      }
+      input.setCustomValidity('')
+      editor.mappings[id] = value
+      editor.status = 'Updated local file-to-sample assignments. Download the mapping manifest to keep them.'
+      const cell = input.closest('tr')?.querySelector('td:last-child .tag')
+      if (cell) { cell.textContent = value ? 'Matched' : 'Unmapped'; cell.className = `tag ${value ? 'success' : 'warning'}` }
+    })
+  }
+  initializeMetadataViewport(holder, 'mapping')
 }
 
 function bindProjectEvents() {

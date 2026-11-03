@@ -633,3 +633,27 @@ Implement a browser-local sample metadata viewer, creator, editor, and file-to-s
 - Root cause is a source-context mismatch; the user's working tree was clean. No source was overwritten by the first installer.
 - Recovery installer applies the unchanged non-WASM MD1 patch and adds the same metadata bridge and two Rust tests with formatting-independent anchors.
 - Release remains conditional on native Rust tests, wasm32 compilation, generated-WASM tests, and a real-cohort browser smoke test.
+
+## MD2 — Continuous virtualized table workflow (2026-11-03)
+
+**Goal:** Remove page-by-page navigation from sample metadata tables while retaining bounded DOM memory and full scientific data access.
+
+**Source implementation:**
+- `app/table-viewport.js` defines a fixed-row-height window model with overscan and top/bottom spacer sizes.
+- Sample Metadata editor: all filtered rows are accessible by continuous scrolling; no 60-row pagination; row editing and removal retain original source indices after sorting.
+- File-to-sample mapping: all matching file references are accessible by continuous scrolling; no 40-row pagination; exact file IDs remain stable.
+- Differential feature and differential transcript usage tables: remove the 500-row DOM display cap; filter and sort all source rows and render visible row windows on scroll.
+- Longitudinal sample annotation tables: remove 500-row truncation; full annotations are accessible in a virtualized table.
+- Ordinary smaller result tables retain the existing search/sort/sticky-header treatment.
+- Source row count, matching count, scroll position and fixed header are shown/preserved. Filtering and sorting reset scrolling to the first match.
+- The input file size is not capped. No Rust/WASM scientific code or native helper is changed.
+
+**Validation in isolated reconstructed MD1 checkout:**
+- `node --check app/main.js` PASS; `node --check app/table-viewport.js` PASS.
+- `node --test app/tests/*.test.mjs`: 75 total, 73 passed / 2 skipped with a local compiled WASM artifact; clean source-only installer test: 72 passed / 3 generated-WASM skips; 0 failures in both.
+- A 2,983-row virtual-window unit test reaches the final source row without pagination and retains the full logical extent.
+- Chromium interactive smoke was attempted, but the environment blocked local page access (`net::ERR_BLOCKED_BY_ADMINISTRATOR`). **Do not claim the browser smoke or large real-cohort UX was validated.**
+
+**Release gates:** Apply to the user's MD1-recovery source; run JS suite and local browser smoke at 2,983 rows; check editable cells and mapping selection across several scroll positions; then commit and deploy. No WASM rebuild is required for MD2 unless the local checkout has pending M1/MD1 WASM changes.
+
+**Remaining work:** Real browser UX and memory benchmark with the user's cohort; verify dynamic scientific result-table scrolling and save/export parity. The application still holds all metadata rows in its JavaScript model; virtualization limits only DOM nodes, not the underlying dataset size.

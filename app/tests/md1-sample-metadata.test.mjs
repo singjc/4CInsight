@@ -86,7 +86,7 @@ test('UI includes create/open/edit/mapping/export and activates metadata in scie
   assert.match(main, /metadataUseInAnalyses/)
   assert.match(main, /state\.qcConfig\.metadataId = editor\.generatedId/)
   assert.match(main, /Download file map TSV/)
-  assert.match(html, /md1-sample-metadata/)
+  assert.match(html, /md2-continuous-tables/)
 })
 
 test('file mappings can populate standard modality aliases without changing sample identities', async () => {

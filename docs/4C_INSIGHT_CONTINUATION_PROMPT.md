@@ -126,3 +126,11 @@ Continue the MD1 source implementation in 4C Insight after M1 workbook merger. T
 
 ## MD1 recovery note
 Use the MD1 formatted-source recovery rather than the original `apply_md1.sh` when Git M1 source has been formatted. The recovery stages all files in a temporary Git worktree and tests before modifying the main checkout. Validate the Rust metadata reader and browser workflow before release.
+
+## Continue after MD2 — continuous tables
+
+Project: 4C Insight (`singjc/4CInsight`), scientific engine v0.21.0. MD1 restores sample metadata view/create/edit and exact file-to-sample mapping. MD2 removes pagination from editable metadata, mappings, differential/DTU tables, and longitudinal annotations. It uses `app/table-viewport.js` and fixed-height virtualized table rows. No change to Rust/WASM scientific calculations.
+
+Status: JS tests: 73 passed / 2 skipped with compiled WASM in reconstructed MD1; 72 passed / 3 skipped in clean source-only checkout; 0 failed. Local interactive browser verification was blocked by environment policy, not passed. Verify in Firefox and Chrome with ~2,983 source files, including scrolling to first/middle/last row, editing IDs and annotations after scroll, sorting/filtering, file ID assignment, downloadable TSV completeness, and differential feature tables >500 rows. Check the CI workflow after commit.
+
+Do not re-add pagination or a hard input size cap. Keep source indices stable after sort/filter, preserve row edits and scroll position, and leave model output unchanged. Keep rolling `docs/4C_INSIGHT_HANDOFF_CURRENT.md` and `docs/4C_INSIGHT_CONTINUATION_PROMPT.md` updated with results.

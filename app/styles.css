@@ -468,3 +468,20 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
   .metadata-start-grid, .metadata-filter-grid, .metadata-action-grid { grid-template-columns: 1fr; }
   .metadata-start-buttons { flex-wrap: wrap; }
 }
+
+/* MD2 — continuous, virtualized tables. Keep header and row heights stable. */
+.metadata-grid-scroll { height: min(520px, 64vh); max-height: none; overscroll-behavior: contain; }
+.metadata-editor-table { border-collapse: separate; border-spacing: 0; }
+.metadata-editor-table tbody tr:not(.virtual-spacer) { height: 48px; }
+.metadata-editor-table tbody tr:not(.virtual-spacer) td { height: 48px; padding-top: 0; padding-bottom: 0; box-sizing: border-box; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.metadata-editor-table tbody input { box-sizing: border-box; max-width: 100%; }
+.metadata-editor-table .metadata-row-index { width: 62px; }
+.metadata-editor-table .danger-text-button { white-space: nowrap; }
+.table-scroll[data-dynamic-table] { height: min(520px, 64vh); max-height: none; overscroll-behavior: contain; }
+.table-scroll[data-dynamic-table] tbody tr:not(.virtual-spacer) { height: 40px; }
+.table-scroll[data-dynamic-table] tbody tr:not(.virtual-spacer) td { height: 40px; box-sizing: border-box; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.virtual-spacer { height: auto !important; pointer-events: none; }
+.virtual-spacer td { padding: 0 !important; border: 0 !important; background: transparent !important; height: 0; }
+@media (max-width: 720px) {
+  .metadata-grid-scroll, .table-scroll[data-dynamic-table] { height: min(420px, 58vh); }
+}
