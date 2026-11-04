@@ -3,3 +3,7 @@
 /app/wasm/
 .DS_Store
 *.log
+
+# 4C Insight private local development notes
+**/4C_INSIGHT_HANDOFF*.md
+**/4C_INSIGHT_CONTINUATION_PROMPT*.md

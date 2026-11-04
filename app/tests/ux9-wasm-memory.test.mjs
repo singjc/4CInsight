@@ -73,6 +73,6 @@ test('Firefox display prioritizes engine memory rather than an unavailable-RAM w
   assert.match(main, /info\.deviceMemoryGiB !== null \?/)
   assert.doesNotMatch(main, /\$\{escapeHtml\(info\.memory\)\}.*WASM science: 1 worker/)
   assert.match(main, /WASM memory is measured from the science engine, not total\/free host RAM/)
-  assert.match(html, /0\.21\.0-md2-continuous-tables/)
+  assert.match(html, /0\.21\.0-[a-z0-9-]+/)
   assert.doesNotMatch(main, /nativeMonitor|connect-native-monitor|resource-ram/)
 })

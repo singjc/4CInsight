@@ -7,7 +7,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js'
+import { methodDocs } from './docs-content.js?v=0.21.0-md3-worked-examples'
+import { exampleSearchText, renderToyExamples } from './docs-toy-examples.js?v=0.21.0-md3-worked-examples'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
 import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory, detectBrowserResources } from './resource-controls.js'
@@ -20,7 +21,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-md2-continuous-tables'
+const APP_VERSION = '0.21.0-md3-worked-examples'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -2333,12 +2334,12 @@ function bindSettingsEvents() {
 
 function docsView() {
   const references = methodDocs.reduce((total, section) => total + (section.references || []).length, 0)
-  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods, assumptions, and references</h2><p>Search the methods that are implemented in 4C Insight. Each section states what the application does, what it does not claim, and the literature that supports the method.</p></div><div class="local-card"><strong>Literature-backed methods</strong><span>${methodDocs.length} sections · ${references} linked references</span></div></section>
+  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods, assumptions, and references</h2><p>Read the implemented methods, open small worked examples, and review scientific limits and references. Toy numbers are for learning, not cohort results.</p></div><div class="local-card"><strong>Literature-backed methods</strong><span>${methodDocs.length} sections · ${references} linked references</span></div></section>
     <section class="card docs-search-card"><label for="docs-search"><strong>Search documentation</strong><span>Search methods, terms, limitations, or references.</span></label><input id="docs-search" type="search" value="${escapeHtml(state.docsQuery)}" placeholder="e.g. NB2, PERMANOVA, longitudinal, FDR, CLR" autocomplete="off"/><small id="docs-search-status">${methodDocs.length} sections shown</small></section>
     <nav class="docs-toc" aria-label="Documentation sections">${methodDocs.map((section) => `<a href="#doc-${escapeHtml(section.id)}">${escapeHtml(section.title)}</a>`).join('')}</nav>
     <div class="docs-methods">${methodDocs.map((section) => {
-      const searchable = [section.title, section.keywords, section.summary, ...(section.body || []), ...(section.references || []).map((reference) => reference.label)].join(' ').toLowerCase()
-      return `<article id="doc-${escapeHtml(section.id)}" class="card docs-section" data-doc-section data-doc-search="${escapeHtml(searchable)}"><div class="card-heading"><div><h3>${escapeHtml(section.title)}</h3><p>${escapeHtml(section.summary)}</p></div><a class="text-button docs-anchor" href="#doc-${escapeHtml(section.id)}" aria-label="Link to ${escapeHtml(section.title)}">#</a></div>${(section.body || []).map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join('')}${section.references?.length ? `<div class="docs-references"><strong>References</strong><ol>${section.references.map((reference) => `<li><a href="${escapeHtml(reference.href)}" target="_blank" rel="noreferrer">${escapeHtml(reference.label)}</a></li>`).join('')}</ol></div>` : `<div class="docs-references"><strong>References</strong><p>No external reference is required for this application-specific provenance behavior.</p></div>`}</article>`
+      const searchable = [section.title, section.keywords, section.summary, ...(section.body || []), exampleSearchText(section.id), ...(section.references || []).map((reference) => reference.label)].join(' ').toLowerCase()
+      return `<article id="doc-${escapeHtml(section.id)}" class="card docs-section" data-doc-section data-doc-search="${escapeHtml(searchable)}"><div class="card-heading"><div><h3>${escapeHtml(section.title)}</h3><p>${escapeHtml(section.summary)}</p></div><a class="text-button docs-anchor" href="#doc-${escapeHtml(section.id)}" aria-label="Link to ${escapeHtml(section.title)}">#</a></div>${(section.body || []).map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join('')}${renderToyExamples(section.id)}${section.references?.length ? `<div class="docs-references"><strong>References</strong><ol>${section.references.map((reference) => `<li><a href="${escapeHtml(reference.href)}" target="_blank" rel="noreferrer">${escapeHtml(reference.label)}</a></li>`).join('')}</ol></div>` : `<div class="docs-references"><strong>References</strong><p>No external reference is required for this application-specific provenance behavior.</p></div>`}</article>`
     }).join('')}</div>`
 }
 

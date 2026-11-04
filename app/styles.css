@@ -485,3 +485,27 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 @media (max-width: 720px) {
   .metadata-grid-scroll, .table-scroll[data-dynamic-table] { height: min(420px, 58vh); }
 }
+
+/* Worked Docs examples: compact by default; expand with keyboard or pointer. */
+.docs-toy-example { margin-top: 15px; border: 1px solid #dbe5f5; background: #f8faff; border-radius: 10px; overflow: clip; }
+.docs-toy-example > summary { display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px 14px; color: #1d3e7b; font-size: 12px; font-weight: 700; list-style: none; }
+.docs-toy-example > summary::-webkit-details-marker { display: none; }
+.docs-toy-example > summary::after { content: '+'; margin-left: auto; font-size: 16px; }
+.docs-toy-example[open] > summary::after { content: '−'; }
+.docs-toy-example > summary:focus-visible { outline: 3px solid rgba(49,89,217,.4); outline-offset: -3px; }
+.docs-toy-marker { flex: 0 0 auto; display: inline-grid; place-items: center; padding: 3px 5px; background: #e4ecff; border-radius: 5px; color: #3159d9; font-size: 9px; letter-spacing: .03em; }
+.docs-toy-content { padding: 4px 14px 14px; color: #4b5870; font-size: 12px; line-height: 1.6; }
+.docs-toy-question { margin: 4px 0 12px; font-weight: 600; color: #283b58; }
+.docs-toy-table-wrap { width: 100%; overflow-x: auto; border-radius: 8px; border: 1px solid #dce4f2; }
+.docs-toy-table { width: 100%; border-collapse: collapse; background: white; font-size: 11px; }
+.docs-toy-table th { text-align: left; background: #f0f4fb; color: #344565; font-weight: 700; }
+.docs-toy-table td, .docs-toy-table th { padding: 9px 10px; border-bottom: 1px solid #edf1f7; vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
+.docs-toy-table tr:last-child td { border-bottom: 0; }
+.docs-toy-subheading { display: block; margin-top: 13px; color: #263c5d; }
+.docs-toy-steps { padding-left: 22px; margin: 6px 0 12px; }
+.docs-toy-steps li { padding: 2px 0; }
+.docs-toy-meaning, .docs-toy-limit { margin: 8px 0; }
+.docs-toy-meaning { padding: 9px 11px; background: #eaf5f1; border-radius: 7px; color: #23604d; }
+.docs-toy-limit { color: #855c1c; }
+.docs-toy-note { display: block; margin-top: 9px; font-size: 10px; color: #68748b; }
+@media (max-width: 720px) { .docs-toy-content { padding-inline: 10px; } .docs-toy-table td, .docs-toy-table th { padding: 7px 8px; } }

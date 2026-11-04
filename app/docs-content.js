@@ -14,6 +14,34 @@ export const methodDocs = [
     ],
   },
   {
+    id: 'file-merging',
+    title: 'Gene and transcript workbook merging',
+    keywords: 'gene transcript sample workbooks merge xlsx raw count total reads tpm reference workbook missing unknown feature',
+    summary: 'Build one feature-by-sample table from individual expression workbooks.',
+    body: [
+      'The merger reads sample workbooks in a deterministic order. The first sorted workbook defines the feature identifiers and required structure. Later workbooks are matched to those identifiers, not to worksheet row positions.',
+      'The merge report counts missing and unknown features. The output includes the selected metrics and column order. The browser writes the merged table locally for download or downstream analysis.',
+      'A merge joins measurements. It does not normalize expression, remove batch effects, or test for differential expression.',
+    ],
+    references: [
+      { label: 'Sandve et al. (2013), Ten Simple Rules for Reproducible Computational Research', href: 'https://doi.org/10.1371/journal.pcbi.1003285' },
+    ],
+  },
+  {
+    id: 'sample-metadata',
+    title: 'Sample metadata, editing, and file mapping',
+    keywords: 'metadata viewer creator editor sample id subject group file mapping aliases validation duplicate id export',
+    summary: 'Link source files to samples and review the cohort description before analysis.',
+    body: [
+      'The Sample Metadata workspace shows existing sample fields or creates a new sample sheet. Users can edit rows, search, filter, and assign expression files to sample identifiers. Blank and duplicate sample IDs are flagged for correction.',
+      'File mappings can be exported separately and can populate standard modality-alias columns. Downstream analyses still match expression table columns to the selected metadata ID role; the file-mapping manifest does not silently rename expression columns.',
+      'Download edited metadata and mapping tables to preserve them. A portable state JSON stores settings and references, not full raw data files.',
+    ],
+    references: [
+      { label: 'Sandve et al. (2013), Ten Simple Rules for Reproducible Computational Research', href: 'https://doi.org/10.1371/journal.pcbi.1003285' },
+    ],
+  },
+  {
     id: 'expression-qc',
     title: 'Expression QC and count-scale inputs',
     keywords: 'expression qc tpm raw count total reads median quartile zero missing normalization',
