@@ -28,7 +28,7 @@ test('history uses browser-local IndexedDB snapshots with view export and delete
   assert.match(persistence, /indexedDB\.open/)
   assert.match(persistence, /history-snapshots/)
   assert.match(main, /\['history', 'History', '6'\]/)
-  assert.match(main, /recordHistory\(otherOmics\.some\(/)
+  assert.match(main, /recordHistory\(steps\.some\(/)
   assert.match(main, /'compare-groups-multiomics'/)
   assert.match(main, /recordHistory\('longitudinal-patient-signature-expression'/)
   assert.match(main, /recordHistory\('significant-hit-structure-expression'/)

@@ -33,7 +33,7 @@ test('Compare Groups exposes five independent choices and model controls', async
   assert.match(main, /compare-repertoire-permutations/)
   assert.match(main, /otherOmicsControls\(\)/)
   assert.match(main, /multiomicsResultSection\(/)
-  assert.match(main, /workerRequest\('run-expression-comparison'/)
+  assert.match(main, /await isolatedScienceRequest\(/)
 })
 
 test('science worker reads one XLSX file before calling Rust and accepts partial modality failures', async () => {

@@ -7,9 +7,10 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-m2-multiomics'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-m2-multiomics'
+import { methodDocs } from './docs-content.js?v=0.21.0-m2r3-isolated'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-m2r3-isolated'
 import { validateWasmMemoryReport } from './wasm-memory.js'
+import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
 import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory, detectBrowserResources } from './resource-controls.js'
 import {
@@ -21,7 +22,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-m2-multiomics'
+const APP_VERSION = '0.21.0-m2r3-isolated'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -167,6 +168,7 @@ const state = {
 }
 
 const pending = new Map()
+let activeCompareController = null
 let worker = null
 function attachScienceWorker() {
   const current = new Worker(new URL(`./analysis-worker.js?v=${APP_VERSION}`, import.meta.url), { type: 'module' })
@@ -215,6 +217,11 @@ function replaceScienceWorker() {
   if (state.wasmMemorySample) state.wasmMemorySample = { ...state.wasmMemorySample, active: false }
 }
 function stopScienceWork() {
+  if (activeCompareController) {
+    activeCompareController.abort()
+    state.projectMessage = 'Comparison stopped. Completed modality results are retained.'
+    return
+  }
   if (!pending.size) return
   const error = new Error('Operation stopped. The science worker and its WASM memory were released.')
   for (const request of pending.values()) request.reject(error)
@@ -987,7 +994,7 @@ function renderNav() {
 
   document.querySelector('#sidebar-status').innerHTML = `
     <span class="status-dot ${state.wasmReady ? 'ok' : ''}"></span>
-    <div><strong>${escapeHtml(state.engine)}</strong><span>${crossOriginIsolated ? 'Cross-origin isolated' : 'Single-worker compatible'}</span>${pending.size ? '<button id="stop-science-work" class="danger-text-button">Stop operation</button>' : ''}</div>`
+    <div><strong>${escapeHtml(state.engine)}</strong><span>${crossOriginIsolated ? 'Cross-origin isolated' : 'Single-worker compatible'}</span>${(pending.size || activeCompareController) ? '<button id="stop-science-work" class="danger-text-button">Stop operation</button>' : ''}</div>`
 }
 
 function summaryCard(label, value, detail) {
@@ -2628,7 +2635,25 @@ function currentPortableComparisonConfig() {
   }
 }
 
+// Update the progress fields without rebuilding the whole Results page for each
+// workbook. Rebuilding hundreds of plots during a long repertoire parse is costly.
+function updateCompareProgress(completed, total, message) {
+  state.compareProgress = { completed, total, message }
+  const card = document.querySelector('.progress-card')
+  if (!card) {
+    if (state.tab === 'compare') render()
+    return
+  }
+  const label = card.querySelector('.progress-copy strong')
+  if (label) label.textContent = message
+  const count = card.querySelector('.progress-copy span')
+  if (count) count.textContent = `${completed} of ${total} modality steps complete`
+  const bar = card.querySelector('progress')
+  if (bar) { bar.max = Math.max(1, total); bar.value = completed }
+}
+
 async function runGroupComparison() {
+  if (state.busy) return
   const cfg = state.compareConfig
   const metadataFile = selectedFile(state.qcConfig.metadataId)
   const geneFile = selectedFile(cfg.geneMergedId)
@@ -2640,50 +2665,121 @@ async function runGroupComparison() {
   }
 
   const { comparisonName, portableConfig } = currentPortableComparisonConfig()
+  const shared = {
+    metadataFile,
+    comparisonName,
+    config: portableConfig,
+    omicsOptions: {
+      ambiguousPolicy: cfg.ambiguousPolicy,
+      determinedOnly: cfg.excludeUndeterminedIsotype,
+      rarefactionReps: Number(cfg.repertoireRarefactionReps),
+      rarefactionCap: Number(cfg.repertoireRarefactionCap),
+      permutations: Number(cfg.repertoirePermutations),
+    },
+  }
+  const steps = []
+  if (cfg.geneEnabled && geneFile) steps.push({
+    kind: 'gene', key: 'gene', title: 'Gene expression',
+    gene: { enabled: true, file: geneFile },
+  })
+  if (cfg.transcriptEnabled && transcriptFile) steps.push({
+    kind: 'transcript', key: 'transcript', title: 'Transcript expression',
+    transcript: { enabled: true, file: transcriptFile },
+  })
+  for (const [kind, title, enabledKey, key] of otherOmics) {
+    if (!cfg[enabledKey]) continue
+    const files = recordsOfKind(kind)
+      .slice().sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+      .map(record => ({ name: record.name, sampleId: record.sampleId, file: selectedFile(record.id) }))
+      .filter(record => record.file)
+    if (files.length) steps.push({ kind, key, title, otherOmics: [{ kind, key, title, files }] })
+  }
+  if (!steps.length) {
+    state.error = 'Select at least one available data modality.'
+    render()
+    return
+  }
 
+  const controller = new AbortController()
+  activeCompareController = controller
   state.busy = true
   state.error = null
   state.compareResult = null
   state.hitResult = null
   state.hitProgress = null
-  state.compareProgress = { completed: 0, total: Number(cfg.geneEnabled && geneFile) + Number(cfg.transcriptEnabled && transcriptFile) + otherOmics.filter(([kind, , enabled]) => cfg[enabled] && recordsOfKind(kind).length).length, message: 'Starting local comparison' }
+  const result = {
+    comparisonName, gene: null, transcript: null, bcr: null, tcrAlpha: null,
+    tcrBeta: null, isotype: null, immune: null, omicsErrors: {},
+    completedAt: null, execution: 'local-browser-wasm',
+  }
+  updateCompareProgress(0, steps.length, 'Starting isolated modality analysis')
   render()
+  let completed = 0
   try {
-    const response = await workerRequest('run-expression-comparison', {
-      metadataFile,
-      comparisonName,
-      config: portableConfig,
-      gene: {
-        enabled: Boolean(cfg.geneEnabled && geneFile),
-        file: cfg.geneEnabled ? geneFile : null,
-      },
-      transcript: {
-        enabled: Boolean(cfg.transcriptEnabled && transcriptFile),
-        file: cfg.transcriptEnabled ? transcriptFile : null,
-      },
-      otherOmics: otherOmics.filter(([kind, , enabledKey]) => cfg[enabledKey]).map(([kind, title, , key]) => ({
-        kind, key, title,
-        files: recordsOfKind(kind)
-          .slice().sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
-          .map(record => ({ name: record.name, sampleId: record.sampleId, file: selectedFile(record.id) }))
-          .filter(record => record.file),
-      })),
-      omicsOptions: {
-        ambiguousPolicy: cfg.ambiguousPolicy,
-        determinedOnly: cfg.excludeUndeterminedIsotype,
-        rarefactionReps: Number(cfg.repertoireRarefactionReps),
-        rarefactionCap: Number(cfg.repertoireRarefactionCap),
-        permutations: Number(cfg.repertoirePermutations),
-      },
-    }, (progress) => {
-      state.compareProgress = progress
-      render()
-    })
-    state.compareResult = response.result
-    await recordHistory(otherOmics.some(([, , enabledKey]) => cfg[enabledKey]) ? 'compare-groups-multiomics' : 'compare-groups-expression', response.result.comparisonName || comparisonName || 'Compare Groups')
+    for (const step of steps) {
+      if (controller.signal.aborted) break
+      updateCompareProgress(completed, steps.length, `${step.title}: initializing isolated WASM worker`)
+      try {
+        const response = await isolatedScienceRequest({
+          createWorker: () => new Worker(new URL(`./analysis-worker.js?v=${APP_VERSION}`, import.meta.url), { type: 'module' }),
+          type: 'run-expression-comparison',
+          resourceSettings: state.resources,
+          signal: controller.signal,
+          payload: {
+            ...shared,
+            gene: step.gene || { enabled: false, file: null },
+            transcript: step.transcript || { enabled: false, file: null },
+            otherOmics: step.otherOmics || [],
+          },
+          onProgress: progress => updateCompareProgress(completed, steps.length, progress.message || step.title),
+          onMemory: data => {
+            const report = validateWasmMemoryReport(data)
+            if (report) {
+              state.wasmMemorySample = { ...report, active: true }
+              renderSystemInfo()
+            }
+          },
+        })
+        if (!response.result?.[step.key]) {
+          const reason = response.result?.omicsErrors?.[step.kind] || 'No result returned for the selected modality'
+          throw new Error(reason)
+        }
+        result[step.key] = response.result[step.key]
+      } catch (error) {
+        if (controller.signal.aborted) break
+        const message = error instanceof Error ? error.message : String(error)
+        result.omicsErrors[step.kind] = message
+        console.error(`4C Insight ${step.title} failed:`, message)
+      } finally {
+        completed += 1
+        if (state.wasmMemorySample) state.wasmMemorySample = { ...state.wasmMemorySample, active: false }
+        state.compareResult = result
+        updateCompareProgress(completed, steps.length, `${step.title}: ${result[step.key] ? 'complete' : 'failed or stopped'}`)
+        render()
+      }
+    }
+    result.completedAt = new Date().toISOString()
+    state.compareResult = result
+    const succeeded = steps.filter(step => result[step.key]).length
+    if (controller.signal.aborted) {
+      state.error = `Analysis stopped. ${succeeded} of ${steps.length} modalities completed; existing results remain available.`
+    } else if (!succeeded) {
+      state.error = 'Every selected modality failed. Review the named errors below and the browser console.'
+    }
+    if (succeeded) {
+      try {
+        await recordHistory(steps.some(step => step.otherOmics?.length) ? 'compare-groups-multiomics' : 'compare-groups-expression', comparisonName || 'Compare Groups')
+      } catch (error) {
+        // A History storage error must not discard completed scientific results.
+        state.error = `Results completed but could not be saved to History: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }
   } catch (error) {
-    state.error = error instanceof Error ? error.message : String(error)
+    // Retain any completed modalities even after an unexpected browser error.
+    state.compareResult = result
+    state.error = `Comparison stopped unexpectedly: ${error instanceof Error ? error.message : String(error)}`
   } finally {
+    activeCompareController = null
     state.busy = false
     state.compareProgress = null
     render()
