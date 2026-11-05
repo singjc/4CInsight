@@ -7,8 +7,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-md3-worked-examples'
-import { exampleSearchText, renderToyExamples } from './docs-toy-examples.js?v=0.21.0-md3-worked-examples'
+import { methodDocs } from './docs-content.js?v=0.21.0-md4-visual-methods'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-md4-visual-methods'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
 import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory, detectBrowserResources } from './resource-controls.js'
@@ -21,7 +21,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-md3-worked-examples'
+const APP_VERSION = '0.21.0-md4-visual-methods'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -2334,7 +2334,7 @@ function bindSettingsEvents() {
 
 function docsView() {
   const references = methodDocs.reduce((total, section) => total + (section.references || []).length, 0)
-  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods, assumptions, and references</h2><p>Read the implemented methods, open small worked examples, and review scientific limits and references. Toy numbers are for learning, not cohort results.</p></div><div class="local-card"><strong>Literature-backed methods</strong><span>${methodDocs.length} sections · ${references} linked references</span></div></section>
+  return `<section class="page-heading"><div><span class="eyebrow">Docs</span><h2>Methods, assumptions, and references</h2><p>Explore each method with a labeled diagram or plot. Expand the toy numbers and calculation when you want more detail. These are learning examples, not cohort results.</p></div><div class="local-card"><strong>Literature-backed methods</strong><span>${methodDocs.length} sections · ${references} linked references</span></div></section>
     <section class="card docs-search-card"><label for="docs-search"><strong>Search documentation</strong><span>Search methods, terms, limitations, or references.</span></label><input id="docs-search" type="search" value="${escapeHtml(state.docsQuery)}" placeholder="e.g. NB2, PERMANOVA, longitudinal, FDR, CLR" autocomplete="off"/><small id="docs-search-status">${methodDocs.length} sections shown</small></section>
     <nav class="docs-toc" aria-label="Documentation sections">${methodDocs.map((section) => `<a href="#doc-${escapeHtml(section.id)}">${escapeHtml(section.title)}</a>`).join('')}</nav>
     <div class="docs-methods">${methodDocs.map((section) => {
@@ -2344,6 +2344,7 @@ function docsView() {
 }
 
 function bindDocsEvents() {
+  bindToyVisualControls(document)
   const input = document.querySelector('#docs-search')
   const status = document.querySelector('#docs-search-status')
   const sections = [...document.querySelectorAll('[data-doc-section]')]

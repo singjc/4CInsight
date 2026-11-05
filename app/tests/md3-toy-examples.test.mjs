@@ -93,5 +93,5 @@ test('documentation remains static, browser-only, and does not request new permi
   const code = await readFile(new URL('../docs-toy-examples.js', import.meta.url), 'utf8')
   assert.doesNotMatch(code, /\bfetch\s*\(|\bXMLHttpRequest\b|navigator\.permissions/)
   assert.doesNotMatch(code, /\binnerHTML\b|\beval\s*\(/)
-  assert.match(main, /docs-toy-examples\.js\?v=0\.21\.0-md3-worked-examples/)
+  assert.match(main, /docs-toy-examples\.js\?v=0\.21\.0-[a-z0-9-]+/)
 })

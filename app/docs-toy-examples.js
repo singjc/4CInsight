@@ -1,6 +1,8 @@
 // Explanatory examples for the 4C Insight Docs page.
 // Numbers are illustrative. They are not fitted results or scientific fixtures.
 // Keep these examples separate from the authoritative Rust/WASM algorithms.
+import { renderToyVisual, visualCaption } from './docs-toy-visuals.js?v=0.21.0-md4-visual-methods'
+export { bindToyVisualControls } from './docs-toy-visuals.js?v=0.21.0-md4-visual-methods'
 export const methodToyExamples = {
   'local-first': [
     {
@@ -239,20 +241,24 @@ export function exampleSearchText(sectionId) {
   return (methodToyExamples[sectionId] || []).flatMap((example) => [
     example.title, example.question, ...example.columns,
     ...example.rows.flat(), ...example.steps, example.meaning, example.limit,
+    visualCaption(sectionId, (methodToyExamples[sectionId] || []).indexOf(example)),
   ]).join(' ')
 }
 
 export function renderToyExamples(sectionId) {
   const examples = methodToyExamples[sectionId] || []
   return examples.map((example, index) => `<details class="docs-toy-example" data-doc-example>
-    <summary><span class="docs-toy-marker" aria-hidden="true">123</span><span>Worked example ${index + 1}: ${escapeHtml(example.title)}</span></summary>
+    <summary><span class="docs-toy-marker" aria-hidden="true">PLOT</span><span>Visual example ${index + 1}: ${escapeHtml(example.title)}</span></summary>
     <div class="docs-toy-content">
       <p class="docs-toy-question">${escapeHtml(example.question)}</p>
-      <div class="docs-toy-table-wrap"><table class="docs-toy-table"><thead><tr>${example.columns.map((column) => `<th scope="col">${escapeHtml(column)}</th>`).join('')}</tr></thead><tbody>${example.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
-      <strong class="docs-toy-subheading">Follow the calculation</strong>
-      <ol class="docs-toy-steps">${example.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol>
+      ${renderToyVisual(sectionId, index)}
       <p class="docs-toy-meaning"><strong>Interpretation:</strong> ${escapeHtml(example.meaning)}</p>
       <p class="docs-toy-limit"><strong>Important:</strong> ${escapeHtml(example.limit)}</p>
+      <details class="docs-toy-math"><summary>Show input values and the calculation</summary>
+        <div class="docs-toy-table-wrap"><table class="docs-toy-table"><thead><tr>${example.columns.map((column) => `<th scope="col">${escapeHtml(column)}</th>`).join('')}</tr></thead><tbody>${example.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
+        <strong class="docs-toy-subheading">Follow the calculation</strong>
+        <ol class="docs-toy-steps">${example.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol>
+      </details>
       <small class="docs-toy-note">Illustrative values only. This example is not a result from your cohort.</small>
     </div>
   </details>`).join('')
