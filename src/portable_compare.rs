@@ -385,3 +385,268 @@ where
         analysis,
     })
 }
+
+/// Metadata preparation shared with the byte-based immune/repertoire bridge.
+/// The established expression preparation remains unchanged until parity tests
+/// confirm that both call sites have identical cohort membership.
+pub(crate) struct PreparedPortableComparison {
+    pub metadata: MetadataTable,
+    pub comparison: crate::cohort::CohortComparison,
+    pub spec: CorrectedModelSpec,
+    pub exclusions: Vec<PortableExclusionSummary>,
+    pub summary: PortableComparisonSummary,
+}
+
+pub(crate) fn prepare_portable_comparison(
+    metadata_file_name: &str,
+    metadata_bytes: &[u8],
+    config: &PortableExpressionComparisonConfig,
+) -> Result<PreparedPortableComparison> {
+    if config.case_values.is_empty() || config.control_values.is_empty() {
+        bail!("Select at least one case value and one control value");
+    }
+    if config.metadata_id_column.trim().is_empty() {
+        bail!("Select the metadata column that identifies expression samples");
+    }
+    if config.group_column.trim().is_empty() {
+        bail!("Select a metadata grouping column");
+    }
+
+    let overlap = config
+        .case_values
+        .iter()
+        .filter(|case| {
+            config
+                .control_values
+                .iter()
+                .any(|control| control.eq_ignore_ascii_case(case))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !overlap.is_empty() {
+        bail!("Case and control values overlap: {}", overlap.join(", "));
+    }
+
+    let portable = parse_metadata_bytes(metadata_file_name, metadata_bytes)?;
+    let id_index = portable
+        .columns
+        .iter()
+        .position(|name| name == config.metadata_id_column.trim())
+        .ok_or_else(|| {
+            anyhow!(
+                "metadata sample-ID column '{}' does not exist",
+                config.metadata_id_column
+            )
+        })?;
+    if !portable
+        .columns
+        .iter()
+        .any(|name| name == config.group_column.trim())
+    {
+        bail!(
+            "metadata grouping column '{}' does not exist",
+            config.group_column
+        );
+    }
+
+    let subject_column = config
+        .subject_column
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(column) = subject_column.as_ref()
+        && !portable.columns.iter().any(|name| name == column)
+    {
+        bail!("metadata subject/patient column '{column}' does not exist");
+    }
+    for covariate in &config.covariates {
+        let covariate = covariate.trim();
+        if !covariate.is_empty() && !portable.columns.iter().any(|name| name == covariate) {
+            bail!("metadata covariate column '{covariate}' does not exist");
+        }
+    }
+
+    let mut active_rules = Vec::<ActiveRule>::new();
+    for (index, rule) in config.exclusions.iter().enumerate() {
+        if !rule.enabled {
+            continue;
+        }
+        let column = rule.column.trim();
+        if column.is_empty() || rule.values.is_empty() {
+            continue;
+        }
+        let column_index = portable
+            .columns
+            .iter()
+            .position(|name| name == column)
+            .ok_or_else(|| anyhow!("metadata exclusion column '{column}' does not exist"))?;
+        let values = rule
+            .values
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            continue;
+        }
+        active_rules.push(ActiveRule {
+            label: if rule.label.trim().is_empty() {
+                format!("Exclusion rule {}", index + 1)
+            } else {
+                rule.label.trim().to_string()
+            },
+            column: column.to_string(),
+            column_index,
+            values,
+            matching_rows: 0,
+            excluded_sample_ids: BTreeSet::new(),
+        });
+    }
+
+    let rows_before = portable.rows.len();
+    let mut rows = Vec::with_capacity(rows_before);
+    let mut excluded_rows = 0usize;
+    for row in portable.rows {
+        let sample_id = row
+            .get(id_index)
+            .map(String::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let mut excluded = false;
+        for rule in &mut active_rules {
+            let observed = row
+                .get(rule.column_index)
+                .map(String::as_str)
+                .unwrap_or_default()
+                .trim();
+            if rule
+                .values
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(observed))
+            {
+                rule.matching_rows += 1;
+                if !sample_id.is_empty() {
+                    rule.excluded_sample_ids.insert(sample_id.clone());
+                }
+                excluded = true;
+            }
+        }
+        if excluded {
+            excluded_rows += 1;
+        } else {
+            rows.push(row);
+        }
+    }
+
+    let metadata = MetadataTable {
+        path: PathBuf::from(metadata_file_name),
+        columns: portable.columns,
+        rows,
+        id_column: config.metadata_id_column.trim().to_string(),
+    };
+
+    let case_values = config
+        .case_values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let control_values = config
+        .control_values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    if case_values.is_empty() || control_values.is_empty() {
+        bail!("Case and control selections cannot be empty after trimming values");
+    }
+
+    let case_label = if config.case_label.trim().is_empty() {
+        case_values.iter().cloned().collect::<Vec<_>>().join(" + ")
+    } else {
+        config.case_label.trim().to_string()
+    };
+    let control_label = if config.control_label.trim().is_empty() {
+        control_values
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" + ")
+    } else {
+        config.control_label.trim().to_string()
+    };
+    let comparison_name = if config.comparison_name.trim().is_empty() {
+        format!("{case_label} vs {control_label}")
+    } else {
+        config.comparison_name.trim().to_string()
+    };
+
+    let comparison = build_custom_comparison(
+        &metadata,
+        &MetadataComparisonSpec {
+            column: config.group_column.trim().to_string(),
+            case_values,
+            control_values,
+            name: comparison_name,
+            case_label,
+            control_label,
+        },
+    )?;
+
+    let mut seen_covariates = HashSet::<String>::new();
+    let covariates = config
+        .covariates
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen_covariates.insert((*value).to_string()))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut model_spec = CorrectedModelSpec::default();
+    model_spec.subject_column = subject_column;
+    model_spec.covariates = covariates;
+    model_spec.min_count = if config.min_count.is_finite() {
+        config.min_count.max(0.0)
+    } else {
+        default_min_count()
+    };
+    model_spec.min_fraction_samples = if config.min_fraction_samples.is_finite() {
+        config.min_fraction_samples.clamp(0.0, 1.0)
+    } else {
+        default_min_fraction_samples()
+    };
+    model_spec.permutations = config.permutations;
+
+    let exclusions = active_rules
+        .into_iter()
+        .map(|rule| PortableExclusionSummary {
+            label: rule.label,
+            column: rule.column,
+            values: rule.values,
+            matching_rows: rule.matching_rows,
+            excluded_sample_ids: rule.excluded_sample_ids.into_iter().collect(),
+        })
+        .collect::<Vec<_>>();
+
+    Ok(PreparedPortableComparison {
+        summary: PortableComparisonSummary {
+            name: comparison.name.clone(),
+            case_label: comparison.case_label.clone(),
+            control_label: comparison.control_label.clone(),
+            metadata_rows_before_exclusions: rows_before,
+            metadata_rows_after_exclusions: metadata.rows.len(),
+            excluded_rows,
+            case_metadata_rows: comparison.case_metadata_rows,
+            control_metadata_rows: comparison.control_metadata_rows,
+        },
+        metadata,
+        comparison,
+        spec: model_spec,
+        exclusions,
+    })
+}

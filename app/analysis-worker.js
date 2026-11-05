@@ -221,9 +221,10 @@ async function handleExpressionComparison(request) {
     ['gene', request.gene],
     ['transcript', request.transcript],
   ].filter(([, entry]) => entry?.enabled && entry?.file)
-  if (!analyses.length) throw new Error('Enable gene and/or transcript expression and select a merged table')
+  const otherOmics = (request.otherOmics || []).filter(entry => entry.files?.length)
+  if (!analyses.length && !otherOmics.length) throw new Error('Select at least one available omics modality')
 
-  const total = analyses.length
+  const total = analyses.length + otherOmics.length
   let completed = 0
   postProgress(request.requestId, completed, total, `Reading metadata: ${request.metadataFile.name}`)
   const metadataBytes = await wasmBytes(request.metadataFile)
@@ -231,6 +232,7 @@ async function handleExpressionComparison(request) {
     comparisonName: request.comparisonName || 'Metadata-defined comparison',
     gene: null,
     transcript: null,
+    bcr: null, tcrAlpha: null, tcrBeta: null, isotype: null, immune: null, omicsErrors: {},
     completedAt: null,
     execution: 'local-browser-wasm',
   }
@@ -254,6 +256,45 @@ async function handleExpressionComparison(request) {
     )
     completed += 1
     postProgress(request.requestId, completed, total, `${label}: comparison complete`)
+  }
+
+  for (const entry of otherOmics) {
+    if (!wasm.multiomics_begin_json || !wasm.multiomics_add_sample_json || !wasm.multiomics_finish_json || !wasm.multiomics_abort || !wasm.multiomics_sample_role_json) {
+      throw new Error('The deployed WASM build does not contain the M2 corrected repertoire and immune bridge')
+    }
+    postProgress(request.requestId, completed, total, `${entry.title}: starting ${entry.files.length} local files`)
+    let begun = false
+    try {
+      wasm.multiomics_begin_json(
+        request.metadataFile.name, metadataBytes, JSON.stringify({ ...request.config, kind: 'gene-expression' }),
+        entry.kind, JSON.stringify(request.omicsOptions || {}),
+      )
+      begun = true
+      const records = entry.files.slice().sort((a, b) => a.sampleId.localeCompare(b.sampleId) || a.name.localeCompare(b.name))
+      for (let i = 0; i < records.length; i++) {
+        const record = records[i]
+        postProgress(request.requestId, completed, total, `${entry.title}: parsing ${i+1}/${records.length}: ${record.name}`)
+        // Skip source byte reads when a sample is outside the selected cohorts.
+        const role = JSON.parse(wasm.multiomics_sample_role_json(record.sampleId)).role
+        if (role === 'outside') {
+          wasm.multiomics_add_sample_json(record.name, record.sampleId, new Uint8Array(0))
+          continue
+        }
+        const bytes = await wasmBytes(record.file)
+        // Rust parses one workbook and retains only the scientific representation.
+        wasm.multiomics_add_sample_json(record.name, record.sampleId, bytes)
+        postWasmMemory(request.requestId)
+      }
+      postProgress(request.requestId, completed, total, `${entry.title}: corrected statistics, ordination and clustering`)
+      result[entry.key] = JSON.parse(wasm.multiomics_finish_json())
+      begun = false
+    } catch (error) {
+      result.omicsErrors[entry.kind] = error instanceof Error ? error.message : String(error)
+    } finally {
+      if (begun) wasm.multiomics_abort()
+      completed += 1
+      postProgress(request.requestId, completed, total, `${entry.title}: ${result[entry.key] ? 'complete' : 'failed (see warnings)'}`)
+    }
   }
 
   result.completedAt = new Date().toISOString()

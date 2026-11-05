@@ -7,8 +7,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-md4-visual-methods'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-md4-visual-methods'
+import { methodDocs } from './docs-content.js?v=0.21.0-m2-multiomics'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-m2-multiomics'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
 import { DEFAULT_RESOURCES, normalizeResources, suggestedScienceThreads, thinPlotPoints, measureAppMemory, detectBrowserResources } from './resource-controls.js'
@@ -21,7 +21,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-md4-visual-methods'
+const APP_VERSION = '0.21.0-m2-multiomics'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -35,6 +35,14 @@ const tabs = [
   ['history', 'History', '6'],
   ['docs', 'Docs', '?'],
   ['settings', 'Settings', '⚙'],
+]
+
+const otherOmics = [
+  ['bcr', 'BCR repertoire', 'bcrEnabled', 'bcr', 'Clone diversity, clonality, V/D/J and composition'],
+  ['tcr-alpha', 'TCR alpha', 'tcrAlphaEnabled', 'tcrAlpha', 'Clone diversity, V/J, V-J pairing and sharing'],
+  ['tcr-beta', 'TCR beta', 'tcrBetaEnabled', 'tcrBeta', 'Clone diversity, V/J, V-J pairing and sharing'],
+  ['bcr-isotype', 'BCR isotypes', 'isotypeEnabled', 'isotype', 'CLR composition, Aitchison distance and adjusted comparisons'],
+  ['immune-infiltrate', 'Immune infiltration', 'immuneEnabled', 'immune', 'ssGSEA signatures, corrected group tests and PCA'],
 ]
 
 const geneMetrics = [
@@ -132,6 +140,16 @@ const state = {
     customExclusionValues: [],
     geneEnabled: true,
     geneMergedId: '',
+    bcrEnabled: false,
+    tcrAlphaEnabled: false,
+    tcrBetaEnabled: false,
+    isotypeEnabled: false,
+    immuneEnabled: false,
+    ambiguousPolicy: 'exclude',
+    excludeUndeterminedIsotype: false,
+    repertoireRarefactionReps: 3,
+    repertoireRarefactionCap: 50000,
+    repertoirePermutations: 499,
     transcriptEnabled: true,
     transcriptMergedId: '',
     minCount: 10,
@@ -686,7 +704,7 @@ function applicationStatePayload() {
 function historyStatePayload(workflow) {
   const results = {}
   if (workflow === 'explore-qc-expression') results.qc = state.qcResult
-  if (workflow === 'compare-groups-expression') results.compare = state.compareResult
+  if (workflow === 'compare-groups-expression' || workflow === 'compare-groups-multiomics') results.compare = state.compareResult
   if (workflow === 'longitudinal-patient-signature-expression') results.longitudinal = state.longitudinalResult
   if (workflow === 'significant-hit-structure-expression') {
     results.compare = state.compareResult
@@ -801,7 +819,7 @@ function historySummary(workflow) {
   if (workflow === 'explore-qc-expression') {
     return `${state.qcResult?.gene?.length || 0} gene and ${state.qcResult?.transcript?.length || 0} transcript samples`
   }
-  if (workflow === 'compare-groups-expression') {
+  if (workflow === 'compare-groups-expression' || workflow === 'compare-groups-multiomics') {
     return state.compareResult?.comparisonName || 'Corrected group comparison'
   }
   if (workflow === 'longitudinal-patient-signature-expression') {
@@ -862,6 +880,7 @@ function restoreHistorySnapshot(snapshot) {
   const tabForWorkflow = {
     'explore-qc-expression': 'qc',
     'compare-groups-expression': 'compare',
+    'compare-groups-multiomics': 'compare',
     'longitudinal-patient-signature-expression': 'longitudinal',
     'significant-hit-structure-expression': 'hits',
   }
@@ -1762,6 +1781,45 @@ function comparisonResultSection(title, result) {
   </section>`
 }
 
+function otherOmicsControls() {
+  const cfg = state.compareConfig
+  return `<section class="card"><div class="card-heading"><div><h3>4. Repertoire, isotype, and immune analyses</h3><p>Analyze selected modalities with the original corrected Rust methods. Missing modalities do not remove samples from other analyses.</p></div><span class="tag neutral">Rust/WASM · staged source</span></div>
+    <div class="config-grid expression-source-grid">${otherOmics.map(([kind, title, enabledKey, , description]) => {
+      const files = recordsOfKind(kind)
+      return `<div class="config-block ${files.length ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="compare-${kind}-enabled" type="checkbox" ${cfg[enabledKey] && files.length ? 'checked' : ''} ${files.length ? '' : 'disabled'} /><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span></label><span class="tag ${files.length ? 'success' : 'neutral'}">${files.length} files</span></div></div>`
+    }).join('')}</div>
+    <details class="advanced-settings"><summary>Repertoire and composition settings</summary>
+      <div class="form-grid advanced-grid"><label><span>V/D/J ambiguity handling</span><select id="compare-repertoire-policy">${[['exclude','Exclude ambiguous calls'],['split','Split weight'],['first','First reported hit'],['family','Collapse to gene family']].map(([value,label]) => `<option value="${value}" ${cfg.ambiguousPolicy === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+      <label><span>Matched-depth rarefaction replicates</span><input id="compare-repertoire-reps" type="number" min="1" max="32" value="${cfg.repertoireRarefactionReps || 3}" /></label>
+      <label><span>Maximum matched depth</span><input id="compare-repertoire-cap" type="number" min="100" max="1000000" value="${cfg.repertoireRarefactionCap || 50000}" /></label>
+      <label><span>PERMANOVA permutations</span><input id="compare-repertoire-permutations" type="number" min="1" max="9999" value="${cfg.repertoirePermutations || 499}" /></label></div>
+      <label class="check-label"><input id="compare-isotype-determined" type="checkbox" ${cfg.excludeUndeterminedIsotype ? 'checked' : ''} /><span>Exclude Undetermined from isotype composition and renormalize</span></label>
+      <p>The default settings match the original native corrected analysis. Scientific testing must confirm native/WASM parity before deployment.</p>
+    </details>
+  </section>`
+}
+
+function multiomicsResultSection(title, result, plotPrefix) {
+  if (!result?.analysis) return ''
+  const analysis = result.analysis
+  const isRepertoire = Array.isArray(analysis.sample_summaries)
+  const isImmune = Array.isArray(analysis.tests) && !!analysis.pca
+  const tests = isRepertoire ? (analysis.metric_tests || []) : (analysis.tests || [])
+  const ord = isRepertoire ? analysis.morisita_horn : (isImmune ? analysis.pca : analysis.ordination)
+  const linkage = analysis.dendrogram
+  const comps = isRepertoire ? (analysis.compositions || []) : []
+  const compare = result.comparison || {}
+  return `<section class="card comparison-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>Corrected native Rust method through local WASM · ${isRepertoire ? 'matched-depth repertoire analysis' : isImmune ? 'ssGSEA signatures' : 'CLR isotype composition'}</p></div><span class="tag success">Rust/WASM</span></div>
+    <div class="summary-grid compact-grid">${summaryCard('Usable samples', analysis.files_used || 0, 'Complete-case scientific inputs')}${summaryCard('Adjusted tests', tests.length, 'Original Rust statistical engine')}${isRepertoire ? summaryCard('Matched depth', analysis.matched_depth, `${analysis.rarefaction_reps} repetitions`) : ''}${summaryCard('Excluded metadata rows', compare.excluded_rows || 0, 'Applied before sample matching')}</div>
+    ${(result.skippedFilesOutsideGroups || 0) ? `<p class="method-note">${result.skippedFilesOutsideGroups} source files were not in the selected case/control groups.</p>` : ''}
+    ${analysis.warnings?.length ? `<div class="analysis-warnings">${analysis.warnings.map(w => `<div>${escapeHtml(w)}</div>`).join('')}</div>` : ''}
+    <div class="plot-grid"><article class="plot-card"><div class="plot-heading"><strong>${isRepertoire ? 'Morisita–Horn ordination' : isImmune ? 'Immune signature PCA' : 'Isotype Aitchison ordination'}</strong><span>Sample structure; descriptive group comparisons.</span></div>${pcaSvg(ord, `${plotPrefix}-ordination`, compare.case_label || 'Case', compare.control_label || 'Control')}</article>
+    <article class="plot-card"><div class="plot-heading"><strong>Hierarchical clustering</strong><span>Original modality-specific sample distances.</span></div>${dendrogramSvg(linkage, `${plotPrefix}-dendro`, compare.case_label || 'Case', compare.control_label || 'Control')}</article></div>
+    <details class="details-block result-details" open><summary>Adjusted feature tests</summary>${differentialTable({tests}, `${plotPrefix}-tests`)}</details>
+    ${isRepertoire ? `<details class="details-block result-details"><summary>Repertoire sample metrics</summary><div class="table-scroll"><table><thead><tr><th>Sample</th><th>Group</th><th>Richness</th><th>Shannon</th><th>Clonality</th><th>Private fraction</th><th>Public fraction</th></tr></thead><tbody>${analysis.sample_summaries.map(v => `<tr><td>${escapeHtml(v.sample_id)}</td><td>${escapeHtml(v.group)}</td><td>${formatNumber(v.observed_richness)}</td><td>${formatNumber(v.shannon)}</td><td>${formatNumber(v.clonality)}</td><td>${formatNumber(v.private_fraction)}</td><td>${formatNumber(v.public_fraction)}</td></tr>`).join('')}</tbody></table></div></details>${comps.map(c => `<details class="details-block result-details"><summary>${escapeHtml(c.family)} composition (${c.tests.length} tests)</summary>${differentialTable({tests:c.tests}, `${plotPrefix}-comp-${c.family.replace(/[^A-Za-z0-9]/g,'-')}`)}</details>`).join('')}` : ''}
+  </section>`
+}
+
 function compareView() {
   ensureCompareDefaults()
   const metadataRecords = recordsOfKind('metadata-candidate')
@@ -1776,7 +1834,7 @@ function compareView() {
   const covariateColumns = columns.filter((column) => column !== state.qcConfig.metadataIdColumn && column !== cfg.groupColumn && column !== cfg.subjectColumn)
   const overlap = cfg.caseValues.some((value) => cfg.controlValues.some((control) => control.toLowerCase() === value.toLowerCase()))
   const metadataReady = Boolean(metadata && !metadata.blank_id_rows && !metadata.duplicate_id_values.length)
-  const modalityReady = (cfg.geneEnabled && cfg.geneMergedId) || (cfg.transcriptEnabled && cfg.transcriptMergedId)
+  const modalityReady = (cfg.geneEnabled && cfg.geneMergedId) || (cfg.transcriptEnabled && cfg.transcriptMergedId) || otherOmics.some(([kind, , enabledKey]) => cfg[enabledKey] && recordsOfKind(kind).length > 0)
   const exclusionReady = (!cfg.qcExclusionEnabled || (Boolean(cfg.qcExclusionColumn) && cfg.qcExclusionValues.length > 0)) && (!cfg.customExclusionEnabled || (Boolean(cfg.customExclusionColumn) && cfg.customExclusionValues.length > 0))
   const incompleteExclusion = cfg.qcExclusionEnabled && !cfg.qcExclusionColumn
     ? 'Reviewed QC exclusion is enabled. Select a metadata column and at least one value, or turn it off.'
@@ -1819,11 +1877,13 @@ function compareView() {
   <section class="card"><div class="card-heading"><div><h3>3. Expression analyses</h3><p>Corrected analyses use raw counts for genes and Total Reads for transcripts. Merged tables are read locally from the selected files.</p></div></div><div class="config-grid expression-source-grid">
     <div class="config-block stacked ${geneMerged.length ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="compare-gene-enabled" type="checkbox" ${cfg.geneEnabled && geneMerged.length ? 'checked' : ''} ${geneMerged.length ? '' : 'disabled'}/><span><strong>Gene expression</strong><small>NB2 corrected differential analysis + PCA + dendrogram</small></span></label><span class="tag ${geneMerged.length ? 'success' : 'neutral'}">${geneMerged.length ? `${geneMerged.length} merged table${geneMerged.length === 1 ? '' : 's'}` : 'Unavailable'}</span></div><label><span>Merged gene table</span><select id="compare-gene-file" ${cfg.geneEnabled && geneMerged.length ? '' : 'disabled'}>${mergedFileOptions(geneMerged, cfg.geneMergedId)}</select></label></div>
     <div class="config-block stacked ${transcriptMerged.length ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="compare-transcript-enabled" type="checkbox" ${cfg.transcriptEnabled && transcriptMerged.length ? 'checked' : ''} ${transcriptMerged.length ? '' : 'disabled'}/><span><strong>Transcript expression</strong><small>NB2 corrected abundance + PCA + dendrogram + DTU screen</small></span></label><span class="tag ${transcriptMerged.length ? 'success' : 'neutral'}">${transcriptMerged.length ? `${transcriptMerged.length} merged table${transcriptMerged.length === 1 ? '' : 's'}` : 'Unavailable'}</span></div><label><span>Merged transcript table</span><select id="compare-transcript-file" ${cfg.transcriptEnabled && transcriptMerged.length ? '' : 'disabled'}>${mergedFileOptions(transcriptMerged, cfg.transcriptMergedId)}</select></label></div>
-  </div>
+  </div></section>
+  ${otherOmicsControls()}
+  <section class="card"><div class="card-heading"><div><h3>5. Run corrected comparison</h3><p>Enabled modalities are evaluated independently using the selected metadata groups.</p></div></div>
   <details class="advanced-settings"><summary>Advanced model settings</summary><div class="form-grid advanced-grid"><label><span>Minimum count</span><input id="compare-min-count" type="number" min="0" step="1" value="${cfg.minCount}"/></label><label><span>Minimum fraction of samples</span><input id="compare-min-fraction" type="number" min="0" max="1" step="0.01" value="${cfg.minFractionSamples}"/></label></div><p>Defaults match the established corrected-expression analysis. Change them only when the analysis plan requires it.</p></details>
   <div class="run-row"><div><strong>${cfg.caseValues.length} case value${cfg.caseValues.length === 1 ? '' : 's'} · ${cfg.controlValues.length} control value${cfg.controlValues.length === 1 ? '' : 's'}</strong><span>Group membership, exclusions, subject mapping, and model settings are frozen into the result.</span></div><button id="run-group-comparison" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run local comparison'}</button></div></section>
   ${state.compareProgress ? `<div class="progress-card" role="status"><div class="progress-copy"><strong>${escapeHtml(state.compareProgress.message)}</strong><span>${state.compareProgress.completed} of ${state.compareProgress.total} modality steps complete</span></div><progress max="${Math.max(1, state.compareProgress.total)}" value="${state.compareProgress.completed}"></progress></div>` : ''}
-  ${state.compareResult ? `${globalThresholdControls()}<div class="result-heading"><div><span class="eyebrow">Corrected expression result</span><h3>${escapeHtml(state.compareResult.comparisonName)}</h3><p>Generated entirely on this device. PCA and clustering use global top-variable normalized features, not significant-hit selection.</p></div><button id="export-comparison" class="secondary-button">Save comparison JSON</button></div>${comparisonResultSection('Gene expression', state.compareResult.gene)}${comparisonResultSection('Transcript expression', state.compareResult.transcript)}` : ''}`
+  ${state.compareResult ? `${globalThresholdControls()}<div class="result-heading"><div><span class="eyebrow">Corrected multi-omics result</span><h3>${escapeHtml(state.compareResult.comparisonName)}</h3><p>Generated locally. Expression PCA uses top-variable normalized features; other modalities retain their own scientific distances.</p></div><button id="export-comparison" class="secondary-button">Save comparison JSON</button></div>${comparisonResultSection('Gene expression', state.compareResult.gene)}${comparisonResultSection('Transcript expression', state.compareResult.transcript)}${otherOmics.map(([,title,,key]) => multiomicsResultSection(title, state.compareResult[key], key)).join('')}${Object.entries(state.compareResult.omicsErrors || {}).map(([name, message])=> `<div class="analysis-warnings"><strong>${escapeHtml(name)}</strong>: ${escapeHtml(message)}</div>`).join('')}` : ''}`
 }
 
 
@@ -2255,6 +2315,7 @@ function historyWorkflowTitle(workflow) {
   return ({
     'explore-qc-expression': 'Explore & QC',
     'compare-groups-expression': 'Compare Groups',
+    'compare-groups-multiomics': 'Compare Groups',
     'longitudinal-patient-signature-expression': 'Longitudinal',
     'significant-hit-structure-expression': 'Significant Hits',
   })[workflow] || workflow || 'Analysis result'
@@ -2585,7 +2646,7 @@ async function runGroupComparison() {
   state.compareResult = null
   state.hitResult = null
   state.hitProgress = null
-  state.compareProgress = { completed: 0, total: Number(cfg.geneEnabled) + Number(cfg.transcriptEnabled), message: 'Starting local comparison' }
+  state.compareProgress = { completed: 0, total: Number(cfg.geneEnabled && geneFile) + Number(cfg.transcriptEnabled && transcriptFile) + otherOmics.filter(([kind, , enabled]) => cfg[enabled] && recordsOfKind(kind).length).length, message: 'Starting local comparison' }
   render()
   try {
     const response = await workerRequest('run-expression-comparison', {
@@ -2600,12 +2661,26 @@ async function runGroupComparison() {
         enabled: Boolean(cfg.transcriptEnabled && transcriptFile),
         file: cfg.transcriptEnabled ? transcriptFile : null,
       },
+      otherOmics: otherOmics.filter(([kind, , enabledKey]) => cfg[enabledKey]).map(([kind, title, , key]) => ({
+        kind, key, title,
+        files: recordsOfKind(kind)
+          .slice().sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+          .map(record => ({ name: record.name, sampleId: record.sampleId, file: selectedFile(record.id) }))
+          .filter(record => record.file),
+      })),
+      omicsOptions: {
+        ambiguousPolicy: cfg.ambiguousPolicy,
+        determinedOnly: cfg.excludeUndeterminedIsotype,
+        rarefactionReps: Number(cfg.repertoireRarefactionReps),
+        rarefactionCap: Number(cfg.repertoireRarefactionCap),
+        permutations: Number(cfg.repertoirePermutations),
+      },
     }, (progress) => {
       state.compareProgress = progress
       render()
     })
     state.compareResult = response.result
-    await recordHistory('compare-groups-expression', response.result.comparisonName || comparisonName || 'Compare Groups')
+    await recordHistory(otherOmics.some(([, , enabledKey]) => cfg[enabledKey]) ? 'compare-groups-multiomics' : 'compare-groups-expression', response.result.comparisonName || comparisonName || 'Compare Groups')
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
   } finally {
@@ -2724,6 +2799,28 @@ function bindCompareEvents() {
   })
   document.querySelector('#compare-min-fraction')?.addEventListener('change', (event) => {
     cfg.minFractionSamples = Number(event.currentTarget.value)
+    state.compareResult = null
+  })
+  for (const [kind, , enabledKey] of otherOmics) {
+    document.querySelector(`#compare-${kind}-enabled`)?.addEventListener('change', (event) => {
+      cfg[enabledKey] = event.currentTarget.checked
+      state.compareResult = null
+      rerender()
+    })
+  }
+  for (const [id, field, asNumber] of [
+    ['compare-repertoire-policy', 'ambiguousPolicy', false],
+    ['compare-repertoire-reps', 'repertoireRarefactionReps', true],
+    ['compare-repertoire-cap', 'repertoireRarefactionCap', true],
+    ['compare-repertoire-permutations', 'repertoirePermutations', true],
+  ]) {
+    document.querySelector(`#${id}`)?.addEventListener('change', (event) => {
+      cfg[field] = asNumber ? Number(event.currentTarget.value) : event.currentTarget.value
+      state.compareResult = null
+    })
+  }
+  document.querySelector('#compare-isotype-determined')?.addEventListener('change', (event) => {
+    cfg.excludeUndeterminedIsotype = event.currentTarget.checked
     state.compareResult = null
   })
   document.querySelector('#run-group-comparison')?.addEventListener('click', () => void runGroupComparison())

@@ -1,8 +1,8 @@
 // Explanatory examples for the 4C Insight Docs page.
 // Numbers are illustrative. They are not fitted results or scientific fixtures.
 // Keep these examples separate from the authoritative Rust/WASM algorithms.
-import { renderToyVisual, visualCaption } from './docs-toy-visuals.js?v=0.21.0-md4-visual-methods'
-export { bindToyVisualControls } from './docs-toy-visuals.js?v=0.21.0-md4-visual-methods'
+import { renderToyVisual, visualCaption } from './docs-toy-visuals.js?v=0.21.0-m2-multiomics'
+export { bindToyVisualControls } from './docs-toy-visuals.js?v=0.21.0-m2-multiomics'
 export const methodToyExamples = {
   'local-first': [
     {

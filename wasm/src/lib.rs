@@ -1,4 +1,6 @@
 use serde::Serialize;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::prelude::*;
 
 // Host-side unit tests compile shared longitudinal.rs outside wasm32. The
@@ -64,7 +66,7 @@ struct EngineInfo<'a> {
     package: &'a str,
     version: &'a str,
     execution: &'a str,
-    capabilities: [&'a str; 7],
+    capabilities: [&'a str; 12],
 }
 
 #[derive(Serialize)]
@@ -95,6 +97,249 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
 
+/// A single, explicit multi-omics session stays inside the science Web Worker.
+/// File bytes are decoded one workbook at a time and released after parsing.
+struct MultiomicsSession {
+    modality: cohort::CohortModality,
+    prepared: portable_compare::PreparedPortableComparison,
+    repertoire: Option<corrected::PortableRepertoireAccumulator>,
+    maps: Vec<(String, String, HashMap<String, f64>)>,
+    used_ids: HashSet<String>,
+    skipped: usize,
+}
+
+thread_local! {
+    static MULTIOMICS_SESSION: RefCell<Option<MultiomicsSession>> = const { RefCell::new(None) };
+}
+
+fn parse_multiomics_kind(value: &str) -> Result<cohort::CohortModality, String> {
+    match value {
+        "bcr" => Ok(cohort::CohortModality::Bcr),
+        "tcr-alpha" => Ok(cohort::CohortModality::TcrAlpha),
+        "tcr-beta" => Ok(cohort::CohortModality::TcrBeta),
+        "bcr-isotype" => Ok(cohort::CohortModality::BcrIsotype),
+        "immune-infiltrate" => Ok(cohort::CohortModality::ImmuneInfiltrate),
+        _ => Err(format!("Unsupported multi-omics modality: {value}")),
+    }
+}
+
+/// Start a corrected modality run with the SAME metadata/group/covariate
+/// conventions used by the corrected expression workflow.
+#[wasm_bindgen]
+pub fn multiomics_begin_json(
+    metadata_file_name: &str,
+    metadata_bytes: &[u8],
+    comparison_config_json: &str,
+    modality: &str,
+    analysis_options_json: &str,
+) -> Result<String, JsValue> {
+    let modality = parse_multiomics_kind(modality).map_err(js_error)?;
+    let config: portable_compare::PortableExpressionComparisonConfig =
+        serde_json::from_str(comparison_config_json).map_err(js_error)?;
+    let mut prepared =
+        portable_compare::prepare_portable_comparison(metadata_file_name, metadata_bytes, &config)
+            .map_err(js_error)?;
+    let options: serde_json::Value =
+        serde_json::from_str(analysis_options_json).map_err(js_error)?;
+    // Bounded configurable options; defaults are the established native ones.
+    if let Some(permutations) = options.get("permutations").and_then(|v| v.as_u64()) {
+        prepared.spec.permutations = permutations.clamp(1, 9999) as usize;
+    }
+    if let Some(reps) = options.get("rarefactionReps").and_then(|v| v.as_u64()) {
+        prepared.spec.rarefaction_reps = reps.clamp(1, 32) as usize;
+    }
+    if let Some(cap) = options.get("rarefactionCap").and_then(|v| v.as_u64()) {
+        prepared.spec.rarefaction_cap = cap.clamp(100, 1_000_000) as usize;
+    }
+    if let Some(value) = options.get("determinedOnly").and_then(|v| v.as_bool()) {
+        prepared.spec.exclude_undetermined_isotype = value;
+    }
+    if let Some(policy) = options.get("ambiguousPolicy").and_then(|v| v.as_str()) {
+        prepared.spec.ambiguous_policy = match policy {
+            "exclude" => corrected::AmbiguousCallPolicy::Exclude,
+            "split" => corrected::AmbiguousCallPolicy::Split,
+            "first" => corrected::AmbiguousCallPolicy::First,
+            "family" => corrected::AmbiguousCallPolicy::Family,
+            _ => {
+                return Err(js_error(format!(
+                    "Invalid V/D/J ambiguity policy: {policy}"
+                )));
+            }
+        };
+    }
+    let repertoire = if matches!(
+        modality,
+        cohort::CohortModality::Bcr
+            | cohort::CohortModality::TcrAlpha
+            | cohort::CohortModality::TcrBeta
+    ) {
+        Some(
+            corrected::PortableRepertoireAccumulator::new(modality, prepared.spec.ambiguous_policy)
+                .map_err(js_error)?,
+        )
+    } else {
+        None
+    };
+    MULTIOMICS_SESSION.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if cell.is_some() {
+            return Err(js_error("Another multi-omics session is already active"));
+        }
+        *cell = Some(MultiomicsSession {
+            modality,
+            prepared,
+            repertoire,
+            maps: Vec::new(),
+            used_ids: HashSet::new(),
+            skipped: 0,
+        });
+        Ok(String::from("{\"status\":\"ready\"}"))
+    })
+}
+
+/// Check cohort membership before the browser reads large raw workbook bytes.
+#[wasm_bindgen]
+pub fn multiomics_sample_role_json(sample_id: &str) -> Result<String, JsValue> {
+    MULTIOMICS_SESSION.with(|cell| {
+        let session = cell.borrow();
+        let session = session
+            .as_ref()
+            .ok_or_else(|| js_error("No active multi-omics session"))?;
+        let comparison = &session.prepared.comparison;
+        let role = if comparison.is_case_id(sample_id) {
+            "case"
+        } else if comparison.is_control_id(sample_id) {
+            "control"
+        } else {
+            "outside"
+        };
+        serde_json::to_string(&serde_json::json!({"role": role})).map_err(js_error)
+    })
+}
+
+/// Decode one local sample workbook. Never retain the original XLSX bytes.
+#[wasm_bindgen]
+pub fn multiomics_add_sample_json(
+    file_name: &str,
+    sample_id: &str,
+    bytes: &[u8],
+) -> Result<String, JsValue> {
+    MULTIOMICS_SESSION.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let session = borrow
+            .as_mut()
+            .ok_or_else(|| js_error("No active multi-omics session"))?;
+        let key = cohort::normalize_sample_id(sample_id);
+        if key.is_empty() {
+            return Err(js_error(format!(
+                "Missing sample identifier for {file_name}"
+            )));
+        }
+        let comparison = &session.prepared.comparison;
+        let group = if comparison.is_case_id(&key) {
+            comparison.case_label.clone()
+        } else if comparison.is_control_id(&key) {
+            comparison.control_label.clone()
+        } else {
+            session.skipped += 1;
+            return Ok(String::from("{\"status\":\"skipped\"}"));
+        };
+        if session.used_ids.contains(&key) {
+            return Err(js_error(format!(
+                "Two files map to sample {sample_id}; resolve this ambiguity in Sample Metadata"
+            )));
+        }
+        if let Some(repertoire) = session.repertoire.as_mut() {
+            repertoire
+                .add_bytes(file_name, bytes, sample_id, &group)
+                .map_err(js_error)?;
+        } else if session.modality == cohort::CohortModality::BcrIsotype {
+            let map = corrected::parse_isotype_bytes(
+                bytes,
+                session.prepared.spec.exclude_undetermined_isotype,
+            )
+            .map_err(js_error)?;
+            session.maps.push((sample_id.to_string(), group, map));
+        } else {
+            let map = corrected::parse_immune_bytes(bytes).map_err(js_error)?;
+            session.maps.push((sample_id.to_string(), group, map));
+        }
+        session.used_ids.insert(key);
+        serde_json::to_string(&serde_json::json!({
+            "status": "added", "count": session.used_ids.len(),
+        }))
+        .map_err(js_error)
+    })
+}
+
+#[wasm_bindgen]
+pub fn multiomics_finish_json() -> Result<String, JsValue> {
+    let session = MULTIOMICS_SESSION
+        .with(|cell| cell.borrow_mut().take())
+        .ok_or_else(|| js_error("No active multi-omics session"))?;
+    let MultiomicsSession {
+        modality,
+        prepared,
+        repertoire,
+        maps,
+        skipped,
+        ..
+    } = session;
+    let analysis = match modality {
+        cohort::CohortModality::Bcr
+        | cohort::CohortModality::TcrAlpha
+        | cohort::CohortModality::TcrBeta => {
+            let repertoire = repertoire.ok_or_else(|| js_error("Repertoire session is missing"))?;
+            serde_json::to_value(
+                repertoire
+                    .finish(
+                        &prepared.metadata,
+                        &prepared.comparison,
+                        &prepared.spec,
+                        |_, _, _| {},
+                    )
+                    .map_err(js_error)?,
+            )
+            .map_err(js_error)?
+        }
+        cohort::CohortModality::BcrIsotype => serde_json::to_value(
+            corrected::run_corrected_isotype_from_maps(
+                maps,
+                &prepared.metadata,
+                &prepared.comparison,
+                &prepared.spec,
+                Vec::new(),
+            )
+            .map_err(js_error)?,
+        )
+        .map_err(js_error)?,
+        cohort::CohortModality::ImmuneInfiltrate => serde_json::to_value(
+            corrected::run_corrected_immune_from_maps(
+                maps,
+                &prepared.metadata,
+                &prepared.comparison,
+                &prepared.spec,
+                Vec::new(),
+            )
+            .map_err(js_error)?,
+        )
+        .map_err(js_error)?,
+        _ => return Err(js_error("Unsupported modality")),
+    };
+    serde_json::to_string(&serde_json::json!({
+        "analysis": analysis,
+        "comparison": prepared.summary,
+        "exclusions": prepared.exclusions,
+        "skippedFilesOutsideGroups": skipped,
+    }))
+    .map_err(js_error)
+}
+
+#[wasm_bindgen]
+pub fn multiomics_abort() {
+    MULTIOMICS_SESSION.with(|cell| *cell.borrow_mut() = None);
+}
+
 #[wasm_bindgen]
 pub fn engine_info_json() -> String {
     serde_json::to_string(&EngineInfo {
@@ -110,6 +355,11 @@ pub fn engine_info_json() -> String {
             "corrected-expression-comparison",
             "longitudinal-expression-signature",
             "significant-hit-expression-structure",
+            "corrected-bcr-repertoire",
+            "corrected-tcr-alpha-repertoire",
+            "corrected-tcr-beta-repertoire",
+            "corrected-isotype-composition",
+            "corrected-immune-infiltrate",
         ],
     })
     .expect("engine info serialization is infallible")
@@ -477,7 +727,6 @@ mod tests {
 // M1: Portable XLSX merger. One workbook is read per call. The JS worker owns
 // browser-local scratch, so neither Rust nor WASM retains the cohort matrix.
 use portable_merge::{PortableMergeKind, PortableMergeMetric, PortableMergeOrder, PortableMerger};
-use std::cell::RefCell;
 thread_local! {
     static MERGE_SESSION: RefCell<Option<PortableMerger>> = const { RefCell::new(None) };
     static LAST_MERGE_SAMPLE: RefCell<Option<String>> = const { RefCell::new(None) };

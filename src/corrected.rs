@@ -31,7 +31,7 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum AmbiguousCallPolicy {
     Exclude,
     Split,
@@ -244,7 +244,7 @@ pub struct CorrectedPathwayResult {
     pub tests: Vec<PathwayOraResult>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CorrectedRepertoireSample {
     pub sample_id: String,
     pub group: String,
@@ -263,7 +263,7 @@ pub struct CorrectedRepertoireSample {
     pub convergent_read_fraction: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CorrectedCompositionResult {
     pub family: String,
     pub retained_features: usize,
@@ -274,7 +274,7 @@ pub struct CorrectedCompositionResult {
     pub dendrogram: Option<DendrogramResult>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CorrectedRepertoireResult {
     pub modality: String,
     pub files_used: usize,
@@ -290,7 +290,7 @@ pub struct CorrectedRepertoireResult {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CorrectedIsotypeResult {
     pub files_used: usize,
     pub determined_only: bool,
@@ -302,7 +302,7 @@ pub struct CorrectedIsotypeResult {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CorrectedImmuneResult {
     pub files_used: usize,
     pub tests: Vec<AdjustedFeatureResult>,
@@ -2174,7 +2174,7 @@ fn clonotype_key_matches(stored: &[u8], v_gene: &str, j_gene: &str, cdr3_aa: &st
 }
 
 #[derive(Debug)]
-struct ParsedRepertoire {
+pub(crate) struct ParsedRepertoire {
     sample_id: String,
     group: String,
     counts: Vec<f64>,
@@ -2676,6 +2676,29 @@ where
             native_process_memory_summary()
         ),
     );
+    run_corrected_repertoire_from_parsed(
+        parsed, metadata, comparison, modality, spec, warnings, progress,
+    )
+}
+
+pub(crate) fn run_corrected_repertoire_from_parsed<F>(
+    parsed: Vec<ParsedRepertoire>,
+    metadata: &MetadataTable,
+    comparison: &CohortComparison,
+    modality: CohortModality,
+    spec: &CorrectedModelSpec,
+    mut warnings: Vec<String>,
+    mut progress: F,
+) -> Result<CorrectedRepertoireResult>
+where
+    F: FnMut(usize, usize, &str),
+{
+    let label = match modality {
+        CohortModality::Bcr => "BCR",
+        CohortModality::TcrAlpha => "TCR alpha",
+        CohortModality::TcrBeta => "TCR beta",
+        _ => bail!("Corrected repertoire analysis supports BCR/TCR only"),
+    };
     if parsed.len() < 4 {
         bail!(
             "Only {} usable {label} samples belong to this comparison",
@@ -3005,6 +3028,89 @@ where
     Ok(result)
 }
 
+/// Browser-safe incremental repertoire ingestion. Each workbook is decoded and
+/// released before the next workbook is read. The native corrected algorithms
+/// are used unchanged for the final analysis.
+pub(crate) struct PortableRepertoireAccumulator {
+    modality: CohortModality,
+    policy: AmbiguousCallPolicy,
+    scratch: ParsedClonotypeScratch,
+    parsed: Vec<ParsedRepertoire>,
+}
+
+impl PortableRepertoireAccumulator {
+    pub(crate) fn new(modality: CohortModality, policy: AmbiguousCallPolicy) -> Result<Self> {
+        if !matches!(
+            modality,
+            CohortModality::Bcr | CohortModality::TcrAlpha | CohortModality::TcrBeta
+        ) {
+            bail!("Repertoire accumulator supports BCR, TCR alpha, and TCR beta only");
+        }
+        Ok(Self {
+            modality,
+            policy,
+            scratch: ParsedClonotypeScratch::default(),
+            parsed: Vec::new(),
+        })
+    }
+
+    pub(crate) fn add_bytes(
+        &mut self,
+        file_name: &str,
+        bytes: &[u8],
+        sample_id: &str,
+        group: &str,
+    ) -> Result<usize> {
+        if self
+            .parsed
+            .iter()
+            .any(|s| normalize_sample_id(&s.sample_id) == normalize_sample_id(sample_id))
+        {
+            bail!("Duplicate repertoire sample ID: {sample_id}");
+        }
+        let parsed = parse_repertoire_bytes_with_audit(
+            file_name,
+            bytes,
+            sample_id,
+            group,
+            self.modality,
+            self.policy,
+            &mut self.scratch,
+            |_| {},
+        )?;
+        self.parsed.push(parsed);
+        Ok(self.parsed.len())
+    }
+
+    pub(crate) fn finish<F>(
+        self,
+        metadata: &MetadataTable,
+        comparison: &CohortComparison,
+        spec: &CorrectedModelSpec,
+        progress: F,
+    ) -> Result<CorrectedRepertoireResult>
+    where
+        F: FnMut(usize, usize, &str),
+    {
+        let Self {
+            modality,
+            parsed,
+            scratch,
+            ..
+        } = self;
+        drop(scratch);
+        run_corrected_repertoire_from_parsed(
+            parsed,
+            metadata,
+            comparison,
+            modality,
+            spec,
+            Vec::new(),
+            progress,
+        )
+    }
+}
+
 pub fn run_corrected_isotype<F>(
     files: &[DetectedCohortFile],
     metadata: &MetadataTable,
@@ -3053,6 +3159,16 @@ where
             Err(e) => warnings.push(format!("{}: {e:#}", file.path.display())),
         }
     }
+    run_corrected_isotype_from_maps(maps, metadata, comparison, spec, warnings)
+}
+
+pub(crate) fn run_corrected_isotype_from_maps(
+    maps: Vec<(String, String, HashMap<String, f64>)>,
+    metadata: &MetadataTable,
+    comparison: &CohortComparison,
+    spec: &CorrectedModelSpec,
+    warnings: Vec<String>,
+) -> Result<CorrectedIsotypeResult> {
     if maps.len() < 4 {
         bail!("Too few BCR-isotype samples for corrected analysis");
     }
@@ -3143,6 +3259,16 @@ where
             Err(e) => warnings.push(format!("{}: {e:#}", file.path.display())),
         }
     }
+    run_corrected_immune_from_maps(maps, metadata, comparison, spec, warnings)
+}
+
+pub(crate) fn run_corrected_immune_from_maps(
+    maps: Vec<(String, String, HashMap<String, f64>)>,
+    metadata: &MetadataTable,
+    comparison: &CohortComparison,
+    spec: &CorrectedModelSpec,
+    warnings: Vec<String>,
+) -> Result<CorrectedImmuneResult> {
     if maps.len() < 4 {
         bail!("Too few immune-infiltrate samples for corrected analysis");
     }
@@ -4163,10 +4289,68 @@ fn parse_repertoire_file_with_audit<F>(
     modality: CohortModality,
     policy: AmbiguousCallPolicy,
     scratch: &mut ParsedClonotypeScratch,
-    mut audit: F,
+    audit: F,
 ) -> Result<ParsedRepertoire>
 where
     F: FnMut(&str),
+{
+    parse_repertoire_workbook_with_audit(
+        || open_workbook(path).with_context(|| format!("Could not open {}", path.display())),
+        path,
+        fs::metadata(path).ok().map(|m| m.len()).unwrap_or(0),
+        sample_id,
+        group,
+        modality,
+        policy,
+        scratch,
+        audit,
+    )
+}
+
+fn parse_repertoire_bytes_with_audit<F>(
+    file_name: &str,
+    bytes: &[u8],
+    sample_id: &str,
+    group: &str,
+    modality: CohortModality,
+    policy: AmbiguousCallPolicy,
+    scratch: &mut ParsedClonotypeScratch,
+    audit: F,
+) -> Result<ParsedRepertoire>
+where
+    F: FnMut(&str),
+{
+    parse_repertoire_workbook_with_audit(
+        || {
+            Xlsx::new(Cursor::new(bytes.to_vec()))
+                .with_context(|| format!("Could not decode {file_name} as XLSX"))
+        },
+        Path::new(file_name),
+        bytes.len() as u64,
+        sample_id,
+        group,
+        modality,
+        policy,
+        scratch,
+        audit,
+    )
+}
+
+fn parse_repertoire_workbook_with_audit<R, F, O>(
+    open_workbook_input: O,
+    _path: &Path,
+    input_bytes: u64,
+    sample_id: &str,
+    group: &str,
+    modality: CohortModality,
+    policy: AmbiguousCallPolicy,
+    scratch: &mut ParsedClonotypeScratch,
+    mut audit: F,
+) -> Result<ParsedRepertoire>
+where
+    R: Read + std::io::Seek,
+    F: FnMut(&str),
+    O: FnOnce() -> Result<Xlsx<R>>,
 {
     // All orchestration paths enter this exact parser. The audit callbacks
     // deliberately bracket XLSX materialization, row scanning, worksheet
@@ -4193,15 +4377,12 @@ where
         clonotypes.scratch.nt_bytes.capacity(),
         native_process_memory_summary()
     ));
-    let input_bytes = fs::metadata(path).ok().map(|meta| meta.len()).unwrap_or(0);
     audit(&format!(
         "open workbook start (input_bytes={input_bytes}; memory {})",
         native_process_memory_summary()
     ));
-
     let open_started = Instant::now();
-    let mut workbook: Xlsx<_> =
-        open_workbook(path).with_context(|| format!("Could not open {}", path.display()))?;
+    let mut workbook = open_workbook_input()?;
     let sheet = workbook
         .sheet_names()
         .first()
@@ -4579,6 +4760,14 @@ pub(crate) fn parse_isotype_file(
     determined_only: bool,
 ) -> Result<HashMap<String, f64>> {
     let (headers, rows) = read_first_sheet(path)?;
+    parse_isotype_rows(headers, rows, determined_only)
+}
+
+fn parse_isotype_rows(
+    headers: Vec<String>,
+    rows: Vec<Vec<Data>>,
+    determined_only: bool,
+) -> Result<HashMap<String, f64>> {
     let columns = header_map(&headers);
     let fraction_idx = find_header(&columns, &["Isotype Read Fraction"])
         .ok_or_else(|| anyhow!("Missing Isotype Read Fraction"))?;
@@ -4608,6 +4797,10 @@ pub(crate) fn parse_isotype_file(
 
 pub(crate) fn parse_immune_file(path: &Path) -> Result<HashMap<String, f64>> {
     let (headers, rows) = read_first_sheet(path)?;
+    parse_immune_rows(headers, rows)
+}
+
+fn parse_immune_rows(headers: Vec<String>, rows: Vec<Vec<Data>>) -> Result<HashMap<String, f64>> {
     let columns = header_map(&headers);
     let type_idx = find_header(&columns, &["Immune Cell Type"])
         .ok_or_else(|| anyhow!("Missing Immune Cell Type"))?;
@@ -5371,9 +5564,28 @@ impl P2Median {
     }
 }
 
-fn read_first_sheet(path: &Path) -> Result<(Vec<String>, Vec<Vec<Data>>)> {
-    let mut workbook: Xlsx<_> =
-        open_workbook(path).with_context(|| format!("Could not open {}", path.display()))?;
+pub(crate) fn parse_isotype_bytes(
+    bytes: &[u8],
+    determined_only: bool,
+) -> Result<HashMap<String, f64>> {
+    let (headers, rows) = read_first_sheet_bytes(bytes)?;
+    parse_isotype_rows(headers, rows, determined_only)
+}
+
+pub(crate) fn parse_immune_bytes(bytes: &[u8]) -> Result<HashMap<String, f64>> {
+    let (headers, rows) = read_first_sheet_bytes(bytes)?;
+    parse_immune_rows(headers, rows)
+}
+
+fn read_first_sheet_bytes(bytes: &[u8]) -> Result<(Vec<String>, Vec<Vec<Data>>)> {
+    let workbook = Xlsx::new(Cursor::new(bytes.to_vec()))
+        .context("Could not decode an XLSX workbook from local bytes")?;
+    first_sheet_from_workbook(workbook)
+}
+
+fn first_sheet_from_workbook<R: Read + std::io::Seek>(
+    mut workbook: Xlsx<R>,
+) -> Result<(Vec<String>, Vec<Vec<Data>>)> {
     let sheet = workbook
         .sheet_names()
         .first()
@@ -5385,6 +5597,12 @@ fn read_first_sheet(path: &Path) -> Result<(Vec<String>, Vec<Vec<Data>>)> {
     let headers = header.iter().map(cell_text).collect();
     let rows = iter.map(|r| r.to_vec()).collect();
     Ok((headers, rows))
+}
+
+fn read_first_sheet(path: &Path) -> Result<(Vec<String>, Vec<Vec<Data>>)> {
+    let workbook: Xlsx<_> =
+        open_workbook(path).with_context(|| format!("Could not open {}", path.display()))?;
+    first_sheet_from_workbook(workbook)
 }
 fn header_map(headers: &[String]) -> HashMap<String, usize> {
     headers
@@ -6522,4 +6740,268 @@ pub fn write_corrected_repertoire_samples(
     }
     w.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod m2_portable_multiomics_parity {
+    use super::*;
+    use crate::cohort::{MetadataComparisonSpec, build_custom_comparison};
+
+    /// Compare a native result with a byte-input result.
+    /// Identity, field names, array order, integers and labels are exact.
+    /// Only floating-point roundoff is permitted.
+    fn assert_scientific_parity<T: serde::Serialize>(native: &T, portable: &T, context: &str) {
+        let expected = serde_json::to_value(native).expect("serialize native result");
+        let observed = serde_json::to_value(portable).expect("serialize portable result");
+        assert_parity_value(&expected, &observed, context);
+    }
+
+    fn assert_parity_value(expected: &serde_json::Value, observed: &serde_json::Value, path: &str) {
+        use serde_json::Value;
+        match (expected, observed) {
+            (Value::Object(a), Value::Object(b)) => {
+                assert_eq!(a.len(), b.len(), "different field count at {path}");
+                for (name, value) in a {
+                    let other = b
+                        .get(name)
+                        .unwrap_or_else(|| panic!("missing field {path}.{name}"));
+                    assert_parity_value(value, other, &format!("{path}.{name}"));
+                }
+            }
+            (Value::Array(a), Value::Array(b)) => {
+                assert_eq!(a.len(), b.len(), "different array length at {path}");
+                for (index, (value, other)) in a.iter().zip(b.iter()).enumerate() {
+                    assert_parity_value(value, other, &format!("{path}[{index}]"));
+                }
+            }
+            (Value::Number(a), Value::Number(b)) => {
+                // Keep sample counts, permutations, feature counts etc. exact.
+                let a_integer = a.is_i64() || a.is_u64();
+                let b_integer = b.is_i64() || b.is_u64();
+                if a_integer || b_integer {
+                    assert!(a_integer && b_integer, "integer/float mismatch at {path}");
+                    assert_eq!(a, b, "different integer at {path}");
+                } else {
+                    let x = a.as_f64().expect("native float");
+                    let y = b.as_f64().expect("portable float");
+                    assert!(x.is_finite() && y.is_finite(), "nonfinite float at {path}");
+                    let allowance = 1e-12_f64 + 1e-10_f64 * x.abs().max(y.abs());
+                    assert!(
+                        (x - y).abs() <= allowance,
+                        "float mismatch at {path}: native={x:.17e}, portable={y:.17e}, tolerance={allowance:.3e}"
+                    );
+                }
+            }
+            _ => assert_eq!(expected, observed, "different value or type at {path}"),
+        }
+    }
+
+    #[test]
+    fn m2_parity_accepts_only_small_float_roundoff() {
+        let expected = serde_json::json!({
+            "sample_ids": ["S1", "S2"],
+            "n_samples": 8,
+            "statistics": [0.029916968995616133, 18.041260515904828]
+        });
+        let rounded = serde_json::json!({
+            "sample_ids": ["S1", "S2"],
+            "n_samples": 8,
+            "statistics": [0.02991696899561602, 18.04126051590483]
+        });
+        assert_parity_value(&expected, &rounded, "synthetic");
+    }
+
+    #[test]
+    fn m2_parity_rejects_real_changes_to_science_or_identity() {
+        let original = serde_json::json!({
+            "sample_ids": ["S1", "S2"],
+            "n_samples": 8,
+            "statistics": [0.029916968995616133, 18.041260515904828]
+        });
+        let changed_statistic = serde_json::json!({
+            "sample_ids": ["S1", "S2"],
+            "n_samples": 8,
+            "statistics": [0.029916968995616133, 18.042]
+        });
+        let changed_identity = serde_json::json!({
+            "sample_ids": ["S2", "S1"],
+            "n_samples": 8,
+            "statistics": [0.029916968995616133, 18.041260515904828]
+        });
+        let changed_count = serde_json::json!({
+            "sample_ids": ["S1", "S2"],
+            "n_samples": 7,
+            "statistics": [0.029916968995616133, 18.041260515904828]
+        });
+        let changed_shape = serde_json::json!({
+            "sample_ids": ["S1", "S2"],
+            "n_samples": 8,
+            "statistics": [0.029916968995616133]
+        });
+        for changed in [
+            changed_statistic,
+            changed_identity,
+            changed_count,
+            changed_shape,
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    assert_parity_value(&original, &changed, "synthetic");
+                })
+                .is_err()
+            );
+        }
+    }
+
+    fn fixture_dir() -> PathBuf {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let local = root.join("tests/fixtures/m2_multiomics");
+        if local.exists() {
+            local
+        } else {
+            root.join("../tests/fixtures/m2_multiomics")
+        }
+    }
+
+    fn model() -> (MetadataTable, CohortComparison, CorrectedModelSpec) {
+        let metadata = MetadataTable {
+            path: PathBuf::from("m2_synthetic_metadata.tsv"),
+            columns: vec!["sample_id".into(), "Phenotype".into(), "subject_id".into()],
+            rows: (1..=8)
+                .map(|i| {
+                    vec![
+                        format!("S{i}"),
+                        if matches!(i, 1 | 2 | 5 | 6) {
+                            "Case"
+                        } else {
+                            "Control"
+                        }
+                        .into(),
+                        format!("P{i}"),
+                    ]
+                })
+                .collect(),
+            id_column: "sample_id".into(),
+        };
+        let compare = build_custom_comparison(
+            &metadata,
+            &MetadataComparisonSpec {
+                column: "Phenotype".into(),
+                case_values: BTreeSet::from(["Case".into()]),
+                control_values: BTreeSet::from(["Control".into()]),
+                name: "Case vs Control".into(),
+                case_label: "Case".into(),
+                control_label: "Control".into(),
+            },
+        )
+        .unwrap();
+        let mut spec = CorrectedModelSpec::default();
+        spec.permutations = 11;
+        spec.rarefaction_reps = 1;
+        spec.rarefaction_cap = 100;
+        spec.subject_column = Some("subject_id".into());
+        spec.composition_min_prevalence = 0.0;
+        spec.composition_min_mean = 0.0;
+        (metadata, compare, spec)
+    }
+
+    fn paths(suffix: &str, modality: CohortModality) -> Vec<DetectedCohortFile> {
+        (1..=8)
+            .map(|i| DetectedCohortFile {
+                path: fixture_dir().join(format!("S{i}_{suffix}.xlsx")),
+                sample_id: format!("S{i}"),
+                modality,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn isotype_native_file_and_browser_bytes_identical() {
+        let (metadata, compare, spec) = model();
+        let files = paths("bcr_isotype_composition", CohortModality::BcrIsotype);
+        let native =
+            run_corrected_isotype(&files, &metadata, &compare, &spec, |_, _, _| {}).unwrap();
+        let maps = files
+            .iter()
+            .map(|f| {
+                let bytes = fs::read(&f.path).unwrap();
+                (
+                    f.sample_id.clone(),
+                    if compare.is_case_id(&f.sample_id) {
+                        "Case".into()
+                    } else {
+                        "Control".into()
+                    },
+                    parse_isotype_bytes(&bytes, spec.exclude_undetermined_isotype).unwrap(),
+                )
+            })
+            .collect();
+        let portable =
+            run_corrected_isotype_from_maps(maps, &metadata, &compare, &spec, Vec::new()).unwrap();
+        assert_scientific_parity(&native, &portable, "isotype");
+    }
+
+    #[test]
+    fn immune_native_file_and_browser_bytes_identical() {
+        let (metadata, compare, spec) = model();
+        let files = paths("immune_infiltrate", CohortModality::ImmuneInfiltrate);
+        let native =
+            run_corrected_immune(&files, &metadata, &compare, &spec, |_, _, _| {}).unwrap();
+        let maps = files
+            .iter()
+            .map(|f| {
+                let bytes = fs::read(&f.path).unwrap();
+                (
+                    f.sample_id.clone(),
+                    if compare.is_case_id(&f.sample_id) {
+                        "Case".into()
+                    } else {
+                        "Control".into()
+                    },
+                    parse_immune_bytes(&bytes).unwrap(),
+                )
+            })
+            .collect();
+        let portable =
+            run_corrected_immune_from_maps(maps, &metadata, &compare, &spec, Vec::new()).unwrap();
+        assert_scientific_parity(&native, &portable, "immune");
+    }
+
+    #[test]
+    fn repertoire_native_file_and_incremental_bytes_identical() {
+        let (metadata, compare, spec) = model();
+        for (modality, suffix) in [
+            (CohortModality::Bcr, "bcr_heavy_chain_report"),
+            (CohortModality::TcrAlpha, "tcr_alpha_clone_report"),
+            (CohortModality::TcrBeta, "tcr_beta_clone_report"),
+        ] {
+            let files = paths(suffix, modality);
+            let native = run_corrected_repertoire(
+                &files,
+                &metadata,
+                &compare,
+                modality,
+                &spec,
+                |_, _, _| {},
+            )
+            .unwrap();
+            let mut portable =
+                PortableRepertoireAccumulator::new(modality, spec.ambiguous_policy).unwrap();
+            for f in &files {
+                let bytes = fs::read(&f.path).unwrap();
+                let group = if compare.is_case_id(&f.sample_id) {
+                    "Case"
+                } else {
+                    "Control"
+                };
+                portable
+                    .add_bytes(&f.path.to_string_lossy(), &bytes, &f.sample_id, group)
+                    .unwrap();
+            }
+            let portable = portable
+                .finish(&metadata, &compare, &spec, |_, _, _| {})
+                .unwrap();
+            assert_scientific_parity(&native, &portable, &format!("{modality:?}"));
+        }
+    }
 }
