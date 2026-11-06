@@ -29,8 +29,44 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use wasm_monotonic_clock::Instant;
 
+// The standard-library Instant clock is not implemented on wasm32-unknown-unknown.
+// A browser Web Worker provides performance.now(), a monotonic clock.
+// All statistical computations continue to use the original Rust code.
+#[cfg(target_arch = "wasm32")]
+mod wasm_monotonic_clock {
+    use std::time::Duration;
+    use wasm_bindgen::prelude::wasm_bindgen;
+
+    #[wasm_bindgen]
+    unsafe extern "C" {
+        #[wasm_bindgen(js_namespace = performance, js_name = now)]
+        fn performance_now_ms() -> f64;
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) struct Instant(f64);
+
+    impl Instant {
+        pub(super) fn now() -> Self {
+            Self(unsafe { performance_now_ms() })
+        }
+
+        pub(super) fn elapsed(&self) -> Duration {
+            let ms = unsafe { performance_now_ms() } - self.0;
+            if ms.is_finite() && ms >= 0.0 {
+                Duration::from_secs_f64(ms / 1000.0)
+            } else {
+                Duration::ZERO
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum AmbiguousCallPolicy {
     Exclude,

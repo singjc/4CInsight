@@ -247,11 +247,13 @@ pub fn multiomics_add_sample_json(
     sample_id: &str,
     bytes: &[u8],
 ) -> Result<String, JsValue> {
-    MULTIOMICS_SESSION.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let session = borrow
-            .as_mut()
-            .ok_or_else(|| js_error("No active multi-omics session"))?;
+    let mut session = MULTIOMICS_SESSION.with(|cell| {
+        cell.borrow_mut()
+            .take()
+            .ok_or_else(|| js_error("No active multi-omics session"))
+    })?;
+    // Parsing can call into the JS host. Do not retain a RefCell borrow here.
+    let outcome = (|| -> Result<String, JsValue> {
         let key = cohort::normalize_sample_id(sample_id);
         if key.is_empty() {
             return Err(js_error(format!(
@@ -292,9 +294,18 @@ pub fn multiomics_add_sample_json(
             "status": "added", "count": session.used_ids.len(),
         }))
         .map_err(js_error)
-    })
+    })();
+    // A recoverable parse error must not leave the session inaccessible.
+    MULTIOMICS_SESSION.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        debug_assert!(
+            slot.is_none(),
+            "multi-omics session re-entered during parsing"
+        );
+        *slot = Some(session);
+    });
+    outcome
 }
-
 #[wasm_bindgen]
 pub fn multiomics_finish_json() -> Result<String, JsValue> {
     let session = MULTIOMICS_SESSION
