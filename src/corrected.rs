@@ -4322,7 +4322,7 @@ where
 {
     parse_repertoire_workbook_with_audit(
         || {
-            Xlsx::new(Cursor::new(bytes.to_vec()))
+            Xlsx::new(Cursor::new(bytes))
                 .with_context(|| format!("Could not decode {file_name} as XLSX"))
         },
         Path::new(file_name),

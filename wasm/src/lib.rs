@@ -125,6 +125,28 @@ fn parse_multiomics_kind(value: &str) -> Result<cohort::CohortModality, String> 
 
 /// Start a corrected modality run with the SAME metadata/group/covariate
 /// conventions used by the corrected expression workflow.
+// M2/R4b: Record Rust panic details in the browser console.
+// This does not read host system information, use the network, or change science.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+unsafe extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn m2_repertoire_console_error(message: &str);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn install_m2_repertoire_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| unsafe {
+            m2_repertoire_console_error(&format!("4C Insight WASM panic: {info}"));
+        }));
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn install_m2_repertoire_panic_hook() {}
+
 #[wasm_bindgen]
 pub fn multiomics_begin_json(
     metadata_file_name: &str,
@@ -133,6 +155,7 @@ pub fn multiomics_begin_json(
     modality: &str,
     analysis_options_json: &str,
 ) -> Result<String, JsValue> {
+    install_m2_repertoire_panic_hook();
     let modality = parse_multiomics_kind(modality).map_err(js_error)?;
     let config: portable_compare::PortableExpressionComparisonConfig =
         serde_json::from_str(comparison_config_json).map_err(js_error)?;
