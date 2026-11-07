@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#111827" />
   <meta name="description" content="4C Insight — local-first multi-omics cohort analysis" />
-  <link rel="stylesheet" href="./styles.css?v=0.21.0-ux12-true-axis-zoom" />
+  <link rel="stylesheet" href="./styles.css?v=0.21.0-ux13-global-state-buttons" />
   <title>4C Insight</title>
 </head>
 <body>
@@ -14,6 +14,12 @@
     <header class="topbar">
       <div class="brand-block">
         <h1 class="brand-heading"><img class="brand-logo" src="./assets/4c-insight-logo.svg" alt="4C Insight" width="1116" height="879" /></h1>
+      </div>
+      <div id="global-state-actions" class="topbar-state-actions" role="group" aria-label="Project state">
+        <button id="load-state" class="topbar-state-button" type="button" title="Load project settings and file references; local files may need reconnection">Load state</button>
+        <button id="save-state" class="topbar-state-button" type="button" title="Save project settings and file references. Analysis results are saved separately">Save state</button>
+        <input id="state-input" class="visually-hidden" type="file" accept=".json,.4cstate" aria-label="Select a saved 4C Insight state file" />
+        <span id="global-state-status" class="visually-hidden" role="status" aria-live="polite"></span>
       </div>
       <button id="system-chip" type="button" class="privacy-chip system-chip" title="Analysis runs locally. Device information is estimated by this browser.">
         <span class="privacy-dot"></span><span>Local system</span>
@@ -28,6 +34,6 @@
       <main id="main-content" class="main-content"></main>
     </div>
   </div>
-  <script type="module" src="./main.js?v=0.21.0-ux12-true-axis-zoom"></script>
+  <script type="module" src="./main.js?v=0.21.0-ux13-global-state-buttons"></script>
 </body>
 </html>

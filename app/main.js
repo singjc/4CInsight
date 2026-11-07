@@ -1,5 +1,5 @@
-import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux12-true-axis-zoom'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-ux12-true-axis-zoom'
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux13-global-state-buttons'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-ux13-global-state-buttons'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -9,8 +9,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-ux12-true-axis-zoom'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux12-true-axis-zoom'
+import { methodDocs } from './docs-content.js?v=0.21.0-ux13-global-state-buttons'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux13-global-state-buttons'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -24,7 +24,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux12-true-axis-zoom'
+const APP_VERSION = '0.21.0-ux13-global-state-buttons'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -800,7 +800,7 @@ async function saveApplicationState() {
   const payload = applicationStatePayload()
   await saveTextFile('4c-insight-state.4cstate.json', `${JSON.stringify(payload, null, 2)}\n`)
   state.projectMessage = `Application state saved. It contains settings and ${payload.project.files.length.toLocaleString()} file references, not raw cohort data.`
-  render()
+  if (state.tab === 'project') render()
 }
 
 async function loadApplicationState(file) {
@@ -1023,7 +1023,7 @@ function projectView() {
     <section class="page-heading">
       <div><span class="eyebrow">Project · Step 1</span><h2>Select the cohort data on this computer</h2>
       <p>4C Insight references selected files in place. There is no upload step and drag/drop does not duplicate the source files.</p></div>
-      <div class="project-heading-actions"><div class="local-card"><strong>Private by design</strong><span>Files remain on this device. You choose when results or state are saved.</span></div><div class="button-row compact state-actions"><button id="load-state" class="secondary-button">Load state</button><button id="save-state" class="secondary-button">Save state</button><input id="state-input" class="visually-hidden" type="file" accept=".json,.4cstate" /></div></div>
+      <div class="project-heading-actions"><div class="local-card"><strong>Private by design</strong><span>Files remain on this device. You choose when results or state are saved.</span></div></div>
     </section>
     <section class="action-panel" aria-labelledby="select-data-heading">
       <div class="action-copy"><h3 id="select-data-heading">Add project data</h3><p>Select files, select a complete project folder, or drop one or more files into the Input inventory. Duplicate selections are ignored.</p></div>
@@ -3309,19 +3309,40 @@ function bindMetadataMappingEvents() {
   initializeMetadataViewport(holder, 'mapping')
 }
 
+function bindGlobalStateActions() {
+  // The header remains mounted when the user moves between workflows.
+  // Attach one set of handlers for the lifetime of the page.
+  const stateInput = document.querySelector('#state-input')
+  const status = document.querySelector('#global-state-status')
+  document.querySelector('#load-state')?.addEventListener('click', () => stateInput?.click())
+  document.querySelector('#save-state')?.addEventListener('click', () => {
+    void saveApplicationState()
+      .then(() => { if (status) status.textContent = 'Project state export requested.' })
+      .catch((error) => {
+        state.error = `Save state: ${error instanceof Error ? error.message : String(error)}`
+        if (status) status.textContent = 'Could not save project state.'
+        render()
+      })
+  })
+  stateInput?.addEventListener('change', (event) => {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = '' // Allow selecting the same state file again.
+    if (!file) return
+    void loadApplicationState(file).then(() => {
+      if (status) status.textContent = state.error ? 'Could not load project state.' : 'Project state loaded.'
+    })
+  })
+}
+
 function bindProjectEvents() {
   const fileInput = document.querySelector('#file-input')
   const folderInput = document.querySelector('#folder-input')
-  const stateInput = document.querySelector('#state-input')
   const dropZone = document.querySelector('#input-drop-zone')
   document.querySelector('#select-files')?.addEventListener('click', () => fileInput.click())
   document.querySelector('#select-folder')?.addEventListener('click', () => folderInput.click())
   document.querySelector('#reconnect-state-folder')?.addEventListener('click', () => folderInput.click())
-  document.querySelector('#load-state')?.addEventListener('click', () => stateInput.click())
-  document.querySelector('#save-state')?.addEventListener('click', () => void saveApplicationState())
   fileInput?.addEventListener('change', (event) => addFiles(event.currentTarget.files))
   folderInput?.addEventListener('change', (event) => addFiles(event.currentTarget.files))
-  stateInput?.addEventListener('change', (event) => void loadApplicationState(event.currentTarget.files?.[0]))
   if (dropZone) {
     const activate = (event) => { event.preventDefault(); dropZone.classList.add('is-dragover') }
     const deactivate = (event) => {
@@ -3457,6 +3478,7 @@ async function registerIsolationServiceWorker() {
 }
 
 void registerIsolationServiceWorker()
+bindGlobalStateActions()
 render()
 // One automatic sample shortly after startup and a low-frequency refresh while visible.
 // Unavailable APIs return immediately; repeated checks cannot reveal physical RAM.

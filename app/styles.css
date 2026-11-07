@@ -615,3 +615,31 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
   .overview-card-tools .results-table-tools { border-left:0; padding-left:0; }
   .overview-plot-hint { width:100%; }
 }
+
+
+/* UX13 — state actions stay visible in the banner on every workflow page. */
+.topbar-state-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-width: 0;
+}
+.topbar-state-button {
+  min-height: 35px;
+  padding: 7px 12px;
+  border: 1px solid rgba(225, 232, 245, 0.4);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.10);
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.topbar-state-button:hover { background: rgba(255,255,255,0.20); }
+.topbar-state-button:focus-visible { outline: 3px solid #91b7ff; outline-offset: 2px; }
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; row-gap: 9px; }
+  .topbar-state-actions { order: 3; flex: 1 0 100%; justify-content: flex-end; }
+  .topbar-state-button { min-height: 34px; }
+}
