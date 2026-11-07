@@ -686,3 +686,27 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .project-guide-alternative > summary:focus-visible { outline: 2px solid #3159d9; outline-offset: 3px; }
 .project-guide-alternative > .project-guide-note { margin: 8px 0; }
 .project-guide-alternative > .project-guide-tree { margin-top: 10px; }
+
+/* UX15 — small, accessible feedback controls. This adds no analytics or upload. */
+.topbar-feedback-actions { display:flex; align-items:center; gap:8px; margin-left:auto; }
+.topbar-feedback-actions .topbar-state-button { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; cursor:pointer; }
+.topbar-state-actions { margin-left:0; }
+.feedback-dialog { width:min(620px, calc(100vw - 32px)); max-height:min(84vh, 850px); padding:0; border:1px solid #cbd5e1; border-radius:14px; color:#1e293b; background:#fff; box-shadow:0 20px 60px #02061755; }
+.feedback-dialog::backdrop { background:rgba(15,23,42,.58); }
+.feedback-dialog-inner { padding:24px; display:grid; gap:13px; overflow-y:auto; max-height:80vh; }
+.feedback-dialog h2 { font-size:20px; margin:0; }
+.feedback-dialog p { margin:0; line-height:1.5; }
+.feedback-dialog label { display:grid; gap:5px; font-weight:600; font-size:13px; }
+.feedback-dialog input:not([type=radio]):not([type=checkbox]), .feedback-dialog textarea { box-sizing:border-box; width:100%; font:inherit; color:#1e293b; border:1px solid #cbd5e1; border-radius:7px; padding:9px; }
+.feedback-dialog textarea { min-height:80px; resize:vertical; }
+.feedback-dialog .feedback-types { display:flex; gap:18px; flex-wrap:wrap; padding:0; margin:0; border:0; }
+.feedback-dialog .feedback-types label { display:flex; flex-direction:row; align-items:center; }
+.feedback-dialog .feedback-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:8px; }
+.feedback-dialog .feedback-actions button { padding:8px 12px; border-radius:8px; border:1px solid #cbd5e1; cursor:pointer; }
+.feedback-dialog .feedback-actions .feedback-primary { background:#3156df; color:#fff; border-color:#3156df; }
+.feedback-dialog .feedback-note { font-size:12px; color:#475569; }
+.feedback-dialog .feedback-note a { color:#244dba; }
+.feedback-dialog #feedback-form-error { font-size:13px; color:#7c3aed; }
+.feedback-dialog .feedback-optin { display:flex; flex-direction:row; align-items:center; }
+.feedback-dialog [hidden] { display:none !important; }
+@media(max-width:760px){ .topbar { flex-wrap:wrap; gap:8px; } .topbar-feedback-actions { order:3; margin-left:0; } .topbar-state-actions { order:4; flex:1 0 auto; justify-content:flex-start; } .feedback-dialog-inner { padding:16px; } }

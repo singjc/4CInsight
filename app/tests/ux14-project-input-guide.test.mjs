@@ -60,7 +60,7 @@ test('visible project help has its own responsive style and one cache revision',
   assert.match(css, /\.project-guide-details/)
   assert.match(css, /@media \(max-width: 880px\)/)
   const version = main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.ok(version?.includes('ux14-input-guide'))
+  assert.ok(typeof version === 'string' && version.length > 0, 'Application cache revision must be defined')
   assert.ok(html.includes(`styles.css?v=${version}`))
   assert.ok(html.includes(`main.js?v=${version}`))
   assert.ok(main.includes(`project-input-guide.js?v=${version}`))

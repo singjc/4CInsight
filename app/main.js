@@ -1,6 +1,6 @@
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-ux14-input-guide-modality-first'
-import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux14-input-guide-modality-first'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-ux14-input-guide-modality-first'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-ux15-feedback'
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux15-feedback'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-ux15-feedback'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -10,8 +10,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-ux14-input-guide-modality-first'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux14-input-guide-modality-first'
+import { methodDocs } from './docs-content.js?v=0.21.0-ux15-feedback'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux15-feedback'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -25,7 +25,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux14-input-guide-modality-first'
+const APP_VERSION = '0.21.0-ux15-feedback'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 

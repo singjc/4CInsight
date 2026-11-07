@@ -58,7 +58,7 @@ test('guide does not require directory names or sample folder reorganization', (
 
 test('cache revision and local-only behavior remain correct', () => {
   const version = main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(version, '0.21.0-ux14-input-guide-modality-first')
+  assert.equal(version, '0.21.0-ux15-feedback')
   assert.ok(main.includes(`project-input-guide.js?v=${version}`))
   assert.ok(index.includes(`main.js?v=${version}`))
   assert.ok(index.includes(`styles.css?v=${version}`))

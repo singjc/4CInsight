@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#111827" />
   <meta name="description" content="4C Insight — local-first multi-omics cohort analysis" />
-  <link rel="stylesheet" href="./styles.css?v=0.21.0-ux14-input-guide-modality-first" />
+  <link rel="stylesheet" href="./styles.css?v=0.21.0-ux15-feedback" />
   <title>4C Insight</title>
 </head>
 <body>
@@ -15,7 +15,11 @@
       <div class="brand-block">
         <h1 class="brand-heading"><img class="brand-logo" src="./assets/4c-insight-logo.svg" alt="4C Insight" width="1116" height="879" /></h1>
       </div>
-      <div id="global-state-actions" class="topbar-state-actions" role="group" aria-label="Project state">
+      <div id="feedback-actions" class="topbar-feedback-actions" role="group" aria-label="Project help and feedback">
+        <a id="feedback-github" class="topbar-state-button" href="https://github.com/singjc/4CInsight" target="_blank" rel="noopener noreferrer" title="Open the 4C Insight source code on GitHub">GitHub</a>
+        <button id="feedback-report" class="topbar-state-button" type="button" title="Report a problem or request a feature">Report issue / Request feature</button>
+      </div>
+            <div id="global-state-actions" class="topbar-state-actions" role="group" aria-label="Project state">
         <button id="load-state" class="topbar-state-button" type="button" title="Load project settings and file references; local files may need reconnection">Load state</button>
         <button id="save-state" class="topbar-state-button" type="button" title="Save project settings and file references. Analysis results are saved separately">Save state</button>
         <input id="state-input" class="visually-hidden" type="file" accept=".json,.4cstate" aria-label="Select a saved 4C Insight state file" />
@@ -34,6 +38,44 @@
       <main id="main-content" class="main-content"></main>
     </div>
   </div>
-  <script type="module" src="./main.js?v=0.21.0-ux14-input-guide-modality-first"></script>
+  <script type="module" src="./main.js?v=0.21.0-ux15-feedback"></script>
+  <dialog id="feedback-error-prompt" class="feedback-dialog" aria-labelledby="feedback-error-title">
+  <div class="feedback-dialog-inner">
+    <h2 id="feedback-error-title">A problem occurred</h2>
+    <p>Would you like to report this problem? Your data and error details are not sent automatically.</p>
+    <div class="feedback-actions">
+      <button type="button" id="feedback-error-dismiss">Not now</button>
+      <button type="button" id="feedback-error-report" class="feedback-primary">Review issue report</button>
+    </div>
+  </div>
+</dialog>
+<dialog id="feedback-dialog" class="feedback-dialog" aria-labelledby="feedback-title">
+  <form id="feedback-form" class="feedback-dialog-inner" method="dialog" novalidate>
+    <h2 id="feedback-title">Report an issue or request a feature</h2>
+    <p class="feedback-note">You control what you share. No project files or analysis results are added automatically. GitHub issues are public.</p>
+    <fieldset class="feedback-types" aria-label="Report type">
+      <label><input type="radio" name="feedback-kind" value="bug" checked /> Report an issue</label>
+      <label><input type="radio" name="feedback-kind" value="feature" /> Request a feature</label>
+    </fieldset>
+    <label>Title <input name="feedback-title" required maxlength="110" autocomplete="off" placeholder="Brief description" /></label>
+    <label>Description <textarea name="feedback-description" maxlength="4000" placeholder="What happened, or what would you like to see?"></textarea></label>
+    <div class="feedback-bug-fields"><label>How to reproduce (optional) <textarea name="feedback-steps" maxlength="4000" placeholder="Actions you took before the problem"></textarea></label></div>
+    <div class="feedback-bug-fields"><label>Expected result (optional) <textarea name="feedback-expected" maxlength="4000" placeholder="What you expected to happen"></textarea></label></div>
+    <label class="feedback-optin"><input id="feedback-include-diagnostic" type="checkbox" /> Include an error message that I review</label>
+    <label id="feedback-diagnostic-label" hidden>Error message for review (may contain private filenames or sample IDs)
+      <textarea id="feedback-diagnostic" maxlength="2500" hidden></textarea>
+    </label>
+    <p class="feedback-note">Before you share, remove patient IDs, sample names, paths, and any other private information. Nothing is submitted until you confirm it on GitHub.</p>
+    <p class="feedback-note">No GitHub account? <a href="https://github.com/signup" target="_blank" rel="noopener noreferrer">Create a free account</a>, or save the report below to share later.</p>
+    <p id="feedback-form-error" role="status" aria-live="polite"></p>
+    <div class="feedback-actions">
+      <button type="button" id="feedback-dismiss">Cancel</button>
+      <button type="button" id="feedback-download">Download report</button>
+      <button type="button" id="feedback-send" class="feedback-primary">Continue on GitHub</button>
+    </div>
+  </form>
+</dialog>
+
+  <script type="module" src="./feedback.js?v=0.21.0-ux15-feedback"></script>
 </body>
 </html>
