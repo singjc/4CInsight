@@ -587,3 +587,31 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .result-ready-card p { margin:.3rem 0; color:#64748b; }
 @media (max-width:1120px) { .overview-modality-grid { grid-template-columns:1fr; } }
 @media (max-width:650px) { .overview-summary-row{grid-template-columns:1fr;} .overview-footer{align-items:start; flex-direction:column;} .overview-intro{align-items:start; flex-direction:column;} .result-ready-card{align-items:start; flex-direction:column;} }
+
+/* UX11: responsive result controls. Zoom is limited to the plot; science stays unchanged. */
+.overview-card-tools { display:flex; align-items:center; justify-content:flex-start; flex-wrap:wrap; gap:.4rem; margin:.6rem 0 .9rem; padding:.5rem 0; border-top:1px solid #e2e8f0; }
+.overview-card-tools .results-plot-tools, .overview-card-tools .results-table-tools { display:flex; flex-wrap:wrap; align-items:center; gap:.35rem; }
+.overview-card-tools .results-table-tools { padding-left:.4rem; border-left:1px solid #cbd5e1; }
+.overview-heading-actions { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:.45rem; }
+.overview-expand-button { padding:.3rem .65rem !important; border:1px solid #cbd5e1; border-radius:8px; background:#fff; font-weight:650; cursor:pointer; color:#1d4ed8; }
+.overview-modality.overview-expanded { grid-column:1 / -1; width:100%; }
+.overview-expanded .overview-chart-wrap { max-width:1200px; margin:auto; }
+.overview-expanded .overview-figure { max-width:1200px; }
+.overview-figure .overview-svg { cursor:zoom-in; touch-action:pan-y; }
+.overview-figure .overview-svg[data-zoom]:not([data-zoom="1.00"]) { cursor:grab; }
+.overview-figure .overview-svg.overview-panning { cursor:grabbing; user-select:none; }
+.overview-plot-hint { margin:.15rem auto .15rem 0; font-size:.72rem; color:#64748b; }
+.results-plot-tools, .results-table-tools { display:flex; gap:.35rem; flex-wrap:wrap; align-items:center; }
+.results-export-button { font:inherit; font-size:.75rem !important; line-height:1.2; padding:.3rem .5rem !important; white-space:normal; border:1px solid #cbd5e1; border-radius:7px; background:#fff; color:#243b60; cursor:pointer; }
+.results-export-button:hover, .overview-expand-button:hover { background:#eff6ff; border-color:#7ba5ec; }
+.results-export-button:focus-visible, .overview-expand-button:focus-visible { outline:3px solid #f59e0b; outline-offset:2px; }
+.results-export-button:disabled { opacity:.65; cursor:wait; }
+.results-export-error { flex:1 1 100%; margin:.4rem 0; color:#b91c1c; font-size:.76rem; }
+.comparison-result .card-heading { flex-wrap:wrap; }
+.comparison-result .card-heading > .results-table-tools { flex:1 1 100%; padding-top:.4rem; border-top:1px solid #e2e8f0; }
+.comparison-result .plot-heading .results-plot-tools { margin-top:.5rem; }
+@media (max-width:650px) {
+  .overview-modality.overview-expanded { grid-column:auto; }
+  .overview-card-tools .results-table-tools { border-left:0; padding-left:0; }
+  .overview-plot-hint { width:100%; }
+}

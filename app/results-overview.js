@@ -130,7 +130,7 @@ function resultStats(entry,key,fdr,cutoff){
   const top=[...tests].filter(t=>good(t.q_value)).sort((a,b)=>val(a.q_value)-val(b.q_value))[0]
   return {tests,selected,top,expression}
 }
-function overviewCard(result,key,title,subtitle,fdr,cutoff){
+function overviewCard(result,key,title,subtitle,fdr,cutoff,expanded=false){
   const entry=result?.[key]
   if (!entry?.analysis) return ''
   const {tests,selected,top,expression}=resultStats(entry,key,fdr,cutoff)
@@ -147,22 +147,26 @@ function overviewCard(result,key,title,subtitle,fdr,cutoff){
   const caveat = key==='isotype'?'These are relative composition effects, not antibody concentrations.'
     : key==='immune'?'These are enrichment-score effects, not estimates of immune-cell percentages.'
       : expression?'Display cutoffs do not refit the model.':'Sample distributions are descriptive. Use adjusted tests for group inference.'
-  return `<section class="card overview-modality" data-overview-modality="${key}"><header class="overview-modality-heading"><div>
-    <span class="overview-kicker">${esc(subtitle)}</span><h3>${esc(title)}</h3></div><span class="tag success">${esc(numberLabel(sampleCount))} samples</span></header>
+  return `<section class="card overview-modality${expanded ? ' overview-expanded' : ''}" data-overview-modality="${key}"><header class="overview-modality-heading"><div>
+    <span class="overview-kicker">${esc(subtitle)}</span><h3>${esc(title)}</h3></div><div class="overview-heading-actions"><span class="tag success">${esc(numberLabel(sampleCount))} samples</span>
+    <button type="button" class="overview-expand-button" data-overview-expand="${key}" aria-expanded="${expanded}">${expanded ? 'Reduce' : 'Expand'}</button></div></header>
     <div class="overview-summary-row"><div class="overview-big-number"><strong>${numberLabel(selected)}</strong><span>Selected findings</span><small>${esc(context)}</small></div>
     <p class="overview-takeaway">${esc(takeaway)}</p></div><div class="overview-chart-wrap">${chart}</div>
+    <div class="overview-card-tools"><span class="overview-plot-hint">Zoom with buttons or Ctrl/⌘ + scroll; drag to pan; double-click to reset.</span></div>
+    <p class="results-export-error" hidden role="alert"></p>
     <footer class="overview-footer"><p>${esc(caveat)}</p><button type="button" class="secondary-button overview-open-details" data-results-detail="${key}">View detailed results</button></footer></section>`
 }
 export function renderResultsOverview(result, options={}) {
   if (!result) return '<section class="card"><h3>No comparison results yet</h3><p>Run a cohort comparison to see the main results.</p></section>'
   const fdr=good(options.fdr) ? Math.max(1e-6,Math.min(1,val(options.fdr))):.05
   const cutoff=good(options.absLog2Fc)?Math.max(0,val(options.absLog2Fc)):1
+  const expandedModalities = new Set(Array.isArray(options.expandedModalities) ? options.expandedModalities : [])
   const available=MODALITIES.filter(([key])=>result[key]?.analysis)
   const errors=Object.entries(result.omicsErrors || {})
   return `<section class="card overview-intro"><div><span class="eyebrow">At a glance</span><h3>What did the cohort comparison show?</h3>
     <p>${available.length} of ${available.length+errors.length} data types produced results. Review the main plots, then open Detailed Results for full methods and evidence.</p></div>
     <div class="overview-at-a-glance"><strong>${available.length}</strong><span>Data types with results</span></div></section>
-    <div class="overview-modality-grid">${MODALITIES.map(([key,title,subtitle])=>overviewCard(result,key,title,subtitle,fdr,cutoff)).join('')}</div>
+    <div class="overview-modality-grid">${MODALITIES.map(([key,title,subtitle])=>overviewCard(result,key,title,subtitle,fdr,cutoff,expandedModalities.has(key))).join('')}</div>
     ${errors.length?`<section class="card overview-errors"><h3>Analyses that did not finish</h3>${errors.map(([kind,message])=>`<p><strong>${esc(kind)}:</strong> ${esc(message)}</p>`).join('')}</section>`:''}
     <p class="overview-method-note">FDR controls the displayed findings. Non-significant results do not prove that groups are equivalent. See Detailed Results for full tables, exclusions, warnings, and exports.</p>`
 }

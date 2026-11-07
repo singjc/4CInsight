@@ -1,4 +1,4 @@
-import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-ux10-results-overview-rebuilt'
+import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-ux11-interactive-exports'
 export const methodDocs = [
   {
     id: 'local-first',

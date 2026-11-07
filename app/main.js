@@ -1,4 +1,5 @@
-import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux10-results-overview-rebuilt'
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux11-interactive-exports'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-ux11-interactive-exports'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -8,8 +9,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-ux10-results-overview-rebuilt'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux10-results-overview-rebuilt'
+import { methodDocs } from './docs-content.js?v=0.21.0-ux11-interactive-exports'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux11-interactive-exports'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -23,7 +24,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux10-results-overview-rebuilt'
+const APP_VERSION = '0.21.0-ux11-interactive-exports'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -92,6 +93,7 @@ const state = {
   compareProgress: null,
   compareResult: null,
   resultsMode: 'overview',
+  resultsExpanded: [],
   longitudinalProgress: null,
   longitudinalResult: null,
   hitProgress: null,
@@ -1914,7 +1916,7 @@ function resultsView() {
   </div>
   ${!result ? '<section class="card"><h3>No comparison results yet</h3><p>Open Compare Groups to run an analysis, or open a previous comparison from History.</p></section>'
     : view === 'overview'
-      ? `${globalThresholdControls()}${renderResultsOverview(result, state.globalThresholds)}`
+      ? `${globalThresholdControls()}${renderResultsOverview(result, {...state.globalThresholds, expandedModalities: state.resultsExpanded})}`
       : detailedComparisonHtml()}`
 }
 function bindResultsEvents() {
@@ -1935,6 +1937,16 @@ function bindResultsEvents() {
   document.querySelector('#export-comparison')?.addEventListener('click', () => void exportCompareResult())
   bindGlobalThresholdEvents()
   bindInteractivePlots()
+  if (state.resultsMode === 'overview') {
+    bindOverviewInteractions(document, state.compareResult, (key, expanded) => {
+      const current = new Set(state.resultsExpanded)
+      if (expanded) current.add(key)
+      else current.delete(key)
+      state.resultsExpanded = [...current]
+    })
+  } else {
+    bindDetailedResultsExports(document, state.compareResult)
+  }
 }
 
 function ensureLongitudinalDefaults() {
