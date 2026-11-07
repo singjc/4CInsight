@@ -105,9 +105,9 @@ test('visual examples are client-only and scripts use one consistent cache revis
   assert.match(styles, /\.docs-visual-svg\s*\{/)
   assert.match(styles, /\.docs-toy-math\s*\{/)
   const v = main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(v, '0.21.0-ux14-input-guide')
+  assert.equal(v, '0.21.0-ux14-input-guide-modality-first')
   assert.doesNotMatch(main, /from ['"]\.\/docs-toy-visuals/) // imported through docs-toy-examples
-  assert.match(examples, /docs-toy-visuals\.js\?v=0\.21\.0-ux14-input-guide/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-ux14-input-guide/)
-  assert.match(html, /main\.js\?v=0\.21\.0-ux14-input-guide/)
+  assert.match(examples, /docs-toy-visuals\.js\?v=0\.21\.0-ux14-input-guide-modality-first/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-ux14-input-guide-modality-first/)
+  assert.match(html, /main\.js\?v=0\.21\.0-ux14-input-guide-modality-first/)
 })

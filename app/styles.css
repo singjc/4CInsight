@@ -678,3 +678,11 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .project-guide-footnote { border-top: 1px solid #e5eaf3; padding-top: 12px; margin: 14px 0 0; font-size: 11.5px; line-height: 1.55; color: #475467; }
 @media (max-width: 880px) { .project-guide-grid { grid-template-columns: 1fr; } }
 @media (max-width: 520px) { .project-guide-summary { flex-wrap: wrap; } .project-guide-action { margin: 2px 0 0 43px; } .project-guide-content { padding: 12px; } }
+
+/* UX14/R1: optional sample-first alternative. */
+.project-guide-bulk-note { margin: 0 0 10px; color: #344054; }
+.project-guide-alternative { margin-top: 12px; padding-top: 10px; border-top: 1px solid #e5eaf3; }
+.project-guide-alternative > summary { cursor: pointer; color: #3159d9; font-size: 11.5px; font-weight: 700; padding: 4px 0; }
+.project-guide-alternative > summary:focus-visible { outline: 2px solid #3159d9; outline-offset: 3px; }
+.project-guide-alternative > .project-guide-note { margin: 8px 0; }
+.project-guide-alternative > .project-guide-tree { margin-top: 10px; }

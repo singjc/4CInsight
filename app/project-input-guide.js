@@ -27,28 +27,48 @@ export function renderProjectInputGuide() {
           <span class="project-guide-action" aria-hidden="true">View guide <span class="project-guide-chevron">⌄</span></span>
         </summary>
         <div class="project-guide-content">
-          <p class="project-guide-lead">Choose a project folder with subfolders, or select files individually. <strong>No specific folder names are required.</strong> 4C Insight detects data types from filenames and reads files on this computer.</p>
+          <p class="project-guide-lead">Choose the folders supplied by your collaborators, or select files individually. <strong>No specific folder names are required.</strong> You do not need to sort files into per-sample folders. 4C Insight detects supported data types from filenames and reads files on this computer.</p>
           <div class="project-guide-grid">
             <section class="project-guide-subsection">
-              <h4>Example folder layout</h4>
-              <pre class="project-guide-tree" aria-label="Illustrative folder hierarchy">my_cohort/
+              <h4>Common layout: folders by data type</h4>
+              <p class="project-guide-note project-guide-bulk-note"><strong>Keep the bulk folders you receive from collaborators.</strong> You do not have to move hundreds of workbooks into separate folders for each sample.</p>
+              <pre class="project-guide-tree" aria-label="Example cohort organized by data type">my_cohort/
 ├── cohort_sample_metadata.tsv
-├── samples/
-│   ├── 4C_100/
-│   │   ├── 4C_100_tumor_rna_gene_expression_report.xlsx
-│   │   ├── 4C_100_bcr_heavy_chain_report.xlsx
-│   │   └── 4C_100_tcr_beta_clone_report.xlsx
-│   └── 4C_101/
-│       ├── 4C_101_tumor_rna_gene_expression_report.xlsx
-│       └── 4C_101_immune_infiltrate.xlsx
-└── merged/                     (optional)
-    ├── merged_gene_expression.tsv
-    └── merged_transcript_expression.tsv</pre>
-              <p class="project-guide-note">You can keep all files in one folder instead. A sample does not need every data type. The merged tables are optional alternatives to individual expression workbooks.</p>
+├── 20260820_merged_gene_expression.tsv         (optional)
+├── 20260820_merged_transcript_expression.tsv   (optional)
+├── Expression_Gene_Files/
+│   ├── 4C_100_tumor_rna_gene_expression_report.xlsx
+│   └── 4C_101_tumor_rna_gene_expression_report.xlsx
+├── Expression_Transcript_Files/
+│   └── 4C_100_tumor_rna_transcript_expression_report.xlsx
+├── BCR/
+│   ├── 4C_100_bcr_heavy_chain_report.xlsx
+│   └── 4C_101_bcr_heavy_chain_report.xlsx
+├── BCR_Isotypes/
+│   └── 4C_100_bcr_isotype_composition.xlsx
+├── TCR/
+│   ├── 4C_100_tcr_alpha_clone_report.xlsx
+│   └── 4C_101_tcr_beta_clone_report.xlsx
+└── Immune_Infiltrate/
+    ├── 4C_100_immune_infiltrate.xlsx
+    └── 4C_101_immune_infiltrate.xlsx</pre>
+              <p class="project-guide-note">Folder names are examples, not rules. Select the parent folder to include its subfolders. Keep collaborator delivery folders as they are; check detected file types and sample mapping before analysis. Merged expression tables are optional alternatives to individual expression files.</p>
+              <details class="project-guide-alternative">
+                <summary>Alternative: folders by sample (optional)</summary>
+                <p class="project-guide-note">Use this layout only if the data already comes organized by sample. You do not need to create it.</p>
+                <pre class="project-guide-tree" aria-label="Optional example organized by sample">my_cohort/
+├── cohort_sample_metadata.tsv
+└── samples/
+    ├── 4C_100/
+    │   ├── 4C_100_bcr_heavy_chain_report.xlsx
+    │   └── 4C_100_tcr_alpha_clone_report.xlsx
+    └── 4C_101/
+        └── 4C_101_immune_infiltrate.xlsx</pre>
+              </details>
             </section>
             <section class="project-guide-subsection">
               <h4>Recognized sample filenames</h4>
-              <p class="project-guide-note">Replace <code>SAMPLE</code> with the sample's identifier, such as <code>4C_100</code>. Keep the suffix exactly as shown.</p>
+              <p class="project-guide-note">The table shows recognized filename suffixes. <code>SAMPLE</code> is the sample identifier, for example <code>4C_100</code>. Folder names do not affect detection. If a collaborator uses another filename convention, review the unrecognized files before analysis.</p>
               <div class="project-guide-table-scroll"><table class="project-guide-table"><thead><tr><th scope="col">Data type</th><th scope="col">Filename pattern</th></tr></thead>
                 <tbody>${rows}</tbody></table></div>
               <p class="project-guide-note">Metadata candidates can use <code>.xlsx</code>, <code>.xls</code>, <code>.tsv</code>, <code>.csv</code>, or <code>.txt</code> when the filename contains <code>sample</code> or <code>cohort</code> and also <code>metadata</code> or <code>submission</code>. Merged expression TSV filenames must contain <code>merged_gene_expression</code> or <code>merged_transcript_expression</code>.</p>

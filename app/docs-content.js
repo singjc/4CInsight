@@ -1,4 +1,4 @@
-import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-ux14-input-guide'
+import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-ux14-input-guide-modality-first'
 export const methodDocs = [
   {
     id: 'local-first',
