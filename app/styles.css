@@ -643,3 +643,38 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
   .topbar-state-actions { order: 3; flex: 1 0 100%; justify-content: flex-end; }
   .topbar-state-button { min-height: 34px; }
 }
+
+/* UX14: compact, optional input-format guide at the start of Project. */
+.project-guide-panel { margin: -5px 0 18px; }
+.project-guide-details { border: 1px solid #dbe4f5; background: #fff; border-radius: 13px; box-shadow: var(--shadow); overflow: hidden; }
+.project-guide-summary { display: flex; align-items: center; gap: 12px; padding: 15px 18px; cursor: pointer; list-style: none; }
+.project-guide-summary::-webkit-details-marker { display: none; }
+.project-guide-summary:focus-visible { outline: 3px solid rgba(49,89,217,.32); outline-offset: -3px; }
+.project-guide-summary:hover { background: #f8faff; }
+.project-guide-symbol { width: 31px; height: 31px; display: inline-grid; place-items: center; border: 1px solid #bfd0fa; border-radius: 50%; color: #3159d9; font-size: 16px; font-weight: 700; flex: 0 0 auto; background: #f2f5ff; }
+.project-guide-summary-copy { display: grid; gap: 3px; min-width: 0; }
+.project-guide-summary-copy strong { color: #253047; font-size: 14px; }
+.project-guide-summary-copy small { color: #667085; font-size: 12px; line-height: 1.45; }
+.project-guide-action { margin-left: auto; white-space: nowrap; font-size: 12px; color: #3159d9; font-weight: 700; }
+.project-guide-chevron { display: inline-block; margin-left: 5px; transition: transform .15s ease; }
+.project-guide-details[open] .project-guide-chevron { transform: rotate(180deg); }
+.project-guide-content { border-top: 1px solid #e8ecf4; padding: 16px 18px 18px; }
+.project-guide-lead { margin: 0 0 14px; line-height: 1.5; color: #475467; font-size: 12.5px; }
+.project-guide-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
+.project-guide-lower { margin-top: 14px; }
+.project-guide-subsection { min-width: 0; padding: 14px; border: 1px solid #e5eaf3; border-radius: 10px; background: #fbfcff; }
+.project-guide-subsection h4 { margin: 0 0 9px; color: #253047; font-size: 13px; }
+.project-guide-tree, .project-guide-metadata { overflow: auto; max-width: 100%; margin: 0 0 9px; background: #f1f4f9; border: 1px solid #e2e8f1; border-radius: 8px; padding: 11px; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; color: #263653; white-space: pre; }
+.project-guide-metadata { font-size: 11.3px; }
+.project-guide-note { margin: 7px 0 0; font-size: 11.5px; line-height: 1.55; color: #667085; }
+.project-guide-table-scroll { overflow-x: auto; width: 100%; }
+.project-guide-table { width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left; }
+.project-guide-table th, .project-guide-table td { border-bottom: 1px solid #e5eaf3; padding: 7px 5px; vertical-align: top; }
+.project-guide-table thead th { color: #58657e; }
+.project-guide-table tbody th { color: #263653; font-weight: 600; white-space: nowrap; }
+.project-guide-table code, .project-guide-note code, .project-guide-checklist code { font: 10.8px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; word-break: break-word; }
+.project-guide-checklist { margin: 0; padding-left: 18px; font-size: 11.5px; line-height: 1.65; color: #475467; }
+.project-guide-checklist li + li { margin-top: 6px; }
+.project-guide-footnote { border-top: 1px solid #e5eaf3; padding-top: 12px; margin: 14px 0 0; font-size: 11.5px; line-height: 1.55; color: #475467; }
+@media (max-width: 880px) { .project-guide-grid { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .project-guide-summary { flex-wrap: wrap; } .project-guide-action { margin: 2px 0 0 43px; } .project-guide-content { padding: 12px; } }

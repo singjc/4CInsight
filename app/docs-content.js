@@ -1,4 +1,4 @@
-import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-ux13-global-state-buttons'
+import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-ux14-input-guide'
 export const methodDocs = [
   {
     id: 'local-first',

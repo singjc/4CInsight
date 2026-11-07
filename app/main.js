@@ -1,5 +1,6 @@
-import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux13-global-state-buttons'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-ux13-global-state-buttons'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-ux14-input-guide'
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux14-input-guide'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-ux14-input-guide'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -9,8 +10,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-ux13-global-state-buttons'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux13-global-state-buttons'
+import { methodDocs } from './docs-content.js?v=0.21.0-ux14-input-guide'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux14-input-guide'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -24,7 +25,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux13-global-state-buttons'
+const APP_VERSION = '0.21.0-ux14-input-guide'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -1025,6 +1026,7 @@ function projectView() {
       <p>4C Insight references selected files in place. There is no upload step and drag/drop does not duplicate the source files.</p></div>
       <div class="project-heading-actions"><div class="local-card"><strong>Private by design</strong><span>Files remain on this device. You choose when results or state are saved.</span></div></div>
     </section>
+    ${renderProjectInputGuide()}
     <section class="action-panel" aria-labelledby="select-data-heading">
       <div class="action-copy"><h3 id="select-data-heading">Add project data</h3><p>Select files, select a complete project folder, or drop one or more files into the Input inventory. Duplicate selections are ignored.</p></div>
       <div class="button-row">

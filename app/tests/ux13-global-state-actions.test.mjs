@@ -67,9 +67,9 @@ test('banner buttons are keyboard accessible and fit smaller windows', () => {
 })
 
 test('main, stylesheet and HTML use one cache revision', () => {
-  const rev = '0.21.0-ux13-global-state-buttons'
-  assert.match(main, /const APP_VERSION = '0\.21\.0-ux13-global-state-buttons'/)
-  assert.match(html, /main\.js\?v=0\.21\.0-ux13-global-state-buttons/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-ux13-global-state-buttons/)
+  const rev = '0.21.0-ux14-input-guide'
+  assert.match(main, /const APP_VERSION = '0\.21\.0-ux14-input-guide'/)
+  assert.match(html, /main\.js\?v=0\.21\.0-ux14-input-guide/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-ux14-input-guide/)
   assert.doesNotMatch(main, /0\.21\.0-ux12-true-axis-zoom/)
 })
