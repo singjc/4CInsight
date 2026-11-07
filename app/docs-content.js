@@ -1,4 +1,4 @@
-import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-md5-immune-guides'
+import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-ux10-results-overview-rebuilt'
 export const methodDocs = [
   {
     id: 'local-first',

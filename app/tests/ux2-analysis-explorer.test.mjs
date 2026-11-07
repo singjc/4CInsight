@@ -8,10 +8,11 @@ const docs = await readFile(new URL('../docs-content.js', import.meta.url), 'utf
 const { methodDocs } = await import(new URL('../docs-content.js', import.meta.url))
 
 
-test('UX2 removes redundant Results tab and keeps History', () => {
-  assert.doesNotMatch(main, /\['results',\s*'Results'/)
+test('Results presents Overview and Detailed Results without replacing History', () => {
+  assert.match(main, /\['results', 'Results', 'R'\]/)
   assert.match(main, /\['history', 'History', '6'\]/)
-  assert.doesNotMatch(main, /function resultsView\(/)
+  assert.match(main, /function resultsView\(/)
+  assert.match(main, /function detailedComparisonHtml\(/)
 })
 
 test('differential expression has global FDR/log2FC volcano controls', () => {

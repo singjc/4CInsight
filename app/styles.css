@@ -543,3 +543,47 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 @media (prefers-reduced-motion: reduce) {
   .docs-visual-controls input { scroll-behavior: auto; }
 }
+
+/* UX10: focused results overview. Full result plots and tables remain in Detailed Results. */
+.results-view-switch { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; margin:.9rem 0 1.15rem; }
+.results-view-switch button { border:1px solid #cbd5e1; border-radius:999px; background:transparent; color:inherit; padding:.55rem 1rem; font:inherit; font-weight:650; cursor:pointer; }
+.results-view-switch button[aria-pressed="true"] { background:#2755d7; border-color:#2755d7; color:#fff; }
+.results-view-switch button:focus-visible, .overview-open-details:focus-visible { outline:3px solid #f59e0b; outline-offset:3px; }
+.results-nav-note { color:#64748b; font-size:.89rem; margin:.5rem 0 1.2rem; }
+.overview-intro { display:flex; justify-content:space-between; align-items:center; gap:1.5rem; }
+.overview-intro h3 { font-size:1.2rem; margin:.35rem 0 .55rem; }
+.overview-intro p { color:#526174; max-width:65ch; }
+.overview-at-a-glance { flex:none; min-width:115px; text-align:center; padding:1rem; border:1px solid #dbe7f2; border-radius:12px; }
+.overview-at-a-glance strong { display:block; font-size:2rem; color:#2454c5; line-height:1.15; }
+.overview-at-a-glance span { display:block; font-size:.74rem; color:#64748b; }
+.overview-modality-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; margin:1rem 0; align-items:start; }
+.overview-modality { min-width:0; padding:1.2rem; }
+.overview-modality-heading { display:flex; flex-wrap:wrap; gap:.5rem; justify-content:space-between; align-items:start; }
+.overview-modality-heading h3 { font-size:1.12rem; margin:.2rem 0 .6rem; }
+.overview-kicker { color:#64748b; font-size:.75rem; }
+.overview-summary-row { display:grid; grid-template-columns:minmax(110px,0.38fr) 1fr; gap:1rem; margin:.3rem 0 1rem; }
+.overview-big-number strong { display:block; font-size:1.7rem; line-height:1.1; color:#1d4ed8; }
+.overview-big-number span { display:block; font-size:.79rem; font-weight:700; }
+.overview-big-number small { font-size:.7rem; color:#64748b; }
+.overview-takeaway { font-size:.83rem; line-height:1.45; margin:0; color:#334155; }
+.overview-chart-wrap { width:100%; overflow-x:auto; }
+.overview-figure { margin:0; width:100%; }
+.overview-svg { display:block; width:100%; height:auto; min-width:280px; }
+.overview-svg-name { font:600 13px system-ui,-apple-system,sans-serif; fill:#334155; }
+.overview-svg-small { font:11px system-ui,-apple-system,sans-serif; fill:#64748b; }
+.overview-svg-tick { font:10px system-ui,-apple-system,sans-serif; fill:#64748b; }
+.overview-figure figcaption { display:flex; flex-wrap:wrap; gap:.5rem .9rem; margin:.25rem 0 .6rem; font-size:.72rem; line-height:1.4; color:#64748b; }
+.overview-legend { display:inline-flex; align-items:center; gap:.25rem; }
+.overview-legend i { display:inline-block; height:8px; width:8px; border-radius:50%; background:var(--legend-color); }
+.overview-footer { display:flex; gap:1rem; align-items:center; justify-content:space-between; border-top:1px solid #e2e8f0; padding-top:.8rem; }
+.overview-footer p { font-size:.74rem; margin:0; color:#64748b; line-height:1.45; max-width:55ch; }
+.overview-footer button { flex-shrink:0; font-size:.8rem; }
+.overview-errors p { overflow-wrap:anywhere; }
+.overview-method-note { font-size:.78rem; color:#64748b; margin:1.1rem 0; }
+.overview-detail-charts { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,350px),1fr)); gap:1rem; margin:1rem 0; }
+.overview-extra-plot { margin:1rem 0; }
+.overview-empty { padding:1rem; color:#64748b; }
+.result-ready-card { display:flex; gap:1.2rem; align-items:center; justify-content:space-between; }
+.result-ready-card p { margin:.3rem 0; color:#64748b; }
+@media (max-width:1120px) { .overview-modality-grid { grid-template-columns:1fr; } }
+@media (max-width:650px) { .overview-summary-row{grid-template-columns:1fr;} .overview-footer{align-items:start; flex-direction:column;} .overview-intro{align-items:start; flex-direction:column;} .result-ready-card{align-items:start; flex-direction:column;} }

@@ -1,3 +1,4 @@
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux10-results-overview-rebuilt'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -7,8 +8,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-md5-immune-guides'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-md5-immune-guides'
+import { methodDocs } from './docs-content.js?v=0.21.0-ux10-results-overview-rebuilt'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux10-results-overview-rebuilt'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -22,7 +23,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-md5-immune-guides'
+const APP_VERSION = '0.21.0-ux10-results-overview-rebuilt'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -31,6 +32,7 @@ const tabs = [
   ['metadata', 'Sample Metadata', 'M'],
   ['qc', 'Explore & QC', '2'],
   ['compare', 'Compare Groups', '3'],
+  ['results', 'Results', 'R'],
   ['longitudinal', 'Longitudinal', '4'],
   ['hits', 'Significant Hits', '5'],
   ['history', 'History', '6'],
@@ -89,6 +91,7 @@ const state = {
   qcResult: null,
   compareProgress: null,
   compareResult: null,
+  resultsMode: 'overview',
   longitudinalProgress: null,
   longitudinalResult: null,
   hitProgress: null,
@@ -884,10 +887,11 @@ function restoreHistorySnapshot(snapshot) {
   state.compareResult = snapshot.results?.compare || null
   state.longitudinalResult = snapshot.results?.longitudinal || null
   state.hitResult = snapshot.results?.hits || null
+  state.resultsMode = 'overview'
   const tabForWorkflow = {
     'explore-qc-expression': 'qc',
-    'compare-groups-expression': 'compare',
-    'compare-groups-multiomics': 'compare',
+    'compare-groups-expression': 'results',
+    'compare-groups-multiomics': 'results',
     'longitudinal-patient-signature-expression': 'longitudinal',
     'significant-hit-structure-expression': 'hits',
   }
@@ -1890,9 +1894,48 @@ function compareView() {
   <details class="advanced-settings"><summary>Advanced model settings</summary><div class="form-grid advanced-grid"><label><span>Minimum count</span><input id="compare-min-count" type="number" min="0" step="1" value="${cfg.minCount}"/></label><label><span>Minimum fraction of samples</span><input id="compare-min-fraction" type="number" min="0" max="1" step="0.01" value="${cfg.minFractionSamples}"/></label></div><p>Defaults match the established corrected-expression analysis. Change them only when the analysis plan requires it.</p></details>
   <div class="run-row"><div><strong>${cfg.caseValues.length} case value${cfg.caseValues.length === 1 ? '' : 's'} · ${cfg.controlValues.length} control value${cfg.controlValues.length === 1 ? '' : 's'}</strong><span>Group membership, exclusions, subject mapping, and model settings are frozen into the result.</span></div><button id="run-group-comparison" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run local comparison'}</button></div></section>
   ${state.compareProgress ? `<div class="progress-card" role="status"><div class="progress-copy"><strong>${escapeHtml(state.compareProgress.message)}</strong><span>${state.compareProgress.completed} of ${state.compareProgress.total} modality steps complete</span></div><progress max="${Math.max(1, state.compareProgress.total)}" value="${state.compareProgress.completed}"></progress></div>` : ''}
-  ${state.compareResult ? `${globalThresholdControls()}<div class="result-heading"><div><span class="eyebrow">Corrected multi-omics result</span><h3>${escapeHtml(state.compareResult.comparisonName)}</h3><p>Generated locally. Expression PCA uses top-variable normalized features; other modalities retain their own scientific distances.</p></div><button id="export-comparison" class="secondary-button">Save comparison JSON</button></div>${comparisonResultSection('Gene expression', state.compareResult.gene)}${comparisonResultSection('Transcript expression', state.compareResult.transcript)}${otherOmics.map(([,title,,key]) => multiomicsResultSection(title, state.compareResult[key], key)).join('')}${Object.entries(state.compareResult.omicsErrors || {}).map(([name, message])=> `<div class="analysis-warnings"><strong>${escapeHtml(name)}</strong>: ${escapeHtml(message)}</div>`).join('')}` : ''}`
+  ${state.compareResult ? `<section class="card"><div class="card-heading"><div><h3>Comparison results are ready</h3><p>Review the main findings first, or open the full tables and statistics.</p></div><span class="tag success">Completed</span></div><button type="button" class="primary-button" data-open-results="overview">Open results</button></section>` : ''}`
 }
 
+
+
+function detailedComparisonHtml() {
+  return `  ${state.compareResult ? `${globalThresholdControls()}<div class="result-heading"><div><span class="eyebrow">Corrected multi-omics result</span><h3>${escapeHtml(state.compareResult.comparisonName)}</h3><p>Generated locally. Expression PCA uses top-variable normalized features; other modalities retain their own scientific distances.</p></div><button id="export-comparison" class="secondary-button">Save comparison JSON</button></div>${comparisonResultSection('Gene expression', state.compareResult.gene)}${comparisonResultSection('Transcript expression', state.compareResult.transcript)}${otherOmics.map(([,title,,key]) => multiomicsResultSection(title, state.compareResult[key], key)).join('')}${Object.entries(state.compareResult.omicsErrors || {}).map(([name, message])=> `<div class="analysis-warnings"><strong>${escapeHtml(name)}</strong>: ${escapeHtml(message)}</div>`).join('')}` : ''}`
+}
+
+function resultsView() {
+  const view = state.resultsMode || 'overview'
+  const result = state.compareResult
+  return `<section class="page-heading"><div><span class="eyebrow">Results</span><h2>${escapeHtml(result?.comparisonName || 'Cohort comparison')}</h2><p>Start with the main findings, or open all plots, statistics, and tables.</p></div><div class="local-card"><strong>Data stays on your device</strong><span>Analysis results remain in this browser until you export or save them.</span></div></section>
+  <div class="results-view-switch" role="group" aria-label="Choose how to view results">
+    <button type="button" data-results-view="overview" aria-pressed="${view === 'overview'}">Overview</button>
+    <button type="button" data-results-view="detailed" aria-pressed="${view === 'detailed'}">Detailed Results</button>
+    <button type="button" class="secondary-button" data-return-compare="true">Compare Groups</button>
+  </div>
+  ${!result ? '<section class="card"><h3>No comparison results yet</h3><p>Open Compare Groups to run an analysis, or open a previous comparison from History.</p></section>'
+    : view === 'overview'
+      ? `${globalThresholdControls()}${renderResultsOverview(result, state.globalThresholds)}`
+      : detailedComparisonHtml()}`
+}
+function bindResultsEvents() {
+  document.querySelectorAll('[data-results-view]').forEach(button => button.addEventListener('click', () => {
+    state.resultsMode = button.dataset.resultsView
+    render()
+  }))
+  document.querySelector('[data-return-compare]')?.addEventListener('click', () => { state.tab = 'compare'; render() })
+  document.querySelectorAll('[data-results-detail]').forEach(button => button.addEventListener('click', () => {
+    const name = {gene:'Gene expression',transcript:'Transcript expression',bcr:'BCR repertoire',tcrAlpha:'TCR alpha',tcrBeta:'TCR beta',isotype:'BCR isotypes',immune:'Immune infiltration'}[button.dataset.resultsDetail]
+    state.resultsMode='detailed'
+    render()
+    if (name) {
+      const target=[...document.querySelectorAll('.comparison-result')].find(el => el.querySelector('h3')?.textContent?.trim() === name)
+      target?.scrollIntoView?.({behavior:'smooth',block:'start'})
+    }
+  }))
+  document.querySelector('#export-comparison')?.addEventListener('click', () => void exportCompareResult())
+  bindGlobalThresholdEvents()
+  bindInteractivePlots()
+}
 
 function ensureLongitudinalDefaults() {
   const metadata = state.metadataInspection
@@ -2767,6 +2810,8 @@ async function runGroupComparison() {
       state.error = 'Every selected modality failed. Review the named errors below and the browser console.'
     }
     if (succeeded) {
+      state.resultsMode = 'overview'
+      state.tab = 'results'
       try {
         await recordHistory(steps.some(step => step.otherOmics?.length) ? 'compare-groups-multiomics' : 'compare-groups-expression', comparisonName || 'Compare Groups')
       } catch (error) {
@@ -3355,6 +3400,7 @@ function render() {
     metadata: metadataView,
     qc: qcView,
     compare: compareView,
+    results: resultsView,
     longitudinal: longitudinalView,
     hits: significantHitsView,
     history: historyView,
@@ -3366,8 +3412,10 @@ function render() {
   if (state.tab === 'metadata') bindMetadataEvents()
   if (state.tab === 'qc') bindQcEvents()
   if (state.tab === 'compare') bindCompareEvents()
+  if (state.tab === 'results') bindResultsEvents()
   if (state.tab === 'longitudinal') bindLongitudinalEvents()
   if (state.tab === 'hits') bindSignificantHitEvents()
+  document.querySelectorAll('[data-open-results]').forEach(button => button.addEventListener('click', () => { state.resultsMode = 'overview'; state.tab = 'results'; render() }))
   if (state.tab === 'history') {
     bindHistoryEvents()
     if (!state.historyLoaded && !state.historyBusy) void refreshHistory()
