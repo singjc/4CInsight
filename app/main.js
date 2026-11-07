@@ -1,5 +1,5 @@
-import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux11-interactive-exports'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-ux11-interactive-exports'
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-ux12-true-axis-zoom'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-ux12-true-axis-zoom'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -9,8 +9,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-ux11-interactive-exports'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux11-interactive-exports'
+import { methodDocs } from './docs-content.js?v=0.21.0-ux12-true-axis-zoom'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-ux12-true-axis-zoom'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -24,7 +24,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-ux11-interactive-exports'
+const APP_VERSION = '0.21.0-ux12-true-axis-zoom'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 

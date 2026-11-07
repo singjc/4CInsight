@@ -45,6 +45,216 @@ export function panPlotBounds(view, base, dxPixels, dyPixels, renderedWidth, ren
   }
 }
 const asViewBox = (b) => `${b.x} ${b.y} ${b.width} ${b.height}`
+// UX12: fixed-frame coordinate zoom. Data points move; axes and captions keep their size.
+// The original scientific arrays are never changed. No network or worker calls.
+const axisPlotState = new WeakMap()
+const AXIS_SVG_NS = 'http://www.w3.org/2000/svg'
+const axisClamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
+const axisNumber = (v) => Number.isFinite(Number(v)) ? Number(v) : NaN
+const axisShown = (v,lo,hi) => Number.isFinite(v) && v>=lo-1e-9 && v<=hi+1e-9
+
+export function axisZoomWindow(view, factor, anchorX=0.5, anchorY=0.5, zoomY=true) {
+  if (!view || !Number.isFinite(factor) || factor<=0) return view
+  const nextW=axisClamp(view.width*factor,1/16,1)
+  const nextH=zoomY?axisClamp(view.height*factor,1/16,1):1
+  return {x:axisClamp(view.x+axisClamp(anchorX,0,1)*(view.width-nextW),0,1-nextW),
+    y:zoomY?axisClamp(view.y+axisClamp(anchorY,0,1)*(view.height-nextH),0,1-nextH):0,
+    width:nextW,height:nextH}
+}
+export function axisPanWindow(view, dx, dy, plotWidth, plotHeight, zoomY=true) {
+  if (!view || !(plotWidth>0) || !(plotHeight>0)) return view
+  return {...view,
+    x:axisClamp(view.x-dx/plotWidth*view.width,0,1-view.width),
+    y:zoomY?axisClamp(view.y+dy/plotHeight*view.height,0,1-view.height):0}
+}
+export function axisProjection(value, view, from, to, reverse=false) {
+  if (!Number.isFinite(value) || !view || !(view.width>0)) return NaN
+  const fraction=(value-view.x)/view.width
+  return reverse?to-fraction*(to-from):from+fraction*(to-from)
+}
+function axisText(value){
+  if(!Number.isFinite(value)) return '—'
+  if(Math.abs(value)>=100000 || (Math.abs(value)>0&&Math.abs(value)<0.01)) return value.toExponential(2)
+  return Number(value.toPrecision(4)).toLocaleString(undefined,{maximumFractionDigits:3})
+}
+function axisCreateText(group,x,y,text,anchor='middle'){
+  const node=document.createElementNS(AXIS_SVG_NS,'text')
+  node.setAttribute('x',String(x));node.setAttribute('y',String(y))
+  node.setAttribute('text-anchor',anchor)
+  node.setAttribute('fill','#475569')
+  node.setAttribute('font-size','10')
+  node.setAttribute('font-family','system-ui,sans-serif')
+  node.textContent=text
+  group.appendChild(node)
+  return node
+}
+function axisStateFor(svg){
+  if(!svg?.dataset?.axisKind) return null
+  let state=axisPlotState.get(svg)
+  if (state) return state
+  const original=parsePlotBounds(svg.getAttribute('viewBox'))
+  const p={left:axisNumber(svg.dataset.axisLeft),right:axisNumber(svg.dataset.axisRight),
+    top:axisNumber(svg.dataset.axisTop),bottom:axisNumber(svg.dataset.axisBottom)}
+  if(!original || Object.values(p).some(x=>!Number.isFinite(x))||p.right<=p.left||p.bottom<=p.top)return null
+  const kind=svg.dataset.axisKind
+  if(!['samples','volcano','effects'].includes(kind))return null
+  const viewport={x:0,y:0,width:1,height:1}
+  const xMin=axisNumber(svg.dataset.axisXmin),xMax=axisNumber(svg.dataset.axisXmax)
+  const yMin=axisNumber(svg.dataset.axisYmin),yMax=axisNumber(svg.dataset.axisYmax)
+  state={kind,plot:p,original,view:viewport,xMin,xMax,yMin,yMax,
+    points:[...svg.querySelectorAll('[data-axis-point]')],
+    medians:[...svg.querySelectorAll('[data-axis-median]')],
+    bars:[...svg.querySelectorAll('[data-axis-bar]')],
+    barLabels:[...svg.querySelectorAll('[data-axis-bar-label]')],
+    refsX:[...svg.querySelectorAll('[data-axis-ref-x]')],
+    refsY:[...svg.querySelectorAll('[data-axis-ref-y]')],
+    metrics:[...svg.querySelectorAll('[data-axis-metric]')]}
+  const ticks=document.createElementNS(AXIS_SVG_NS,'g')
+  ticks.setAttribute('data-axis-current-ticks','true')
+  const annotations=document.createElementNS(AXIS_SVG_NS,'g')
+  annotations.setAttribute('data-axis-annotations','true')
+  annotations.setAttribute('aria-hidden','true')
+  svg.appendChild(ticks);svg.appendChild(annotations)
+  state.ticks=ticks;state.annotations=annotations
+  axisPlotState.set(svg,state)
+  return state
+}
+function axisScreenScale(svg,state){
+  const r=svg.getBoundingClientRect?.()
+  return (r?.width>0) ? r.width/state.original.width : 1
+}
+function axisRedrawLabels(svg,state,visible){
+  state.annotations.replaceChildren()
+  const zoom=1/state.view.width
+  if (zoom<(svg.closest?.('.overview-expanded')?1.5:2.2)) return
+  const scale=axisScreenScale(svg,state)
+  const radiusX=20/scale, radiusY=13/scale
+  const cells=new Map()
+  const cell=(x,y)=>`${Math.floor(x/radiusX)},${Math.floor(y/radiusY)}`
+  const coords=[]
+  for(const p of visible){
+    const x=axisNumber(p.getAttribute('cx')),y=axisNumber(p.getAttribute('cy'))
+    if(!Number.isFinite(x)||!Number.isFinite(y))continue
+    coords.push({node:p,x,y})
+    const key=cell(x,y);if(!cells.has(key))cells.set(key,[])
+    cells.get(key).push({x,y})
+  }
+  const occupied=[]
+  const maxLabels=svg.closest?.('.overview-expanded')?40:22
+  for(const p of coords){
+    if(occupied.length>=maxLabels)break
+    const label=p.node.dataset.pointLabel
+    if(!label)continue
+    // Keep labels only when nearby points do not make identification ambiguous.
+    const cx=Math.floor(p.x/radiusX),cy=Math.floor(p.y/radiusY)
+    let near=false
+    for(let a=-1;a<=1&&!near;a++)for(let b=-1;b<=1&&!near;b++)for(const pt of cells.get(`${cx+a},${cy+b}`)||[]){
+      if(pt===p)continue
+      if(pt.x===p.x&&pt.y===p.y)continue
+      if(Math.abs(pt.x-p.x)<radiusX&&Math.abs(pt.y-p.y)<radiusY){near=true;break}
+    }
+    if(near)continue
+    const approxWidth=Math.min(130,Math.max(28,label.length*6.1))/scale
+    let tx=p.x+8/scale,anchor='start'
+    if(tx+approxWidth>state.plot.right){tx=p.x-8/scale;anchor='end'}
+    if(anchor==='end'&&tx-approxWidth<state.plot.left)continue
+    const xl=anchor==='start'?tx:tx-approxWidth,xr=xl+approxWidth
+    const y=p.y-6/scale
+    if(y<state.plot.top+5/scale||y>state.plot.bottom)continue
+    if(occupied.some(q=>xl<q.xr+4/scale&&xr>q.xl-4/scale&&Math.abs(y-q.y)<14/scale))continue
+    const labelNode=axisCreateText(state.annotations,tx,y,label,anchor)
+    labelNode.setAttribute('font-size',String(10/Math.max(0.75,scale)))
+    labelNode.setAttribute('fill','#334155')
+    labelNode.setAttribute('paint-order','stroke')
+    labelNode.setAttribute('stroke','#ffffff')
+    labelNode.setAttribute('stroke-width','2.3')
+    labelNode.setAttribute('stroke-linejoin','round')
+    occupied.push({xl,xr,y})
+  }
+}
+function redrawAxisPlot(svg,state){
+  const {view:v,plot:p,kind}=state
+  const x=nx=>p.left+(nx-v.x)/v.width*(p.right-p.left)
+  const y=ny=>p.bottom-(ny-v.y)/v.height*(p.bottom-p.top)
+  const insideX=nx=>axisShown(nx,v.x,v.x+v.width)
+  const insideY=ny=>axisShown(ny,v.y,v.y+v.height)
+  const visible=[]
+  for(const node of state.points){
+    const nx=axisNumber(node.dataset.nx),ny=axisNumber(node.dataset.ny)
+    const show=insideX(nx)&&(kind!=='volcano'||insideY(ny))
+    node.setAttribute('display',show?'inline':'none')
+    if(!show)continue
+    node.setAttribute('cx',x(nx).toFixed(3))
+    if(kind==='volcano')node.setAttribute('cy',y(ny).toFixed(3))
+    else node.setAttribute('cy',node.dataset.fixedY)
+    visible.push(node)
+  }
+  for(const node of state.medians){
+    const nx=axisNumber(node.dataset.nx),show=insideX(nx)
+    node.setAttribute('display',show?'inline':'none')
+    if(show)node.setAttribute('d',`M${x(nx).toFixed(3)} ${node.dataset.fixedY} v17`)
+  }
+  for(const node of state.refsX){
+    const nx=axisNumber(node.dataset.axisRefX),show=insideX(nx)
+    node.setAttribute('display',show?'inline':'none')
+    if(show){node.setAttribute('x1',x(nx).toFixed(3));node.setAttribute('x2',x(nx).toFixed(3))}
+  }
+  for(const node of state.refsY){
+    const ny=axisNumber(node.dataset.axisRefY),show=insideY(ny)
+    node.setAttribute('display',show?'inline':'none')
+    if(show){node.setAttribute('y1',y(ny).toFixed(3));node.setAttribute('y2',y(ny).toFixed(3))}
+  }
+  for(const bar of state.bars){
+    const nx=axisNumber(bar.dataset.nx)
+    const l=Math.max(Math.min(nx,0.5),v.x),r=Math.min(Math.max(nx,0.5),v.x+v.width)
+    const show=r>l&&insideX(axisClamp(nx,v.x,v.x+v.width))
+    bar.setAttribute('display',show?'inline':'none')
+    if(show){bar.setAttribute('x',x(l).toFixed(3));bar.setAttribute('width',Math.max(0.3,x(r)-x(l)).toFixed(3))}
+  }
+  for(const node of state.barLabels){
+    const nx=axisNumber(node.dataset.nx),show=insideX(nx)
+    node.setAttribute('display',show?'inline':'none')
+    if(show){
+      const endpoint=x(nx)
+      const positive=nx>=0.5
+      const xx=positive?endpoint+5:endpoint-5
+      node.setAttribute('x',String(axisClamp(xx,p.left+5,p.right-5)))
+      node.setAttribute('text-anchor',positive?'start':'end')
+    }
+  }
+  for(const metric of state.metrics){
+    const lo=axisNumber(metric.dataset.axisMin),hi=axisNumber(metric.dataset.axisMax)
+    metric.querySelector('[data-axis-tick="low"]')?.replaceChildren(document.createTextNode(axisText(lo+v.x*(hi-lo))))
+    metric.querySelector('[data-axis-tick="high"]')?.replaceChildren(document.createTextNode(axisText(lo+(v.x+v.width)*(hi-lo))))
+  }
+  state.ticks.replaceChildren()
+  if(kind!=='samples'&&Number.isFinite(state.xMin)&&Number.isFinite(state.xMax)){
+    for(let i=0;i<=4;i++){
+      const t=i/4
+      axisCreateText(state.ticks,p.left+t*(p.right-p.left),kind==='effects'?p.bottom+3:p.bottom+13,
+        axisText(state.xMin+(v.x+t*v.width)*(state.xMax-state.xMin)))
+    }
+  }
+  if(kind==='volcano'&&Number.isFinite(state.yMin)&&Number.isFinite(state.yMax)){
+    for(let i=0;i<=3;i++){
+      const t=i/3
+      axisCreateText(state.ticks,p.left-6,p.bottom-t*(p.bottom-p.top)+3,
+        axisText(state.yMin+(v.y+t*v.height)*(state.yMax-state.yMin)),'end')
+    }
+  }
+  axisRedrawLabels(svg,state,visible)
+  svg.dataset.zoom=(1/v.width).toFixed(2)
+  // The SVG viewBox stays unchanged; exported SVG/PNG keeps the current coordinates.
+}
+function axisSetView(svg,state,view){state.view=view;redrawAxisPlot(svg,state)}
+function axisEventAnchor(svg,event,state){
+  const rect=svg.getBoundingClientRect()
+  const px=(event.clientX-rect.left)/Math.max(1,rect.width)*state.original.width+state.original.x
+  const py=(event.clientY-rect.top)/Math.max(1,rect.height)*state.original.height+state.original.y
+  return {x:axisClamp((px-state.plot.left)/(state.plot.right-state.plot.left),0,1),
+    y:axisClamp((state.plot.bottom-py)/(state.plot.bottom-state.plot.top),0,1)}
+}
+
 const plotState = new WeakMap()
 function viewState(svg) {
   if (!svg) return null
@@ -64,17 +274,23 @@ function setView(svg, next) {
   svg.setAttribute('viewBox', asViewBox(next))
   svg.setAttribute('data-zoom', (state.base.width / next.width).toFixed(2))
 }
-export function changePlotZoom(svg, factor, ax = 0.5, ay = 0.5) {
-  const s = viewState(svg)
-  if (s) setView(svg, zoomPlotBounds(s.view, s.base, factor, ax, ay))
+export function changePlotZoom(svg, factor, ax = 0.5, ay = 0.18) {
+  const axis=axisStateFor(svg)
+  if(axis){axisSetView(svg,axis,axisZoomWindow(axis.view,factor,ax,ay,axis.kind==='volcano'));return}
+  const s=viewState(svg)
+  if(s)setView(svg,zoomPlotBounds(s.view,s.base,factor,ax,ay))
 }
 export function resetPlotZoom(svg) {
-  const s = viewState(svg)
-  if (s) setView(svg, { ...s.base })
+  const axis=axisStateFor(svg)
+  if(axis){axisSetView(svg,axis,{x:0,y:0,width:1,height:1});return}
+  const s=viewState(svg)
+  if(s)setView(svg,{...s.base})
 }
 function attachPanAndZoom(svg) {
   if (!svg || svg.dataset.interactiveOverview === 'true') return
-  if (!viewState(svg)) return
+  const axis=axisStateFor(svg)
+  if(!axis&&!viewState(svg))return
+  if(axis)redrawAxisPlot(svg,axis)
   svg.dataset.interactiveOverview = 'true'
   svg.setAttribute('tabindex', '0')
   svg.setAttribute('aria-keyshortcuts', '+ - 0')
@@ -83,15 +299,16 @@ function attachPanAndZoom(svg) {
     if (!event.ctrlKey && !event.metaKey) return
     event.preventDefault()
     const rect = svg.getBoundingClientRect()
-    const x = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1)
-    const y = clamp((event.clientY - rect.top) / Math.max(1, rect.height), 0, 1)
-    changePlotZoom(svg, event.deltaY < 0 ? 0.8 : 1.25, x, y)
+    const anchor=axis?axisEventAnchor(svg,event,axis):{
+      x:clamp((event.clientX-rect.left)/Math.max(1,rect.width),0,1),
+      y:clamp((event.clientY-rect.top)/Math.max(1,rect.height),0,1)}
+    changePlotZoom(svg,event.deltaY<0?0.8:1.25,anchor.x,anchor.y)
   }, { passive: false })
   let drag = null
   svg.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || event.pointerType === 'touch') return
-    const s = viewState(svg)
-    if (!s || s.view.width >= s.base.width) return
+    const s=axis||viewState(svg)
+    if(!s || s.view.width >= (axis?1:s.base.width))return
     drag = { x: event.clientX, y: event.clientY }
     svg.setPointerCapture?.(event.pointerId)
     svg.classList.add('overview-panning')
@@ -100,7 +317,11 @@ function attachPanAndZoom(svg) {
     if (!drag) return
     const rect = svg.getBoundingClientRect()
     const s = viewState(svg)
-    setView(svg, panPlotBounds(s.view, s.base, event.clientX-drag.x, event.clientY-drag.y, rect.width, rect.height))
+    if(axis){
+      const width=rect.width*(axis.plot.right-axis.plot.left)/axis.original.width
+      const height=rect.height*(axis.plot.bottom-axis.plot.top)/axis.original.height
+      axisSetView(svg,axis,axisPanWindow(axis.view,event.clientX-drag.x,event.clientY-drag.y,width,height,axis.kind==='volcano'))
+    }else setView(svg,panPlotBounds(s.view,s.base,event.clientX-drag.x,event.clientY-drag.y,rect.width,rect.height))
     drag = { x: event.clientX, y: event.clientY }
   })
   const finish = () => { drag = null; svg.classList.remove('overview-panning') }
@@ -306,6 +527,7 @@ export function bindOverviewInteractions(root, result, onExpand = null) {
       card.classList.toggle('overview-expanded', expanded)
       expand.setAttribute('aria-expanded', String(expanded))
       expand.textContent = expanded ? 'Reduce' : 'Expand'
+      if(svg){const axis=axisStateFor(svg);if(axis)redrawAxisPlot(svg,axis)}
       onExpand?.(key, expanded)
     })
     if (tools && result?.[key] && !tools.querySelector('.results-table-tools')) tools.appendChild(makeTableControls(result[key],key))

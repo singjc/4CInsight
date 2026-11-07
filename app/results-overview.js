@@ -41,15 +41,15 @@ function signedEffectChart(rows, caption, fdr) {
     const label = featureName(row)
     return `<g><title>${esc(label)}: effect ${fmt(effect,5)}; q ${fmt(row.q_value,5)}</title>
     <text x="8" y="${y+13}" class="overview-svg-name">${esc(label.length>25 ? `${label.slice(0,24)}…`:label)}</text>
-    <rect x="${x.toFixed(2)}" y="${y}" width="${Math.max(1,length).toFixed(2)}" height="18" rx="3"
+    <rect data-axis-bar="true" data-nx="${((effect/max+1)/2).toFixed(12)}" data-bar-y="${y}" x="${x.toFixed(2)}" y="${y}" width="${Math.max(1,length).toFixed(2)}" height="18" rx="3"
       fill="${effect>=0?'#d64556':'#3159d9'}" fill-opacity="${significant?'0.94':'0.32'}" />
-    <text x="${effect>=0?Math.min(width-8,center+length+6):Math.max(left,center-length-6)}" y="${y+13}"
+    <text data-axis-bar-label="true" data-nx="${((effect/max+1)/2).toFixed(12)}" data-bar-y="${y+13}" x="${effect>=0?Math.min(width-8,center+length+6):Math.max(left,center-length-6)}" y="${y+13}"
       text-anchor="${effect>=0?'start':'end'}" class="overview-svg-small">${fmt(effect)}${significant?'*':''}</text></g>`
   }).join('')
-  return `<figure class="overview-figure"><svg class="overview-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(caption)}">
-    <title>${esc(caption)}</title><line x1="${center}" x2="${center}" y1="23" y2="${height-8}" stroke="#94a3b8" stroke-dasharray="4 4"/>
-    <text class="overview-svg-small" x="${center-8}" y="17" text-anchor="end">Lower in case</text>
-    <text class="overview-svg-small" x="${center+8}" y="17">Higher in case</text>${markup}</svg>
+  return `<figure class="overview-figure"><svg class="overview-svg" viewBox="0 0 ${width} ${height}" data-axis-kind="effects" data-axis-left="${left}" data-axis-right="${width-right}" data-axis-top="23" data-axis-bottom="${height-8}" data-axis-xmin="${-max}" data-axis-xmax="${max}" role="img" aria-label="${esc(caption)}">
+    <title>${esc(caption)}</title><line data-axis-ref-x="0.5" x1="${center}" x2="${center}" y1="23" y2="${height-8}" stroke="#94a3b8" stroke-dasharray="4 4"/>
+    <text class="overview-svg-small" x="${left}" y="17">Lower in case</text>
+    <text class="overview-svg-small" x="${width-right}" y="17" text-anchor="end">Higher in case</text>${markup}</svg>
     <figcaption>Bars: signed adjusted effect · * q ≤ ${esc(fdr)} · Faded bars do not meet FDR.</figcaption></figure>`
 }
 
@@ -79,20 +79,20 @@ function sampleMetricChart(summaries, result) {
       if (!good(s[key])) return ''
       const c=s.group===caseLabel?'#d64556':'#3159d9', jitter=(i*19%9-4)*1.6
       const cy=y+(s.group===caseLabel?-6:8)+jitter
-      return `<circle cx="${scale(s[key]).toFixed(2)}" cy="${cy.toFixed(2)}" r="2.9" fill="${c}" fill-opacity="0.68"><title>${esc(s.sample_id)} (${esc(s.group)}): ${fmt(s[key],4)}</title></circle>`
+      return `<circle data-axis-point="true" data-nx="${((val(s[key])-low)/(high-low)).toFixed(12)}" data-fixed-y="${cy.toFixed(2)}" data-point-label="${esc(s.sample_id)}" data-point-group="${esc(s.group)}" data-metric-row="${idx}" cx="${scale(s[key]).toFixed(2)}" cy="${cy.toFixed(2)}" r="2.9" fill="${c}" fill-opacity="0.68"><title>${esc(s.sample_id)} (${esc(s.group)}): ${fmt(s[key],4)}</title></circle>`
     }).join('')
     const medians=[caseLabel,controlLabel].map((group,i)=>{
       const m=median(summaries.filter(s=>s.group===group).map(s=>s[key]))
-      return Number.isFinite(m)? `<path d="M${scale(m).toFixed(2)} ${y-20+i*14} v17" stroke="${i===0?'#d64556':'#3159d9'}" stroke-width="3"><title>${esc(group)} median ${fmt(m)}</title></path>`:''
+      return Number.isFinite(m)? `<path data-axis-median="true" data-nx="${((m-low)/(high-low)).toFixed(12)}" data-fixed-y="${y-20+i*14}" d="M${scale(m).toFixed(2)} ${y-20+i*14} v17" stroke="${i===0?'#d64556':'#3159d9'}" stroke-width="3"><title>${esc(group)} median ${fmt(m)}</title></path>`:''
     }).join('')
-    return `<g><text x="8" y="${y}" class="overview-svg-name">${esc(label)}</text>
+    return `<g data-axis-metric="${idx}" data-axis-min="${low}" data-axis-max="${high}"><text x="8" y="${y}" class="overview-svg-name">${esc(label)}</text>
       <text x="8" y="${y+17}" class="overview-svg-small">${esc(unit==='count'?'Clonotypes':'Proportion')}</text>
       <line x1="${start}" x2="${end}" y1="${y}" y2="${y}" stroke="#cbd5e1"/>${dots}${medians}
-      <text x="${start}" y="${y+29}" class="overview-svg-tick">${fmt(low,2)}</text>
-      <text x="${end}" y="${y+29}" text-anchor="end" class="overview-svg-tick">${fmt(high,2)}</text></g>`
+      <text data-axis-tick="low" x="${start}" y="${y+29}" class="overview-svg-tick">${fmt(low,2)}</text>
+      <text data-axis-tick="high" x="${end}" y="${y+29}" text-anchor="end" class="overview-svg-tick">${fmt(high,2)}</text></g>`
   }).join('')
   if (!shown) return chartEmpty('The receptor result has no supported sample metrics.')
-  return `<figure class="overview-figure"><svg class="overview-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Receptor sample distributions and group medians">
+  return `<figure class="overview-figure"><svg class="overview-svg" viewBox="0 0 ${width} ${height}" data-axis-kind="samples" data-axis-left="${start}" data-axis-right="${end}" data-axis-top="0" data-axis-bottom="${height}" role="img" aria-label="Receptor sample distributions and group medians">
     <title>Receptor diversity and sharing by group</title>${rows}</svg><figcaption><span class="overview-legend"><i style="--legend-color:#d64556"></i>${esc(caseLabel)}</span>
     <span class="overview-legend"><i style="--legend-color:#3159d9"></i>${esc(controlLabel)}</span>
     Each dot represents a sample. Lines mark group medians. Each measure has its own scale.</figcaption></figure>`
@@ -112,14 +112,14 @@ function volcanoChart(tests, fdr, effectCutoff) {
     const x=val(t.beta_group),q=val(t.q_value)
     const sig=q<=fdr&&Math.abs(x)>=effectCutoff
     const color=!sig?'#94a3b8':x>0?'#d64556':'#3159d9'
-    return `<circle cx="${sx(x).toFixed(2)}" cy="${sy(-Math.log10(Math.max(q,1e-300))).toFixed(2)}" r="2.1" fill="${color}" fill-opacity=".7"><title>${esc(featureName(t))}: effect ${fmt(x)}, q ${fmt(q,5)}</title></circle>`
+    return `<circle data-axis-point="true" data-nx="${((x+maxX)/(2*maxX)).toFixed(12)}" data-ny="${(-Math.log10(Math.max(q,1e-300))/maxY).toFixed(12)}" data-point-label="${esc(featureName(t))}" cx="${sx(x).toFixed(2)}" cy="${sy(-Math.log10(Math.max(q,1e-300))).toFixed(2)}" r="2.1" fill="${color}" fill-opacity=".7"><title>${esc(featureName(t))}: effect ${fmt(x)}, q ${fmt(q,5)}</title></circle>`
   }).join('')
-  return `<figure class="overview-figure"><svg class="overview-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Expression effect against adjusted significance">
+  return `<figure class="overview-figure"><svg class="overview-svg" viewBox="0 0 ${width} ${height}" data-axis-kind="volcano" data-axis-left="${left}" data-axis-right="${width-right}" data-axis-top="${top}" data-axis-bottom="${height-bottom}" data-axis-xmin="${-maxX}" data-axis-xmax="${maxX}" data-axis-ymin="0" data-axis-ymax="${maxY}" role="img" aria-label="Expression effect against adjusted significance">
     <title>Adjusted expression differences</title><line x1="${left}" x2="${width-right}" y1="${height-bottom}" y2="${height-bottom}" stroke="#64748b"/>
-    <line x1="${sx(0)}" x2="${sx(0)}" y1="${top}" y2="${height-bottom}" stroke="#cbd5e1"/>
-    <line x1="${sx(-effectCutoff)}" x2="${sx(-effectCutoff)}" y1="${top}" y2="${height-bottom}" stroke="#94a3b8" stroke-dasharray="4 4"/>
-    <line x1="${sx(effectCutoff)}" x2="${sx(effectCutoff)}" y1="${top}" y2="${height-bottom}" stroke="#94a3b8" stroke-dasharray="4 4"/>
-    <line x1="${left}" x2="${width-right}" y1="${sy(-Math.log10(fdr))}" y2="${sy(-Math.log10(fdr))}" stroke="#94a3b8" stroke-dasharray="4 4"/>
+    <line data-axis-ref-x="0.5" x1="${sx(0)}" x2="${sx(0)}" y1="${top}" y2="${height-bottom}" stroke="#cbd5e1"/>
+    <line data-axis-ref-x="${(-effectCutoff+maxX)/(2*maxX)}" x1="${sx(-effectCutoff)}" x2="${sx(-effectCutoff)}" y1="${top}" y2="${height-bottom}" stroke="#94a3b8" stroke-dasharray="4 4"/>
+    <line data-axis-ref-x="${(effectCutoff+maxX)/(2*maxX)}" x1="${sx(effectCutoff)}" x2="${sx(effectCutoff)}" y1="${top}" y2="${height-bottom}" stroke="#94a3b8" stroke-dasharray="4 4"/>
+    <line data-axis-ref-y="${(-Math.log10(fdr))/maxY}" x1="${left}" x2="${width-right}" y1="${sy(-Math.log10(fdr))}" y2="${sy(-Math.log10(fdr))}" stroke="#94a3b8" stroke-dasharray="4 4"/>
     ${circles}<text x="${width/2}" y="${height-7}" text-anchor="middle" class="overview-svg-small">Adjusted log2 group effect</text>
     <text x="18" y="${height/2}" text-anchor="middle" transform="rotate(-90 18 ${height/2})" class="overview-svg-small">−log10(q)</text></svg>
     <figcaption>Red: higher in case · Blue: lower in case · Gray: below chosen cutoffs. For large results, only plotted points are thinned; the counts use all rows.</figcaption></figure>`
