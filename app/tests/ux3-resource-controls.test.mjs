@@ -20,8 +20,8 @@ test('CPU budget is for future threaded-WASM, one browser science worker today',
   assert.equal(suggestedScienceThreads(8), 6)
   assert.equal(suggestedScienceThreads(2), 1)
   assert.equal(suggestedScienceThreads(1), 1)
-  assert.match(main, /Current single-worker WASM cannot use this thread budget/)
-  assert.match(main, /WASM science: 1 worker/)
+  assert.match(main, /Current analyses run one task at a time/)
+  assert.match(main, /On-device analysis/)
 })
 
 test('settings discard old hard input caps and recover invalid resource values', () => {
@@ -59,7 +59,7 @@ test('volcano drawing remains bounded without changing full scientific results',
 test('resource preferences persist without a native monitor or manual RAM requirement', () => {
   assert.match(main, /localStorage\.setItem\('4c-insight-resources'/)
   assert.doesNotMatch(main, /nativeMonitor|resource-ram|physicalRamGiB/)
-  assert.match(main, /Scientific WASM memory/)
+  assert.match(main, /Analysis memory/)
   assert.match(main, /RAM is reported only when the browser provides it/)
   assert.match(main, /id="save-resources"/)
   assert.match(main, /id="stop-science-work"/)

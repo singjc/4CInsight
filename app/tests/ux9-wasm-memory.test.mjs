@@ -69,10 +69,10 @@ test('science worker publishes memory samples before final responses', () => {
 
 test('Firefox display prioritizes engine memory rather than an unavailable-RAM warning', () => {
   assert.match(main, /id="wasm-memory-status"/)
-  assert.match(main, /Scientific WASM memory/)
+  assert.match(main, /Analysis memory/)
   assert.match(main, /info\.deviceMemoryGiB !== null \?/)
-  assert.doesNotMatch(main, /\$\{escapeHtml\(info\.memory\)\}.*WASM science: 1 worker/)
-  assert.match(main, /WASM memory is measured from the science engine, not total\/free host RAM/)
+  assert.doesNotMatch(main, /\$\{escapeHtml\(info\.memory\)\}.*On-device analysis/)
+  assert.match(main, /Analysis memory is not total or free device RAM./)
   assert.match(html, /0\.21\.0-[a-z0-9-]+/)
   assert.doesNotMatch(main, /nativeMonitor|connect-native-monitor|resource-ram/)
 })

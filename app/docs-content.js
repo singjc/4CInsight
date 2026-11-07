@@ -1,15 +1,16 @@
+import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-md5-immune-guides'
 export const methodDocs = [
   {
     id: 'local-first',
-    title: 'Local-first execution and scientific parity',
-    keywords: 'privacy wasm webassembly worker local files parity browser github pages',
-    summary: 'How 4C Insight runs analyses without uploading cohort data, and how native/byte parity is used as a release gate.',
+    title: 'Your data stays on your device',
+    keywords: 'privacy files local saved project data access sharing security',
+    summary: 'What stays private when you load data, run an analysis, or save a project.',
     body: [
-      '4C Insight references files selected on the user’s computer. Browser File objects stay local. A Web Worker reads source bytes only when a workflow needs them and calls the Rust/WebAssembly science engine.',
-      'For browser-enabled science, fixed fixtures are run through native filesystem APIs and browser byte APIs. The browser workflow is enabled only after the relevant numerical outputs agree. This parity policy is a project validation rule, not a statistical method from the literature.',
+      '4C Insight reads only files you choose from your computer. The analysis runs in this browser. Source cohort files are not uploaded to an analysis server.',
+      'The saved project contains file references, selected settings, and analysis state. It is not a copy of the original cohort files. To use a saved project later, reconnect the source folder and check that the files match.',
+      'Results saved in History stay in this browser profile. Exported files are stored only where you choose to save them. Treat exported results and metadata as research data and share them only as appropriate.',
     ],
     references: [
-      { label: 'MDN Web Docs, WebAssembly', href: 'https://developer.mozilla.org/en-US/docs/WebAssembly' },
       { label: 'Sandve et al. (2013), Ten Simple Rules for Reproducible Computational Research', href: 'https://doi.org/10.1371/journal.pcbi.1003285' },
     ],
   },
@@ -162,16 +163,17 @@ export const methodDocs = [
   },
   {
     id: 'performance',
-    title: 'Browser performance and parallel execution',
-    keywords: 'performance rayon threads wasm webassembly parallel sharedarraybuffer worker memory cpu',
-    summary: 'What runs in parallel now and what is required for true multi-core WebAssembly.',
+    title: 'Performance and large datasets',
+    keywords: 'performance browser memory cpu large dataset resource settings file size',
+    summary: 'Understand why large cohorts can take time and what the device information means.',
     body: [
-      'The browser runs the science engine in a Web Worker, which keeps heavy work off the UI thread. The current v0.21.0 WebAssembly science path is intentionally single-threaded inside Rust, even when the device reports multiple logical CPU threads. Native Rust paths already use bounded CPU parallelism for several expensive expression and repertoire operations.',
-      'True Rayon parallelism in browser WebAssembly requires a threads-enabled WASM build, SharedArrayBuffer, cross-origin isolation, thread-pool initialization, and browser feature detection. 4C Insight is already cross-origin isolated, but the build/toolchain and fallback path must be changed and revalidated before enabling this safely.',
+      'Large cohorts may take time to read and analyze. 4C Insight processes selected files on your device. You can stop a run and check its progress without sending the files to a server.',
+      'The Settings page shows CPU information when the browser makes it available. It also shows allocated analysis memory. This is an estimate of memory reserved for calculations, not the total RAM or free memory of your computer.',
+      'There is no fixed input-file size cap. Very large analyses can still use more memory than the browser can provide. Close other demanding tabs if needed. The app can release analysis memory after a run.',
     ],
     references: [
-      { label: 'Rayon documentation: WebAssembly behavior', href: 'https://docs.rs/rayon/latest/rayon/' },
-      { label: 'wasm-bindgen-rayon documentation', href: 'https://docs.rs/wasm-bindgen-rayon/latest/wasm_bindgen_rayon/' },
+      { label: 'Sandve et al. (2013), Reproducible Computational Research', href: 'https://doi.org/10.1371/journal.pcbi.1003285' },
     ],
   },
+  ...multiomicsDocs,
 ]

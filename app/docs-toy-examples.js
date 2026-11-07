@@ -1,9 +1,11 @@
+import { multiomicsToyExamples } from './docs-new-modalities.js?v=0.21.0-md5-immune-guides'
 // Explanatory examples for the 4C Insight Docs page.
 // Numbers are illustrative. They are not fitted results or scientific fixtures.
-// Keep these examples separate from the authoritative Rust/WASM algorithms.
-import { renderToyVisual, visualCaption } from './docs-toy-visuals.js?v=0.21.0-m2r3-isolated'
-export { bindToyVisualControls } from './docs-toy-visuals.js?v=0.21.0-m2r3-isolated'
+// Keep these examples separate from real cohort results.
+import { renderToyVisual, visualCaption } from './docs-toy-visuals.js?v=0.21.0-md5-immune-guides'
+export { bindToyVisualControls } from './docs-toy-visuals.js?v=0.21.0-md5-immune-guides'
 export const methodToyExamples = {
+  ...multiomicsToyExamples,
   'local-first': [
     {
       title: 'Save a project without copying its input files',
@@ -215,16 +217,16 @@ export const methodToyExamples = {
   ],
   performance: [
     {
-      title: 'Distinguish CPU capacity from active WASM workers',
-      question: 'Why can the browser show 20 logical threads but one science worker?',
+      title: 'Understand the information shown in Settings',
+      question: 'What do browser CPU and memory figures tell you?',
       columns: ['Resource', 'Illustrative reading', 'Meaning'],
-      rows: [['Browser CPU report', '20 logical threads', 'Capacity estimate'], ['Science runtime', '1 worker', 'Current WASM execution model'], ['WASM memory', '512 MiB allocated', 'Allocated linear-memory buffer, not system RAM']],
+      rows: [['Browser CPU report', '20 logical threads', 'Capacity estimate'], ['Analysis status', '1 worker', 'Runs one task at a time'], ['Analysis memory', '512 MiB allocated', 'Reserved for calculations, not total RAM']],
       steps: [
-        'The browser can expose a logical-thread count without allowing the application to use all of those threads.',
-        'The current science worker runs Rust/WASM calculations without a Rayon worker pool.',
-        'The WASM allocation metric describes engine memory only. It does not include all browser heap or physical memory.',
+        'The reported CPU count is device information. It does not guarantee that every task runs in parallel.',
+        'Analyses run one task at a time. The application keeps the interface available for other actions.',
+        'The analysis-memory figure is only the amount allocated for calculations. It does not show total device RAM.',
       ],
-      meaning: 'CPU availability, active science concurrency, and memory allocation are three different measurements.',
+      meaning: 'CPU information and analysis memory describe different device resources.',
       limit: 'Firefox does not expose exact total or available physical RAM to ordinary websites.',
     },
   ],

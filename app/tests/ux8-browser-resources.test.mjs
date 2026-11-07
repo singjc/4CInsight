@@ -40,8 +40,8 @@ test('application memory reports only its supported measurement, not host RAM', 
 test('UX8 has no native monitor download, token, localhost connection or native CI job', async () => {
   assert.match(main, /setTimeout\(\(\) => \{ void refreshAutomaticAppMemory\(\) \}, 2500\)/)
   assert.match(main, /setInterval\(\(\) => \{ void refreshAutomaticAppMemory\(\) \}, 120000\)/)
-  assert.match(main, /Scientific WASM memory/)
-  assert.match(main, /No installation or manual RAM entry is required/)
+  assert.match(main, /Analysis memory/)
+  assert.match(main, /No additional software is required/)
   assert.doesNotMatch(main, /nativeMonitor|connect-native-monitor|disconnect-native-monitor|native-monitor-token|resource-ram/)
   assert.doesNotMatch(main, /127\.0\.0\.1|http:\/\//)
   assert.doesNotMatch(ci, /native-system-monitor/)

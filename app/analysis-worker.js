@@ -98,7 +98,7 @@ async function handlePreflight(request) {
 
 async function handleMetadataInspection(request) {
   const wasm = await loadWasm()
-  if (!wasm) throw new Error('Rust/WASM is required to inspect metadata. Build or deploy app/wasm first.')
+  if (!wasm) throw new Error('Analysis tools are unavailable. Refresh the page and try again.')
   const bytes = await wasmBytes(request.file)
   const result = JSON.parse(
     wasm.inspect_metadata_json(request.file.name, bytes, request.idColumn || ''),
@@ -124,7 +124,7 @@ async function handleMetadataTable(request) {
 
 async function handleExpressionQc(request) {
   const wasm = await loadWasm()
-  if (!wasm) throw new Error('Rust/WASM is required for expression QC. Build or deploy app/wasm first.')
+  if (!wasm) throw new Error('Analysis tools are unavailable. Refresh the page and try again.')
 
   const geneFiles = request.gene?.enabled ? request.gene.files || [] : []
   const transcriptFiles = request.transcript?.enabled ? request.transcript.files || [] : []
@@ -198,7 +198,7 @@ async function handleExpressionQc(request) {
 
 async function handleMetadataColumnValues(request) {
   const wasm = await loadWasm()
-  if (!wasm) throw new Error('Rust/WASM is required to read metadata values. Build or deploy app/wasm first.')
+  if (!wasm) throw new Error('Analysis tools are unavailable. Refresh the page and try again.')
   if (!request.file || !request.column) throw new Error('Metadata file and column are required')
   const bytes = await wasmBytes(request.file)
   const result = JSON.parse(
@@ -214,7 +214,7 @@ async function handleMetadataColumnValues(request) {
 
 async function handleExpressionComparison(request) {
   const wasm = await loadWasm()
-  if (!wasm) throw new Error('Rust/WASM is required for group comparison. Build or deploy app/wasm first.')
+  if (!wasm) throw new Error('Analysis tools are unavailable. Refresh the page and try again.')
   if (!request.metadataFile) throw new Error('Select a metadata file before running a group comparison')
 
   const analyses = [
@@ -260,7 +260,7 @@ async function handleExpressionComparison(request) {
 
   for (const entry of otherOmics) {
     if (!wasm.multiomics_begin_json || !wasm.multiomics_add_sample_json || !wasm.multiomics_finish_json || !wasm.multiomics_abort || !wasm.multiomics_sample_role_json) {
-      throw new Error('The deployed WASM build does not contain the M2 corrected repertoire and immune bridge')
+      throw new Error('This analysis is unavailable in this application version. Refresh the page and try again.')
     }
     postProgress(request.requestId, completed, total, `${entry.title}: starting ${entry.files.length} local files`)
     let begun = false
@@ -309,7 +309,7 @@ async function handleExpressionComparison(request) {
 
 async function handleLongitudinalExpression(request) {
   const wasm = await loadWasm()
-  if (!wasm) throw new Error('Rust/WASM is required for longitudinal analysis. Build or deploy app/wasm first.')
+  if (!wasm) throw new Error('Analysis tools are unavailable. Refresh the page and try again.')
   if (!request.metadataFile) throw new Error('Select a metadata file before running longitudinal analysis')
 
   const analyses = [
@@ -362,7 +362,7 @@ async function handleLongitudinalExpression(request) {
 
 async function handleSignificantHits(request) {
   const wasm = await loadWasm()
-  if (!wasm) throw new Error('Rust/WASM is required for significant-hit analysis. Build or deploy app/wasm first.')
+  if (!wasm) throw new Error('Analysis tools are unavailable. Refresh the page and try again.')
   if (!request.metadataFile) throw new Error('Select a metadata file before running significant-hit analysis')
 
   const analyses = [

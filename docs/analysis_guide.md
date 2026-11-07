@@ -571,3 +571,16 @@ W5 reports:
 The heatmap z scores are for visualization only. PCA and hierarchical clustering use the normalized selected-feature values, not the display z scores.
 
 **Important interpretation rule:** these are post-selection descriptive views. The same Case/Control labels were used to select the significant features and are then shown in the PCA, dendrogram, and heatmap. Strong separation can show that the selected hit set is coherent across samples, but it is not independent validation and must not be described as held-out predictive accuracy. A generalization claim requires patient-grouped cross-validation with feature selection repeated inside each training fold.
+
+## In-app guide for five added modalities
+
+The **Docs** tab now includes an illustrated guide for **BCR repertoire**, **TCR-alpha**, **TCR-beta**, **BCR isotypes**, and **immune infiltration**. Two shared chapters explain matched-depth diversity and the meaning of clonotype sharing and repertoire distances. Each chapter includes a small visual diagram, a transparent calculation, a caution about interpretation, and links to primary literature.
+
+- **BCR/TCR repertoires:** Observed richness, Shannon diversity, clonality, matched-depth rarefaction, top-clone fraction, sharing, composition, Morisita–Horn and Jaccard distances, PCoA, and adjusted group tests.
+- **TCR alpha and beta:** Alpha chains contain V and J segments. Beta chains contain V, D, and J segments. Separate chain workbooks do not identify paired alpha–beta receptors or their antigen specificity.
+- **BCR isotypes:** CLR-transformed class compositions, Aitchison distance, robust adjusted group tests, ordination, and clustering. Proportions are not antibody concentrations.
+- **Immune infiltration:** Adjusted comparisons of ssGSEA scores and standardized-signature plots. These scores are not cell counts or percentages.
+
+The diagrams and numeric examples are explicitly synthetic. They do not enter the scientific calculations and are not inferred from the user's cohort. The in-app documentation remains searchable.
+
+The user interface describes actions and analysis results in ordinary language. Implementation details remain in the developer documentation. Source files stay on the user's device; History contains saved result snapshots, not raw files. There is no fixed input-size cap.

@@ -47,7 +47,7 @@ test('documentation is searchable and literature-backed', () => {
   assert.match(docs, /Jolliffe & Cadima/)
   assert.match(docs, /Anderson \(2001\)/)
   assert.match(docs, /Ambroise & McLachlan/)
-  assert.match(docs, /wasm-bindgen-rayon/)
+  assert.match(docs, /id: 'performance'/)
   assert.equal(methodDocs.every((section) => Array.isArray(section.references) && section.references.length > 0), true, 'every documentation section must include references')
 })
 
@@ -57,7 +57,7 @@ test('sidebar is fixed during desktop page scrolling and system info is browser-
   assert.match(resources, /nav\.hardwareConcurrency/)
   assert.match(resources, /nav\.deviceMemory/)
   assert.match(resources, /System RAM unavailable \(browser restriction\)/)
-  assert.doesNotMatch(main, /Runs on this device/)
+  assert.match(main, /On-device analysis/)
 })
 
 test('render only constructs the active workflow view', () => {

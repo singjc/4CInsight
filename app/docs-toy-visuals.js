@@ -1,5 +1,6 @@
+import { multiomicsVisualDefinitions } from './docs-new-modalities.js?v=0.21.0-md5-immune-guides'
 // Visual teaching aids for the illustrative examples in the 4C Insight Docs.
-// These diagrams are NOT output from the scientific Rust/WASM engine.
+// These diagrams are not results from your cohort.
 // Keep their numeric labels and claims consistent with docs-toy-examples.js.
 
 const C = Object.freeze({
@@ -306,20 +307,21 @@ function exclusionDiagram(id) {
   return canvas(id, 'A QC exclusion removes an observation before fitting', 'The user chooses QC_status Failed; S02 is excluded, while S01 S03 and S04 remain. The exclusion is recorded for audit.', s)
 }
 function performanceDiagram(id) {
-  let s = panel(24, 30, 632, 204, 'CPU capacity is not active science concurrency')
+  let s = panel(24, 30, 632, 204, 'Device CPU information')
   for (let i = 0; i < 20; i++) {
     const x = 53 + (i % 10) * 56, y = 87 + Math.floor(i / 10) * 41
     s += rect(x, y, 43, 29, i === 0 ? C.paleTeal : C.paleBlue, 5, i === 0 ? C.teal : C.grid)
     s += text(x + 21.5, y + 19, i + 1, { anchor: 'middle', size: 11, color: i === 0 ? C.teal : C.muted })
   }
-  s += text(52, 72, '20 browser-reported logical threads', { size: 12, weight: 700 })
+  s += text(52, 72, '20 logical CPU threads reported', { size: 12, weight: 700 })
   s += rect(50, 181, 15, 15, C.paleTeal, 3, C.teal)
-  s += text(73, 193, '1 science worker in browser WASM', { size: 12, weight: 700, color: C.teal })
-  s += text(350, 193, '512 MiB example: WASM allocation only', { size: 11, color: C.muted })
-  return canvas(id, 'Logical threads and the WASM worker are different things', 'The browser may report 20 logical CPU threads but 4C Insight currently runs one science worker. Allocated WASM memory is not physical RAM.', s)
+  s += text(73, 193, 'Analyses run one task at a time', { size: 12, weight: 700, color: C.teal })
+  s += text(350, 193, '512 MiB shown: analysis memory', { size: 11, color: C.muted })
+  return canvas(id, 'Device information and analysis memory', 'CPU counts do not guarantee parallel calculations. Analysis memory does not measure total or free device RAM.', s)
 }
 
 const chartDefinitions = {
+  ...multiomicsVisualDefinitions,
   'local-first': [{ title: 'Saved state and local file reconnection', caption: 'Only references go into the JSON; the browser must reconnect the source folder.', render: stateDiagram }],
   'file-merging': [{ title: 'Two workbooks to one expression table', caption: 'Rows match by feature ID. An extra feature is reported, not silently merged.', render: mergeDiagram }],
   'sample-metadata': [{ title: 'Sample-to-file mapping', caption: 'A biological sample ID and a source file ID can be different.', render: metadataDiagram }],
@@ -340,7 +342,7 @@ const chartDefinitions = {
   longitudinal: [{ title: 'Pairwise patient ranking AUC', caption: 'Count the times a same-patient distance is less than a different-patient distance.', render: longitudinalDiagram }],
   'significant-hits': [{ title: 'Post-selection heatmap', caption: 'Clear separation in selected features is descriptive, not independent test performance.', render: significantDiagram }],
   exclusions: [{ title: 'Sample QC exclusion', caption: 'A user-reviewed rule removes one failed sample before analysis.', render: exclusionDiagram }],
-  performance: [{ title: 'Logical CPUs versus active WASM workers', caption: 'A browser CPU count does not mean there is a 20-thread WASM pool.', render: performanceDiagram }],
+  performance: [{ title: 'CPU and memory information', caption: 'CPU availability and memory allocation describe different resources.', render: performanceDiagram }],
 }
 export function visualDefinitionCount() {
   return Object.values(chartDefinitions).reduce((sum, defs) => sum + defs.length, 0)

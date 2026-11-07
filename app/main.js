@@ -7,8 +7,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-m2r3-isolated'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-m2r3-isolated'
+import { methodDocs } from './docs-content.js?v=0.21.0-md5-immune-guides'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-md5-immune-guides'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -22,7 +22,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-m2r3-isolated'
+const APP_VERSION = '0.21.0-md5-immune-guides'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -201,7 +201,7 @@ function attachScienceWorker() {
   })
   current.addEventListener('error', (event) => {
     if (current !== worker) return
-    const error = new Error(event.message || '4C Insight analysis worker failed')
+    const error = new Error(event.message || 'Analysis stopped unexpectedly')
     for (const request of pending.values()) request.reject(error)
     pending.clear()
     current.terminate()
@@ -223,7 +223,7 @@ function stopScienceWork() {
     return
   }
   if (!pending.size) return
-  const error = new Error('Operation stopped. The science worker and its WASM memory were released.')
+  const error = new Error('Operation stopped. Allocated analysis memory was released.')
   for (const request of pending.values()) request.reject(error)
   pending.clear()
   replaceScienceWorker()
@@ -295,12 +295,12 @@ function renderSystemInfo() {
   const chip = document.querySelector('#system-chip')
   if (!chip) return
   const info = state.systemInfo
-  const threads = info.threads ? `${info.threads} browser-reported logical threads` : 'logical threads unavailable'
+  const threads = info.threads ? `${info.threads} logical CPU threads reported` : 'CPU information unavailable'
   const wasmSample = state.wasmMemorySample
-  const wasmText = wasmSample ? ` · ${humanBytes(wasmSample.peakAllocatedBytes)} WASM ${wasmSample.active ? 'allocated' : 'last worker peak'}` : ''
+  const wasmText = wasmSample ? ` · ${humanBytes(wasmSample.peakAllocatedBytes)} analysis memory ${wasmSample.active ? 'allocated' : 'last run peak'}` : ''
   const ramText = info.deviceMemoryGiB !== null ? `${info.memory} · ` : ''
-  chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(ramText)}${escapeHtml(threads)} · WASM science: 1 worker${escapeHtml(wasmText)} · Settings</small></span>`
-  chip.title = `Open Settings · Browser-only metrics; WASM memory is measured from the science engine, not total/free host RAM. ${info.crossOriginIsolated ? 'Cross-origin isolated' : 'Single-worker fallback'}. RAM is reported only when the browser provides it.`
+  chip.innerHTML = `<span class="privacy-dot"></span><span><strong>${escapeHtml(info.platform)}</strong><small>${escapeHtml(ramText)}${escapeHtml(threads)} · On-device analysis${escapeHtml(wasmText)} · Settings</small></span>`
+  chip.title = `Open Settings · CPU information is reported by your browser. Analysis memory is not total or free device RAM. RAM is reported only when the browser provides it.`
 }
 
 // Measure application memory automatically without adding host access or a service.
@@ -325,11 +325,11 @@ function appMemoryDescription(sample) {
 }
 
 function wasmMemoryDescription(sample) {
-  if (!sample) return 'Measured when the scientific WASM engine runs.'
+  if (!sample) return 'Shown after an analysis starts.'
   const amount = humanBytes(sample.peakAllocatedBytes)
   return sample.active
-    ? `${amount} allocated in science worker (highest observed allocation)`
-    : `${amount} highest allocation in last science worker (worker released)`
+    ? `${amount} allocated during analysis (highest observed)`
+    : `${amount} highest observed in last analysis (released)`
 }
 
 function fileKey(file) {
@@ -422,8 +422,8 @@ async function refreshFiles(nextFiles, preserveConfig = false) {
     }
     state.wasmReady = response.wasmReady
     state.engine = response.wasmReady
-      ? `Rust/WASM ${response.engineVersion || ''}`.trim()
-      : 'JavaScript preflight fallback'
+      ? `4C Insight ${response.engineVersion || ''}`.trim()
+      : 'Basic file check'
     resetQcStateAfterInputsChange()
     if (previousConfig) applyConfigSnapshot(previousConfig)
     applyPendingStateConfig()
@@ -451,7 +451,7 @@ async function runExpressionMerge(kind) {
     validateMergeConfig(kind, settings[kind], settings.order)
     const files = sortedMergeFiles(state.records, state.files, kind)
     if (!files.length) throw new Error(`No ${kind} workbooks are selected`)
-    if (!state.wasmReady) throw new Error('The Rust/WASM science engine must be available to merge workbooks')
+    if (!state.wasmReady) throw new Error('The Completed science engine must be available to merge workbooks')
     state.mergeBusy = true
     state.busy = true
     state.mergeProgress = `Starting ${kind} merge (${files.length} workbooks)`
@@ -994,7 +994,7 @@ function renderNav() {
 
   document.querySelector('#sidebar-status').innerHTML = `
     <span class="status-dot ${state.wasmReady ? 'ok' : ''}"></span>
-    <div><strong>${escapeHtml(state.engine)}</strong><span>${crossOriginIsolated ? 'Cross-origin isolated' : 'Single-worker compatible'}</span>${(pending.size || activeCompareController) ? '<button id="stop-science-work" class="danger-text-button">Stop operation</button>' : ''}</div>`
+    <div><strong>${escapeHtml(state.engine)}</strong><span>Ready for analysis</span>${(pending.size || activeCompareController) ? '<button id="stop-science-work" class="danger-text-button">Stop operation</button>' : ''}</div>`
 }
 
 function summaryCard(label, value, detail) {
@@ -1041,7 +1041,7 @@ function projectView() {
       ${summaryCard('Selected files', String(state.records.length), status)}
       ${summaryCard('Local data', humanBytes(totalBytes()), 'Referenced from this device')}
       ${summaryCard('Detected types', String(counts.length), 'Using 4C filename conventions')}
-      ${summaryCard('Processing', state.busy ? 'Checking…' : 'Ready', reconnect ? `${reconnect.matched.toLocaleString()}/${expected.toLocaleString()} state files matched` : 'Preflight runs in a Web Worker')}
+      ${summaryCard('Processing', state.busy ? 'Checking…' : 'Ready', reconnect ? `${reconnect.matched.toLocaleString()}/${expected.toLocaleString()} state files matched` : 'Checks selected files on this device')}
     </section>
     ${counts.length ? `<section class="card"><div class="card-heading"><div><h3>Detected data</h3><p>Review the automatic classification before you configure an analysis.</p></div></div><div class="modality-list">${counts.map(([label,count]) => `<div class="modality-pill"><span>${escapeHtml(label)}</span><strong>${count}</strong></div>`).join('')}</div></section>` : ''}
     ${projectMetadataSection()}
@@ -1156,7 +1156,7 @@ function metadataView() {
   <section class="card"><div class="card-heading"><div><h3>1. Start a metadata sheet</h3><p>Open an existing TSV, CSV, or Excel sample sheet, or build rows from detected expression and immune reports.</p></div>${table ? `<span class="tag ${editor.dirty ? 'warning' : 'success'}">${editor.dirty ? 'Unsaved draft' : 'Draft ready'}</span>` : ''}</div>
     <div class="form-grid metadata-start-grid"><label><span>Existing metadata file</span><select id="metadata-editor-source"><option value="">Select a file…</option>${candidates.map(record => `<option value="${escapeHtml(record.id)}" ${editor.sourceId === record.id ? 'selected' : ''}>${escapeHtml(record.name)}</option>`).join('')}</select></label>
     <div class="button-row metadata-start-buttons"><button id="metadata-load" class="secondary-button" ${!candidates.length || state.busy ? 'disabled' : ''}>Open selected metadata</button><button id="metadata-create" class="primary-button" ${state.busy ? 'disabled' : ''}>Create from ${sampleReports.length} files</button><button id="metadata-blank" class="secondary-button" ${state.busy ? 'disabled' : ''}>New empty sheet</button></div></div>
-    <p class="method-note">Import uses the shared Rust/WASM metadata reader. Loading a new sheet replaces the current unsaved draft. Download edited metadata before you replace it.</p>
+    <p class="method-note">Import uses the shared Completed metadata reader. Loading a new sheet replaces the current unsaved draft. Download edited metadata before you replace it.</p>
     ${editor.status ? `<div class="notice-banner" role="status"><strong>Metadata</strong><span>${escapeHtml(editor.status)}</span></div>` : ''}
   </section>
   ${table ? `<section class="summary-grid metadata-summary-grid" aria-label="Metadata checks">
@@ -1196,7 +1196,7 @@ function projectMergeSection() {
       ${report ? `<small>${report.samples} samples · ${report.rows} features · missing ${report.missingRows} · unknown ${report.unknownRows} · ${humanBytes(report.bytes)}</small>` : ''}
     </div>`
   }).join('')
-  return `<section class="card"><div class="card-heading"><div><h3>Merge individual expression workbooks</h3><p>Local Rust/WASM merger. One XLSX workbook at a time, with browser-local temporary files. Generated TSV tables are available immediately to downstream workflows.</p></div><span class="tag success">No upload</span></div>
+  return `<section class="card"><div class="card-heading"><div><h3>Merge individual expression workbooks</h3><p>Local Completed merger. One XLSX workbook at a time, with browser-local temporary files. Generated TSV tables are available immediately to downstream workflows.</p></div><span class="tag success">No upload</span></div>
     <div class="form-grid merge-settings-grid"><label><span>Output column order</span><select id="merge-column-order" ${state.mergeBusy ? 'disabled' : ''}>
       <option value="adjacent-by-sample" ${state.mergeSettings.order === 'adjacent-by-sample' ? 'selected' : ''}>Measurements adjacent by sample</option>
       <option value="grouped-by-measurement" ${state.mergeSettings.order === 'grouped-by-measurement' ? 'selected' : ''}>Samples grouped by measurement</option>
@@ -1236,7 +1236,7 @@ function expressionConfiguration(kind, title, records, enabled, metric, options)
 
 function metadataSummaryView() {
   if (state.metadataInspectBusy) {
-    return `<section class="card"><div class="inline-status"><span class="spinner" aria-hidden="true"></span><div><strong>Reading metadata locally</strong><span>The selected file is being parsed in the Rust/WASM worker.</span></div></div></section>`
+    return `<section class="card"><div class="inline-status"><span class="spinner" aria-hidden="true"></span><div><strong>Reading metadata locally</strong><span>Reading the selected metadata file.</span></div></div></section>`
   }
   const metadata = state.metadataInspection
   if (!metadata) return ''
@@ -1261,7 +1261,7 @@ function expressionResultSection(title, rows) {
   const medians = rows.map((row) => row.median).filter((value) => value !== null && value !== undefined).sort((a, b) => a - b)
   const medianOfMedians = medians.length ? medians[Math.floor((medians.length - 1) / 2)] : null
   return `<section class="card table-card">
-    <div class="card-heading"><div><h3>${title}</h3><p>${rows.length} samples · ${escapeHtml(rows[0].metric.replaceAll('-', ' '))} · sample workbooks processed one at a time</p></div><span class="tag success">Rust/WASM</span></div>
+    <div class="card-heading"><div><h3>${title}</h3><p>${rows.length} samples · ${escapeHtml(rows[0].metric.replaceAll('-', ' '))} · sample workbooks processed one at a time</p></div><span class="tag success">Completed</span></div>
     <div class="summary-grid compact-grid">
       ${summaryCard('Samples', rows.length, 'Successfully parsed workbooks')}
       ${summaryCard('Typical median', formatNumber(medianOfMedians), 'Median of sample medians')}
@@ -1284,9 +1284,9 @@ function qcView() {
     Boolean(state.qcConfig.metadataId)
   )
 
-  return `<section class="page-heading"><div><span class="eyebrow">Explore & QC · W2</span><h2>Inspect metadata and expression quality</h2><p>4C Insight reads each selected workbook inside the local Web Worker, runs the parser and distribution calculations in Rust/WASM, and releases the source buffer before moving to the next sample.</p></div><div class="local-card"><strong>No upload</strong><span>Only local file handles and local WASM memory are used during this workflow.</span></div></section>
+  return `<section class="page-heading"><div><span class="eyebrow">Explore & QC · W2</span><h2>Inspect metadata and expression quality</h2><p>Review the quality of each expression sample before you compare groups. Files are processed on your device, one at a time.</p></div><div class="local-card"><strong>No upload</strong><span>Your selected files remain on your device.</span></div></section>
   ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
-  ${!state.wasmReady ? `<div class="notice-banner" role="status"><strong>Rust/WASM is not loaded.</strong><span>W2 scientific execution is disabled until the WASM package exists in <code>app/wasm/</code>. Filename preflight can still use the JavaScript fallback.</span></div>` : ''}
+  ${!state.wasmReady ? `<div class="notice-banner" role="status"><strong>Analysis tools are not ready.</strong><span>Refresh this page. If the issue continues, check that the application is fully deployed.</span></div>` : ''}
   <section class="card"><div class="card-heading"><div><h3>Configure local QC</h3><p>Use the metadata roles that match this cohort. Expression QC is independent of Case/Control grouping.</p></div><span class="tag neutral">W2</span></div>
     <div class="config-grid">
       ${metadataConfiguration(metadataRecords)}
@@ -1773,7 +1773,7 @@ function comparisonResultSection(title, result) {
   const controlLabel = result.comparison?.control_label || 'Control'
   const significant = (analysis.tests || []).filter((row) => Number.isFinite(Number(row.q_value)) && Number(row.q_value) <= state.globalThresholds.fdr && Math.abs(Number(row.beta_group)) >= state.globalThresholds.absLog2Fc).length
   return `<section class="card comparison-result">
-    <div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(result.source_metric)} · corrected native/WASM-parity expression model</p></div><span class="tag success">Rust/WASM</span></div>
+    <div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(result.source_metric)} · corrected count-based analysis</p></div><span class="tag success">Completed</span></div>
     <div class="summary-grid compact-grid">
       ${summaryCard('Model samples', analysis.n_model_samples, `${analysis.n_subjects} subject/patient IDs`)}
       ${summaryCard('Tested features', analysis.tested_features.toLocaleString(), `${analysis.filtered_features.toLocaleString()} filtered before modeling`)}
@@ -1790,7 +1790,7 @@ function comparisonResultSection(title, result) {
 
 function otherOmicsControls() {
   const cfg = state.compareConfig
-  return `<section class="card"><div class="card-heading"><div><h3>4. Repertoire, isotype, and immune analyses</h3><p>Analyze selected modalities with the original corrected Rust methods. Missing modalities do not remove samples from other analyses.</p></div><span class="tag neutral">Rust/WASM · staged source</span></div>
+  return `<section class="card"><div class="card-heading"><div><h3>4. Repertoire, isotype, and immune analyses</h3><p>Select the receptor and immune analyses to include. If one data type is unavailable, the others can still run.</p></div><span class="tag neutral">Select analyses</span></div>
     <div class="config-grid expression-source-grid">${otherOmics.map(([kind, title, enabledKey, , description]) => {
       const files = recordsOfKind(kind)
       return `<div class="config-block ${files.length ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="compare-${kind}-enabled" type="checkbox" ${cfg[enabledKey] && files.length ? 'checked' : ''} ${files.length ? '' : 'disabled'} /><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span></label><span class="tag ${files.length ? 'success' : 'neutral'}">${files.length} files</span></div></div>`
@@ -1801,7 +1801,7 @@ function otherOmicsControls() {
       <label><span>Maximum matched depth</span><input id="compare-repertoire-cap" type="number" min="100" max="1000000" value="${cfg.repertoireRarefactionCap || 50000}" /></label>
       <label><span>PERMANOVA permutations</span><input id="compare-repertoire-permutations" type="number" min="1" max="9999" value="${cfg.repertoirePermutations || 499}" /></label></div>
       <label class="check-label"><input id="compare-isotype-determined" type="checkbox" ${cfg.excludeUndeterminedIsotype ? 'checked' : ''} /><span>Exclude Undetermined from isotype composition and renormalize</span></label>
-      <p>The default settings match the original native corrected analysis. Scientific testing must confirm native/WASM parity before deployment.</p>
+      <p>Change these settings only when they fit your study design. They affect receptor and composition comparisons.</p>
     </details>
   </section>`
 }
@@ -1816,8 +1816,8 @@ function multiomicsResultSection(title, result, plotPrefix) {
   const linkage = analysis.dendrogram
   const comps = isRepertoire ? (analysis.compositions || []) : []
   const compare = result.comparison || {}
-  return `<section class="card comparison-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>Corrected native Rust method through local WASM · ${isRepertoire ? 'matched-depth repertoire analysis' : isImmune ? 'ssGSEA signatures' : 'CLR isotype composition'}</p></div><span class="tag success">Rust/WASM</span></div>
-    <div class="summary-grid compact-grid">${summaryCard('Usable samples', analysis.files_used || 0, 'Complete-case scientific inputs')}${summaryCard('Adjusted tests', tests.length, 'Original Rust statistical engine')}${isRepertoire ? summaryCard('Matched depth', analysis.matched_depth, `${analysis.rarefaction_reps} repetitions`) : ''}${summaryCard('Excluded metadata rows', compare.excluded_rows || 0, 'Applied before sample matching')}</div>
+  return `<section class="card comparison-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>Corrected analysis · ${isRepertoire ? 'matched-depth repertoire analysis' : isImmune ? 'ssGSEA signatures' : 'CLR isotype composition'}</p></div><span class="tag success">Completed</span></div>
+    <div class="summary-grid compact-grid">${summaryCard('Usable samples', analysis.files_used || 0, 'Complete-case scientific inputs')}${summaryCard('Adjusted tests', tests.length, 'Adjusted group tests')}${isRepertoire ? summaryCard('Matched depth', analysis.matched_depth, `${analysis.rarefaction_reps} repetitions`) : ''}${summaryCard('Excluded metadata rows', compare.excluded_rows || 0, 'Applied before sample matching')}</div>
     ${(result.skippedFilesOutsideGroups || 0) ? `<p class="method-note">${result.skippedFilesOutsideGroups} source files were not in the selected case/control groups.</p>` : ''}
     ${analysis.warnings?.length ? `<div class="analysis-warnings">${analysis.warnings.map(w => `<div>${escapeHtml(w)}</div>`).join('')}</div>` : ''}
     <div class="plot-grid"><article class="plot-card"><div class="plot-heading"><strong>${isRepertoire ? 'Morisita–Horn ordination' : isImmune ? 'Immune signature PCA' : 'Isotype Aitchison ordination'}</strong><span>Sample structure; descriptive group comparisons.</span></div>${pcaSvg(ord, `${plotPrefix}-ordination`, compare.case_label || 'Case', compare.control_label || 'Control')}</article>
@@ -1854,7 +1854,7 @@ function compareView() {
           : ''
   const runnable = state.wasmReady && !state.busy && metadataReady && Boolean(cfg.groupColumn) && cfg.caseValues.length > 0 && cfg.controlValues.length > 0 && !overlap && modalityReady && exclusionReady
 
-  return `<section class="page-heading"><div><span class="eyebrow">Compare Groups · W3</span><h2>Define a cohort comparison from metadata</h2><p>Select the metadata roles and group values that match this cohort. 4C Insight runs the established corrected count model, PCA, and hierarchical clustering inside the local Rust/WASM worker.</p></div><div class="local-card"><strong>Same science, local bytes</strong><span>The native and byte/WASM paths share the corrected-expression implementation.</span></div></section>
+  return `<section class="page-heading"><div><span class="eyebrow">Compare Groups · W3</span><h2>Define a cohort comparison from metadata</h2><p>Select the metadata roles and group values that match this cohort. Select your groups and choose the analyses to run. Review adjusted differences, sample patterns, and clustering.</p></div><div class="local-card"><strong>Data stays on your device</strong><span>Your selected source files are not uploaded.</span></div></section>
   ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
   ${!metadataRecords.length ? '<div class="notice-banner"><strong>Metadata required.</strong><span>Select a metadata file in the Project tab before defining groups.</span></div>' : ''}
   ${metadata && (!metadataReady) ? `<div class="notice-banner"><strong>Resolve metadata IDs first.</strong><span>The selected ID column has ${metadata.blank_id_rows} blank row(s) and ${metadata.duplicate_id_values.length} duplicate value(s).</span></div>` : ''}
@@ -1986,7 +1986,7 @@ function longitudinalResultSection(title, result) {
   const warnings = [...new Set([...(result.warnings || []), ...(modality.warnings || [])])]
   const annotationId = title.toLowerCase().startsWith('gene') ? 'gene-annotations' : 'transcript-annotations'
   dynamicTableSources.set(annotationId, { rows: modality.annotations || [], cells: longitudinalAnnotationCells, rowHtml: longitudinalAnnotationRow })
-  return `<section class="card comparison-result longitudinal-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(modality.distance_label)} · patient identity is not used to construct the distance matrix.</p></div><span class="tag success">Rust/WASM</span></div>
+  return `<section class="card comparison-result longitudinal-result"><div class="card-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(modality.distance_label)} · patient identity is not used to construct the distance matrix.</p></div><span class="tag success">Completed</span></div>
     <div class="summary-grid compact-grid">
       ${summaryCard('Samples', modality.samples, `${modality.patients} patient/person IDs`)}
       ${summaryCard('Longitudinal patients', modality.longitudinal_patients, `${modality.longitudinal_samples} samples from patients with ≥2 observations`)}
@@ -2348,25 +2348,25 @@ function settingsView() {
   const info = state.systemInfo || detectSystemInfo()
   const suggested = info.threads ? suggestedScienceThreads(info.threads, r) : 1
   const sampleText = appMemoryDescription(state.appMemorySample)
-  return `<section class="page-heading"><div><span class="eyebrow">Global settings</span><h2>Browser resource controls</h2><p>Settings apply to this browser profile, not to saved cohort states. Local scientific input files have no fixed size cap.</p></div><div class="local-card"><strong>Science execution</strong><span>Current browser WASM: one worker, not Rayon</span></div></section>
+  return `<section class="page-heading"><div><span class="eyebrow">Global settings</span><h2>Performance settings</h2><p>Settings apply to this browser profile, not to saved cohort states. Local scientific input files have no fixed size cap.</p></div><div class="local-card"><strong>Analysis</strong><span>Runs analyses on this device</span></div></section>
     ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
-    <section class="card"><div class="card-heading"><div><h3>CPU and worker use</h3><p>Reserve part of the available logical CPU capacity for other work.</p></div></div>
+    <section class="card"><div class="card-heading"><div><h3>CPU information</h3><p>Reserve part of the available logical CPU capacity for other work.</p></div></div>
       <div class="form-grid resource-grid">
-        <label><span>CPU use target (%)</span><input id="resource-cpu" type="number" min="10" max="90" step="5" value="${r.cpuPercent}" /></label>
-        <label><span>Maximum science threads (future PX1)</span><input id="resource-threads" type="number" min="1" max="32" step="1" value="${r.maxThreads}" /></label>
+        <label><span>CPU preference (%) (planned)</span><input id="resource-cpu" type="number" min="10" max="90" step="5" value="${r.cpuPercent}" /></label>
+        <label><span>Preferred CPU threads (planned)</span><input id="resource-threads" type="number" min="1" max="32" step="1" value="${r.maxThreads}" /></label>
       </div>
-      <p class="method-note">${info.threads ? `${info.threads} browser-reported logical threads; planned PX1 ceiling: ${suggested} threads.` : 'Logical CPU count is unavailable.'} Current single-worker WASM cannot use this thread budget. A separate threaded-WASM build is required. These controls do not set a system CPU quota.</p>
+      <p class="method-note">${info.threads ? `${info.threads} logical CPU threads reported; configured preference: ${suggested} threads.` : 'Logical CPU count is unavailable.'} Current analyses run one task at a time. This preference does not set a system-wide CPU limit.</p>
     </section>
-    <section class="card"><div class="card-heading"><div><h3>Memory information and display limits</h3><p>Local input files are never rejected because of their size or an estimated copy budget. Large inputs can still exhaust the browser's WASM memory.</p></div></div>
+    <section class="card"><div class="card-heading"><div><h3>Memory information and display limits</h3><p>Local input files are never rejected because of their size or an estimated copy budget. Very large inputs can still exceed the memory available to this page.</p></div></div>
       <div class="form-grid resource-grid">
         <label><span>Maximum volcano points drawn</span><input id="resource-points" type="number" min="200" max="6000" step="200" value="${r.maxPlotPoints}" /></label>
       </div>
-      <div class="resource-memory-status" role="status" aria-live="polite"><strong>Scientific WASM memory</strong><span id="wasm-memory-status">${escapeHtml(wasmMemoryDescription(state.wasmMemorySample))}</span><small>Allocated WebAssembly linear-memory buffer. This includes unused WASM pages, but excludes JS objects, file copies, and other browser processes. Samples are taken between scientific stages; not a full process-memory or instantaneous peak measurement.</small></div>
+      <div class="resource-memory-status" role="status" aria-live="polite"><strong>Analysis memory</strong><span id="wasm-memory-status">${escapeHtml(wasmMemoryDescription(state.wasmMemorySample))}</span><small>Memory reserved for calculations. This does not include all browser or device memory. Values are sampled between analysis steps.</small></div>
       ${info.deviceMemoryGiB !== null ? `<div class="resource-memory-status"><strong>Device RAM class (browser estimate)</strong><span>${escapeHtml(info.memory)}</span><small>${escapeHtml(info.memoryNote)}</small></div>` : ''}
       ${state.appMemorySample?.available ? `<div class="resource-memory-status" role="status" aria-live="polite"><strong>Browser app memory estimate</strong><span id="automatic-memory-status">${escapeHtml(sampleText)}</span><small>Not total or free system RAM.</small></div>` : ''}
-      <p class="method-note">Firefox does not expose total/free host RAM. CPU capacity and WASM memory are reported without installing software. No installation or manual RAM entry is required.</p>
+      <p class="method-note">Some browsers do not report total or free device RAM. No additional software is required.</p>
       ${state.appMemorySample?.available ? `<div class="button-row"><button id="measure-app-memory" class="secondary-button" ${state.appMemoryBusy ? 'disabled' : ''}>${state.appMemoryBusy ? 'Measuring…' : 'Refresh app memory'}</button></div>` : ''}
-      <label class="resource-check"><input id="resource-recycle" type="checkbox" ${r.recycleWorker ? 'checked' : ''}/> <span>Release the science worker and WASM memory after each completed analysis (recommended).</span></label>
+      <label class="resource-check"><input id="resource-recycle" type="checkbox" ${r.recycleWorker ? 'checked' : ''}/> <span>Release analysis memory after each completed run (recommended).</span></label>
       <div class="button-row resource-actions"><button id="save-resources" class="primary-button">Apply settings</button><button id="reset-resources" class="secondary-button">Reset defaults</button></div>
     </section>`
 }
@@ -2718,7 +2718,7 @@ async function runGroupComparison() {
   try {
     for (const step of steps) {
       if (controller.signal.aborted) break
-      updateCompareProgress(completed, steps.length, `${step.title}: initializing isolated WASM worker`)
+      updateCompareProgress(completed, steps.length, `${step.title}: initializing isolated analysis task`)
       try {
         const response = await isolatedScienceRequest({
           createWorker: () => new Worker(new URL(`./analysis-worker.js?v=${APP_VERSION}`, import.meta.url), { type: 'module' }),

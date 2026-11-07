@@ -11,8 +11,8 @@ import {
 
 const read = (f) => readFile(new URL(`../${f}`, import.meta.url), 'utf8')
 
-test('every one of the 15 worked examples has an accessible, matching visual', () => {
-  assert.equal(visualDefinitionCount(), 15)
+test('every one of the 22 worked examples has an accessible, matching visual', () => {
+  assert.equal(visualDefinitionCount(), 22)
   let count = 0
   for (const section of methodDocs) {
     const examples = methodToyExamples[section.id]
@@ -34,7 +34,7 @@ test('every one of the 15 worked examples has an accessible, matching visual', (
       count += 1
     }
   }
-  assert.equal(count, 15)
+  assert.equal(count, 22)
 })
 
 test('toy normalization, BH, CLR, clustering, AUC and PCA chart facts match teaching examples', () => {
@@ -105,9 +105,9 @@ test('visual examples are client-only and scripts use one consistent cache revis
   assert.match(styles, /\.docs-visual-svg\s*\{/)
   assert.match(styles, /\.docs-toy-math\s*\{/)
   const v = main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(v, '0.21.0-m2r3-isolated')
+  assert.equal(v, '0.21.0-md5-immune-guides')
   assert.doesNotMatch(main, /from ['"]\.\/docs-toy-visuals/) // imported through docs-toy-examples
-  assert.match(examples, /docs-toy-visuals\.js\?v=0\.21\.0-m2r3-isolated/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-m2r3-isolated/)
-  assert.match(html, /main\.js\?v=0\.21\.0-m2r3-isolated/)
+  assert.match(examples, /docs-toy-visuals\.js\?v=0\.21\.0-md5-immune-guides/)
+  assert.match(html, /styles\.css\?v=0\.21\.0-md5-immune-guides/)
+  assert.match(html, /main\.js\?v=0\.21\.0-md5-immune-guides/)
 })
