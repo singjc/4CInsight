@@ -67,9 +67,10 @@ test('banner buttons are keyboard accessible and fit smaller windows', () => {
 })
 
 test('main, stylesheet and HTML use one cache revision', () => {
-  const rev = '0.21.0-ux15-feedback'
-  assert.match(main, /const APP_VERSION = '0\.21\.0-ux15-feedback'/)
-  assert.match(html, /main\.js\?v=0\.21\.0-ux15-feedback/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-ux15-feedback/)
+  const rev = main.match(/const APP_VERSION = '([^']+)'/)?.[1]
+  assert.ok(rev, 'Application cache version must be defined')
+  assert.equal(main.match(/const APP_VERSION = '([^']+)'/)?.[1], rev, 'Current application version must match')
+  assert.ok(html.includes(`main.js?v=${rev}`), 'Banner script must match the current cache version')
+  assert.ok(html.includes(`styles.css?v=${rev}`), 'Banner stylesheet must match the current cache version')
   assert.doesNotMatch(main, /0\.21\.0-ux12-true-axis-zoom/)
 })

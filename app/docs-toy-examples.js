@@ -1,9 +1,9 @@
-import { multiomicsToyExamples } from './docs-new-modalities.js?v=0.21.0-ux15-feedback'
+import { multiomicsToyExamples } from './docs-new-modalities.js?v=0.21.0-h0-adjusted-omics-review'
 // Explanatory examples for the 4C Insight Docs page.
 // Numbers are illustrative. They are not fitted results or scientific fixtures.
 // Keep these examples separate from real cohort results.
-import { renderToyVisual, visualCaption } from './docs-toy-visuals.js?v=0.21.0-ux15-feedback'
-export { bindToyVisualControls } from './docs-toy-visuals.js?v=0.21.0-ux15-feedback'
+import { renderToyVisual, visualCaption } from './docs-toy-visuals.js?v=0.21.0-h0-adjusted-omics-review'
+export { bindToyVisualControls } from './docs-toy-visuals.js?v=0.21.0-h0-adjusted-omics-review'
 export const methodToyExamples = {
   ...multiomicsToyExamples,
   'local-first': [

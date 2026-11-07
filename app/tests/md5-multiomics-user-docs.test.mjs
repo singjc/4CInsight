@@ -89,7 +89,7 @@ test('browser cache version is uniform for assets and illustrated modules', asyn
     src('main.js'),src('index.html'),src('docs-toy-examples.js'),src('docs-toy-visuals.js'),src('docs-content.js')
   ])
   const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(version,'0.21.0-ux15-feedback')
+  assert.equal(version,'0.21.0-h0-adjusted-omics-review')
   assert.ok(html.includes(`main.js?v=${version}`))
   assert.ok(html.includes(`styles.css?v=${version}`))
   assert.ok(main.includes(`docs-content.js?v=${version}`))

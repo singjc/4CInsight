@@ -105,9 +105,9 @@ test('visual examples are client-only and scripts use one consistent cache revis
   assert.match(styles, /\.docs-visual-svg\s*\{/)
   assert.match(styles, /\.docs-toy-math\s*\{/)
   const v = main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(v, '0.21.0-ux15-feedback')
+  assert.ok(v && /^\d+\.\d+\.\d+[A-Za-z0-9.+_-]*$/.test(v), 'Application cache version must be defined')
   assert.doesNotMatch(main, /from ['"]\.\/docs-toy-visuals/) // imported through docs-toy-examples
-  assert.match(examples, /docs-toy-visuals\.js\?v=0\.21\.0-ux15-feedback/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-ux15-feedback/)
-  assert.match(html, /main\.js\?v=0\.21\.0-ux15-feedback/)
+  assert.ok(examples.includes(`docs-toy-visuals.js?v=${v}`), 'Toy visual import must match the current cache version')
+  assert.ok(html.includes(`styles.css?v=${v}`), 'Stylesheet must match the current cache version')
+  assert.ok(html.includes(`main.js?v=${v}`), 'Application script must match the current cache version')
 })
