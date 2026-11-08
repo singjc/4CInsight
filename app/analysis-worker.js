@@ -2,7 +2,8 @@ import { classifyInputFilename } from './file-classifier.js'
 import { validateLocalInputFile } from './resource-controls.js'
 import { measureWasmAllocation } from './wasm-memory.js'
 import { runPortableMerge } from './merge-worker.js'
-import { analyzeJointStructure } from './joint-structure.js?v=0.22.1'
+import { analyzeJointStructure } from './joint-structure.js?v=0.22.2'
+import { runPatientStabilityAsync } from './joint-stability.js?v=0.22.2'
 
 let wasmModulePromise = null
 let wasmMemory = null
@@ -495,6 +496,12 @@ self.addEventListener('message', async (event) => {
       }
       postWasmMemory(request.requestId, true)
       self.postMessage({ type: 'i2b-source-distance-result', requestId: request.requestId, view })
+      return
+    }
+    if (request.type === 'run-joint-stability') {
+      const result = await runPatientStabilityAsync(request.structure, request.patients,
+        request.options || {}, (completed,total,message) => postProgress(request.requestId,completed,total,message))
+      self.postMessage({ type: 'joint-stability-result', requestId: request.requestId, result })
       return
     }
     if (request.type === 'run-joint-structure') {

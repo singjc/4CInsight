@@ -9,6 +9,7 @@ pub mod hit_structure;
 pub mod hit_structure_core;
 pub mod input_conventions;
 pub mod integrative_distance;
+pub mod joint_structure_reference;
 pub mod longitudinal;
 pub mod metadata;
 pub mod outliers;

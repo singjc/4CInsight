@@ -35,6 +35,9 @@ mod input_conventions;
 #[allow(dead_code)]
 #[path = "../../src/integrative_distance.rs"]
 mod integrative_distance;
+#[allow(dead_code)]
+#[path = "../../src/joint_structure_reference.rs"]
+mod joint_structure_reference;
 #[path = "../../src/longitudinal.rs"]
 mod longitudinal;
 #[allow(dead_code)]
@@ -99,6 +102,13 @@ fn kind_slug(kind: FilenameInputKind) -> &'static str {
 #[wasm_bindgen]
 pub fn fuse_integrative_distances_json(input_json: &str) -> Result<String, JsValue> {
     integrative_distance::fuse_distances_json(input_json).map_err(js_error)
+}
+
+/// Independent Rust reference for joint PCoA and hierarchical clustering.
+/// Used to test numerical agreement with the browser worker. No labels enter.
+#[wasm_bindgen]
+pub fn reference_joint_structure_json(input_json: &str) -> Result<String, JsValue> {
+    joint_structure_reference::reference_joint_structure_json(input_json).map_err(js_error)
 }
 
 // I2B: a separate unsupervised byte session for each modality. It reuses the

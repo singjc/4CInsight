@@ -1,13 +1,13 @@
-import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.1'
-import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.1'
-import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.1'
-import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.1'
-import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.1'
-import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.1'
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.1'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.1'
-import { renderResultsOverview } from './results-overview.js?v=0.22.1'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.1'
+import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.2'
+import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.2'
+import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.2'
+import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.2'
+import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.2'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.2'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.2'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.2'
+import { renderResultsOverview } from './results-overview.js?v=0.22.2'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.2'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -17,8 +17,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.22.1'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.1'
+import { methodDocs } from './docs-content.js?v=0.22.2'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.2'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -32,7 +32,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.22.1'
+const APP_VERSION = '0.22.2'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -122,6 +122,11 @@ const state = {
   i2Error: '',
   i2MinViews: 2,
   i2StructureResult: null,
+  jointStabilityResult: null,
+  jointStabilityBusy: false,
+  jointStabilityError: '',
+  jointStabilityProgress: '',
+  jointStabilityConfig: { clusters: 3, repeats: 40, fraction: 0.8, seed: 20261108 },
   i2StructureBusy: false,
   i2StructureError: '',
   i2StructureSelection: {},
@@ -2795,6 +2800,7 @@ async function runJointStructure() {
   const views=i2AvailableViews().filter(v=>state.i2StructureSelection[v.modality]!==false)
   if(views.length<2){state.i2StructureError='Select at least two measured data types';render();return}
   state.i2StructureResult=null
+  state.jointStabilityResult=null
   state.i2StructureError=''
   state.i2StructureBusy=true
   state.busy=true
@@ -2853,13 +2859,98 @@ function bindJointStructureEvents() {
   mountJointHeatmapViewer(state.i2StructureResult)
 }
 
+// Patient-level cluster sensitivity uses the unchanged complete joint distance
+// matrix and does not read case/control assignments or selected hits.
+function jointStabilityPanel() {
+  const structure=state.i2StructureResult
+  if(!structure)return ''
+  const cfg=state.jointStabilityConfig
+  const outcome=state.jointStabilityResult
+  const disabled=state.jointStabilityBusy||state.busy||!state.alignmentPreview
+  const filled=structure.observations.every(id=>{
+    const row=state.alignmentPreview?.rows?.find(r=>r.observation===id)
+    return typeof row?.subject==='string'&&row.subject.trim().length>0
+  })
+  let content=''
+  if(outcome){
+    const ari=outcome.adjusted_rand, pair=outcome.pair_support
+    content=`<div class="summary-grid compact-grid">
+      ${summaryCard('Mean cluster agreement',formatNumber(ari.mean,3),'Adjusted Rand index across repeats')}
+      ${summaryCard('Median cluster agreement',formatNumber(ari.median,3),`${outcome.repeats} patient-level repeats`)}
+      ${summaryCard('Within-cluster agreement',pair.within_cluster_coassignment===null?'—':`${(100*pair.within_cluster_coassignment).toFixed(1)}%`,'Co-assigned pairs, when both patients are selected')}
+      ${summaryCard('Between-cluster separation',pair.between_cluster_separation===null?'—':`${(100*pair.between_cluster_separation).toFixed(1)}%`,'Pairs from different original clusters that remain separate')}
+    </div>
+    <div class="table-scroll"><table><thead><tr><th>Original cluster</th><th>Observations</th><th>Patients</th><th>Measured pairs</th><th>Co-assignment</th></tr></thead><tbody>${outcome.clusters_summary.map(row=>`<tr><td>${row.cluster}</td><td>${row.observations}</td><td>${row.patients}</td><td>${row.informative_pairs}</td><td>${row.within_cluster_coassignment===null?'Unavailable':`${(100*row.within_cluster_coassignment).toFixed(1)}%`}</td></tr>`).join('')}</tbody></table></div>
+    <p class="method-note">${outcome.patients} unique patients; ${outcome.sampled_patients_per_repeat} selected per repeat. ${outcome.patients_with_repeated_visits} patients have repeated observations; ${outcome.patients_crossing_original_clusters} have visits in different original clusters.</p>
+    ${outcome.warnings.map(item=>`<p class="method-note">${escapeHtml(item)}</p>`).join('')}
+    <div class="button-row"><button id="joint-stability-export" class="secondary-button" type="button">Save patient stability JSON</button></div>`
+  }
+  return `<section class="card joint-stability" id="joint-stability"><div class="card-heading"><div><h3>Patient-level cluster stability</h3><p>Check whether the joint clusters remain similar when distinct patients are subsampled. Each repeat uses one eligible visit per patient. Distances and source features are not recalculated.</p></div><span class="tag neutral">Sensitivity analysis</span></div>
+    <div class="form-grid joint-stability-settings">
+      <label><span>Number of clusters to compare</span><input id="joint-stability-k" type="number" min="2" max="12" step="1" value="${cfg.clusters}"/></label>
+      <label><span>Independent patient subsets</span><input id="joint-stability-repeats" type="number" min="10" max="500" step="1" value="${cfg.repeats}"/></label>
+      <label><span>Fraction of patients per subset</span><select id="joint-stability-fraction"><option value="0.7" ${cfg.fraction===0.7?'selected':''}>70%</option><option value="0.8" ${cfg.fraction===0.8?'selected':''}>80%</option><option value="0.9" ${cfg.fraction===0.9?'selected':''}>90%</option></select></label>
+      <label><span>Reproducible random seed</span><input id="joint-stability-seed" type="number" min="0" max="4294967295" step="1" value="${cfg.seed}"/></label>
+    </div>
+    ${!filled?'<p class="notice-banner">Patient IDs are required for every fitted observation. Select an exact patient ID column in Sample alignment and run alignment again.</p>':''}
+    <div class="run-row"><div><strong>Compare clusters across patient subsets</strong><span>Reports adjusted Rand agreement and pair co-assignment. This tests sensitivity to patient composition, not clinical validity or out-of-sample prediction.</span></div><button type="button" id="joint-stability-run" class="primary-button" ${disabled||!filled?'disabled':''}>${state.jointStabilityBusy?'Analyzing patient subsets…':'Analyze cluster stability'}</button></div>
+    ${state.jointStabilityProgress?`<p class="method-note" role="status">${escapeHtml(state.jointStabilityProgress)}</p>`:''}
+    ${state.jointStabilityError?`<div class="analysis-warnings" role="alert">${escapeHtml(state.jointStabilityError)}</div>`:''}
+    ${content}
+    <p class="method-note">Choose the number of clusters before the analysis. Cluster assignments are descriptive and depend on the fixed-view cohort. No phenotype labels enter the fit. Low agreement calls for further source-level and quality-control review.</p>
+  </section>`
+}
+async function runJointStability() {
+  if(!state.i2StructureResult||!state.alignmentPreview||state.jointStabilityBusy||state.busy)return
+  const cfg={...state.jointStabilityConfig}
+  const patients=Object.fromEntries(state.alignmentPreview.rows.filter(row=>!row.excluded).map(row=>[row.observation,row.subject||'']))
+  state.jointStabilityBusy=true
+  state.busy=true
+  state.jointStabilityError=''
+  state.jointStabilityResult=null
+  state.jointStabilityProgress='Preparing patient subsets'
+  render()
+  try {
+    const response=await workerRequest('run-joint-stability',{
+      structure:state.i2StructureResult, patients, options:cfg,
+    },progress=>{
+      state.jointStabilityProgress=progress.message
+      const status=document.querySelector('#joint-stability [role="status"]')
+      if(status)status.textContent=progress.message
+    })
+    if(response.type!=='joint-stability-result'||response.result?.schema!=='4c-insight-patient-stability-v1')throw new Error('Unexpected patient stability result')
+    state.jointStabilityResult=response.result
+  }catch(error){state.jointStabilityError=error instanceof Error?error.message:String(error)}
+  finally{state.jointStabilityBusy=false;state.busy=false;state.jointStabilityProgress='';render()}
+}
+function bindJointStabilityEvents() {
+  const controls={
+    'joint-stability-k':'clusters',
+    'joint-stability-repeats':'repeats',
+    'joint-stability-fraction':'fraction',
+    'joint-stability-seed':'seed',
+  }
+  for(const [id,key] of Object.entries(controls))document.querySelector(`#${id}`)?.addEventListener('change',event=>{
+    const value=Number(event.currentTarget.value)
+    if(!Number.isFinite(value))return
+    state.jointStabilityConfig[key]=value
+    state.jointStabilityResult=null;state.jointStabilityError='';render()
+  })
+  document.querySelector('#joint-stability-run')?.addEventListener('click',()=>void runJointStability())
+  document.querySelector('#joint-stability-export')?.addEventListener('click',()=>{
+    if(state.jointStabilityResult)void saveTextFile('4c-insight-patient-cluster-stability.json',JSON.stringify(state.jointStabilityResult,null,2)+'\n')
+      .catch(error=>{state.jointStabilityError=error.message;render()})
+  })
+}
+
 function significantHitsView() {
   return `<section class="page-heading"><div><span class="eyebrow">Integrative Analysis</span><h2>Explore shared biological patterns across data types</h2><p>Align observations, calculate source distances, combine the available modalities, then examine the joint sample structure. The model does not use case/control labels, significance thresholds or selected features.</p></div><div class="local-card"><strong>On-device multi-omics</strong><span>Seven data types · Exact sample alignment · No source upload</span></div></section>
     ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
     ${state.compareResult ? `<details class="details-block"><summary>Previously calculated corrected evidence (optional)</summary>${renderIntegrativeEvidenceOverview()}</details>` : ''}
     ${i1AlignmentPanel()}
     ${i2DistancePanel()}
-    ${jointStructurePanel()}`
+    ${jointStructurePanel()}
+    ${jointStabilityPanel()}`
 }
 
 async function runSignificantHits() {
@@ -2917,6 +3008,7 @@ async function runSignificantHits() {
 function bindSignificantHitEvents() {
   const cfg = state.hitConfig
   bindJointStructureEvents()
+  bindJointStabilityEvents()
   bindI1AlignmentEvents()
   bindI2DistanceEvents()
   document.querySelectorAll('[data-integrative-modality]').forEach(input => {

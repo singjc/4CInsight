@@ -32,6 +32,6 @@ test('I2B UI starts local isolated workers and preserves view errors',()=>{
   assert.match(main,/for \(const view of state\.i2bDirectViews\) merged\.set/)
   assert.doesNotMatch(select,/fetch\(|XMLHttpRequest|localStorage|\/api\/|q_value|beta_group/)
   const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(version,'0.22.1')
+  assert.equal(version,'0.22.2')
   assert.ok(read('../index.html').includes(`main.js?v=${version}`))
 })
