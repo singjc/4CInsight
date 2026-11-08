@@ -2,8 +2,8 @@
  * Post-selection correlation and cluster contrast. No p-values, FDR, validation or pathway claims.
  * Streams one text record at a time; results hold one score per feature, not the full input matrix.
  */
-import {parseTsvHeader} from './multiomics-alignment.js?v=0.22.4'
-import {spearman} from './biological-findings.js?v=0.22.4'
+import {parseTsvHeader} from './multiomics-alignment.js?v=0.22.5'
+import {spearman} from './biological-findings.js?v=0.22.5'
 
 const validNumber=x=>typeof x==='number'&&Number.isFinite(x)
 const exact=x=>String(x??'').trim()
@@ -58,7 +58,7 @@ export async function rankExpressionFeatures(file,{modality,samples,clusterByObs
   if(!['gene','transcript'].includes(modality))throw new Error('Unsupported feature table type')
   if(!Array.isArray(samples)||samples.length<8)throw new Error('At least eight selected sample IDs are required')
   const headerName=modality==='gene'?'Gene Symbol':'Transcript Name'
-  let header=null,idx=[],scanned=0,skipped=0,usable=0,rows=[]
+  let header=null,idx=[],scanned=0,skipped=0,usable=0,rows=[],profiles=[]
   const usedNames=new Set(samples.map(s=>s.alias))
   if(usedNames.size!==samples.length)throw new Error('Repeated source aliases cannot be scored')
   let lastReport=0
@@ -75,7 +75,7 @@ export async function rankExpressionFeatures(file,{modality,samples,clusterByObs
     }
     scanned++
     if(record.length!==header.length){skipped++;continue}
-    const x=[],y=[],values=[],groups=[]
+    const x=[],y=[],values=[],groups=[],observations=[]
     for(let k=0;k<samples.length;k++){
       const raw=record[idx[k]].trim()
       if(raw==='')continue
@@ -83,6 +83,7 @@ export async function rankExpressionFeatures(file,{modality,samples,clusterByObs
       if(!validNumber(value)||value<0)continue
       values.push(Math.log2(1+value));x.push(samples[k].x);y.push(samples[k].y)
       groups.push(clusterByObservation[samples[k].observation]??null)
+      observations.push(samples[k].observation)
     }
     const required=Math.max(8,Math.ceil(samples.length*0.7))
     if(values.length<required){skipped++;continue}
@@ -93,8 +94,20 @@ export async function rankExpressionFeatures(file,{modality,samples,clusterByObs
     // In-sample descriptive contrast for first cluster vs other fitted clusters.
     const inCluster=values.filter((v,i)=>groups[i]===1),outCluster=values.filter((v,i)=>groups[i]!==null&&groups[i]!==1)
     const delta=inCluster.length>=3&&outCluster.length>=3?mean(inCluster)-mean(outCluster):null
-    rows.push({feature:label||secondary,secondary_id:secondary,n_used:values.length,
-      pcoa1_spearman:rho1,pcoa2_spearman:rho2,cluster1_log2_tpm_difference:delta})
+    const scored={feature:label||secondary,secondary_id:secondary,n_used:values.length,
+      pcoa1_spearman:rho1,pcoa2_spearman:rho2,cluster1_log2_tpm_difference:delta}
+    rows.push(scored)
+    // Keep only 24 sample profiles for display, not the entire feature matrix.
+    // Exact values for all scored features remain in the full score table.
+    const strength=Math.max(Math.abs(rho1??0),Math.abs(rho2??0))
+    const worst=profiles.at(-1)
+    if(profiles.length<24 || strength>worst.strength ||
+       (strength===worst.strength && scored.feature.localeCompare(worst.feature)<0)) {
+      profiles.push({feature:scored.feature,secondary_id:secondary,strength,
+        values:observations.map((observation,i)=>({observation,log2_tpm:values[i]}))})
+      profiles.sort((a,b)=>b.strength-a.strength||a.feature.localeCompare(b.feature)||a.secondary_id.localeCompare(b.secondary_id))
+      if(profiles.length>24)profiles.length=24
+    }
     usable++
   }
   if(!header)throw new Error('Merged expression TSV is empty')
@@ -102,7 +115,7 @@ export async function rankExpressionFeatures(file,{modality,samples,clusterByObs
      Math.max(Math.abs(a.pcoa1_spearman??0),Math.abs(a.pcoa2_spearman??0)) ||a.feature.localeCompare(b.feature))
   return {schema:'4c-insight-exploratory-expression-associations-v1',modality,metric:'log2(TPM + 1)',
     method:'In-sample Spearman correlation with fixed joint PCoA coordinates; no inferential p/q values',
-    samples:samples.length,features_scanned:scanned,features_ranked:usable,features_skipped:skipped,rows,
+    samples:samples.length,features_scanned:scanned,features_ranked:usable,features_skipped:skipped,rows,profiles,
     warnings:['Post-fit feature rankings are circular when the same expression view contributed to clustering. Do not claim statistical significance or independent validation.',
       'Samples with missing or invalid TPM values are omitted per feature; no missing feature measurements are imputed.',
       'This output is descriptive. It is not differential expression, pathway enrichment or a test of disease association.']}

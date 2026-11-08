@@ -30,7 +30,7 @@ test('source progress shows separate blue processing states and an accessible ba
 test('cache-bust version is coherent after release and stability interpretation is clear',()=>{
   const main=read('main.js'),html=read('index.html')
   const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(version,'0.22.4')
+  assert.equal(version,'0.22.5')
   assert.ok(html.includes(`main.js?v=${version}`))
   assert.ok(html.includes(`styles.css?v=${version}`))
   assert.ok(main.includes(`source-distance-queue.js?v=${version}`))

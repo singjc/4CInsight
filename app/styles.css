@@ -846,3 +846,48 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .bio-feature-progress { display: block; width: 100%; height: 12px; margin: 12px 0; accent-color: #3159d9; }
 .bio-feature-details { margin-top: 18px; }
 .biological-findings .table-scroll { max-height: 560px; }
+
+
+/* Combined post-fit biological findings dashboard. No source data leaves the browser. */
+.bio-dashboard-top { display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:14px;margin-top:12px;align-items:start; }
+.bio-dashboard-top > * { min-width:0; }
+.bio-all-modality-card { min-width:0; }
+.bio-modality-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:stretch;margin:12px 0; }
+.bio-modality-tile { min-width:0;border:1px solid #e1e6ee;border-radius:9px;padding:11px;background:#fbfcff;display:flex;flex-direction:column;gap:5px; }
+.bio-modality-tile strong { color:#182d46;font-size:12px;overflow-wrap:anywhere; }
+.bio-modality-tile > span { display:flex;align-items:baseline;justify-content:space-between;gap:4px;font-size:11px;color:#475467; }
+.bio-modality-tile > span b { font-variant-numeric:tabular-nums;color:#233451; }
+.bio-modality-tile small { font-size:10px;color:#66768d;overflow-wrap:anywhere; }
+.bio-modality-unavailable { background:#f7f8fb;opacity:.78; }
+.bio-meter { height:7px;border-radius:10px;background:#e9edf5;overflow:hidden; }
+.bio-meter i { display:block;height:100%;border-radius:10px; }
+.bio-feature-heading { display:flex;align-items:center;justify-content:space-between;gap:12px;margin:22px 0 10px; }
+.bio-feature-heading h4 { margin:0 0 5px; }
+.bio-feature-heading p { color:#64748b;font-size:12px;max-width:680px; }
+.bio-feature-heading .primary-button { flex-shrink:0; }
+.bio-feature-section { margin-top:14px; }
+.bio-feature-section-title { display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px; }
+.bio-feature-section-title > label { display:flex;align-items:center;gap:8px;color:#475467;font-size:12px; }
+.bio-rank-columns { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:10px; }
+.bio-feature-column { min-width:0;background:#fbfcff;border:1px solid #e1e6ee;border-radius:9px;padding:11px; }
+.bio-feature-column h5 { font-size:13px;margin:0 0 4px;color:#1e3656; }
+.bio-feature-column > small { display:block;color:#657589;margin-bottom:10px; }
+.bio-rank-axis { display:flex;justify-content:space-between;margin-left:36%;margin-right:55px;color:#66768b;font-size:10px; }
+.bio-rank-row { display:grid;grid-template-columns:minmax(80px,36%) minmax(0,1fr) 48px;gap:7px;align-items:center;min-height:29px; }
+.bio-rank-name { overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px; }
+.bio-signal-link { border:0;background:none;text-align:left;padding:0;font:inherit;color:#1c4eac;cursor:pointer;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-decoration:underline;text-underline-offset:2px; }
+.bio-signal-link:focus-visible { outline:2px solid #3159d9;outline-offset:2px; }
+.bio-rank-track { height:14px;background:#f2f5fb;border-radius:3px;position:relative;overflow:hidden; }
+.bio-rank-track .bio-rank-zero { position:absolute;left:50%;top:0;bottom:0;width:1px;background:#9ba9bb;z-index:1; }
+.bio-rank-track b { height:8px;top:3px;position:absolute;border-radius:2px; }
+.bio-rank-score { text-align:right;font-size:10px;color:#43536c;font-variant-numeric:tabular-nums; }
+.bio-feature-selection { margin:14px 0; }
+.bio-feature-selection label { display:flex;gap:9px;align-items:center;font-size:12px;flex-wrap:wrap; }
+.bio-feature-selection select { max-width:100%;min-width:240px; }
+.bio-feature-legend { display:flex;align-items:center;justify-content:center;gap:9px;flex-wrap:wrap;color:#66768d;font-size:10px; }
+.bio-feature-legend i { display:inline-block;width:130px;max-width:38%;height:11px;border-radius:6px;background:linear-gradient(90deg,rgb(235,239,250),rgb(36,79,223)); }
+.bio-full-table { margin-top:17px; }
+.bio-exports { margin-top:15px; }
+.biological-findings .bio-findings-summary { margin-bottom:12px; }
+@media(max-width:1180px) { .bio-dashboard-top { grid-template-columns:minmax(0,1fr); } .bio-modality-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:760px) { .bio-rank-columns,.bio-modality-grid {grid-template-columns:minmax(0,1fr)} .bio-feature-heading {flex-direction:column;align-items:stretch} .bio-feature-selection label {display:block} .bio-feature-selection select {width:100%;min-width:0} }
