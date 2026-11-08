@@ -72,10 +72,10 @@ test('I0 navigation is clear about current evidence versus future true joint ana
   assert.match(main,/function significantPanelSection\(/)
   assert.match(main,/function runSignificantHits\(/)
   assert.match(main,/function runSignificantHits\(\)/)
-  assert.match(main,/integrative-evidence\.js\?v=0\.22\.2/)
   const index=read('index.html')
   const rev=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
   assert.ok(rev)
+  assert.ok(main.includes(`integrative-evidence.js?v=${rev}`))
   assert.ok(index.includes(`main.js?v=${rev}`))
   assert.ok(index.includes(`styles.css?v=${rev}`))
 })

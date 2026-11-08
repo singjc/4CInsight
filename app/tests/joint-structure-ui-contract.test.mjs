@@ -30,6 +30,7 @@ test('user interface uses descriptive names instead of developer phase labels',(
   assert.match(page,/Joint ordination and clustering/)
   assert.match(page,/fixed set of data types/)
   assert.doesNotMatch(page,/<span class="tag neutral">I[012]/)
-  assert.match(main,/const APP_VERSION = '0\.22\.2'/)
-  assert.match(read('../index.html'),/main\.js\?v=0\.22\.2/)
+  const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
+  assert.ok(version, 'Missing application release revision')
+  assert.ok(read('../index.html').includes(`main.js?v=${version}`))
 })

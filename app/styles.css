@@ -809,3 +809,28 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
   .joint-heatmap-viewer.is-expanded { inset:0; width:100vw; height:100dvh; padding:10px; }
   .joint-heatmap-viewer.is-expanded .joint-heatmap-scroll { height:calc(100dvh - 280px); }
 }
+
+/* Local multi-modal source calculation: visible, bounded, accessible progress. */
+.i2b-execution-controls { align-items: end; margin: 10px 0 13px; }
+.i2b-execution-controls > label { max-width: 250px; }
+.i2b-progress-panel { border: 1px solid #bfcdf8; background: #f5f8ff; border-radius: 10px; padding: 12px 14px; margin: 12px 0 17px; }
+.i2b-progress-heading,.i2b-progress-row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.i2b-progress-heading strong { color: #2447b9; font-size: 13px; }
+.i2b-progress-heading span { color: #3159d9; font-size: 12px; font-weight: 700; }
+.i2b-progress-panel progress { display: block; width: 100%; height: 12px; margin: 7px 0 12px; accent-color: #3159d9; }
+.i2b-progress-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 9px; }
+.i2b-progress-row { border: 1px solid #dae3f7; border-left: 4px solid #b1bfd6; border-radius: 7px; background: white; padding: 9px; min-width: 0; }
+.i2b-progress-row[data-status="running"] { border-left-color: #3159d9; background: #f9fbff; }
+.i2b-progress-row[data-status="complete"] { border-left-color: #12715b; }
+.i2b-progress-row[data-status="failed"] { border-left-color: #b42318; }
+.i2b-progress-row strong { color: #253047; font-size: 12px; }
+.i2b-progress-row [data-i2b-state] { color: #667085; font-size: 11px; font-weight: 700; }
+.i2b-progress-row[data-status="running"] [data-i2b-state] { color: #3159d9; }
+.i2b-progress-row[data-status="running"] [data-i2b-state]::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 5px; border: 2px solid #a5b4fc; border-top-color: #3159d9; border-radius: 50%; animation: i2b-spin .85s linear infinite; }
+@keyframes i2b-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .i2b-progress-row[data-status="running"] [data-i2b-state]::before { animation: none; } }
+.i2b-progress-row[data-status="complete"] [data-i2b-state] { color: #12715b; }
+.i2b-progress-row[data-status="failed"] [data-i2b-state] { color: #b42318; }
+.i2b-progress-row progress { height: 9px; margin: 7px 0; }
+.i2b-progress-row small { display: block; color: #3159d9; font-size: 11px; overflow-wrap: anywhere; }
+.i2b-progress-highlight { margin: 8px 0; color: #2447b9; font-size: 12px; font-weight: 700; }

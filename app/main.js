@@ -1,13 +1,14 @@
-import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.2'
-import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.2'
-import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.2'
-import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.2'
-import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.2'
-import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.2'
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.2'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.2'
-import { renderResultsOverview } from './results-overview.js?v=0.22.2'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.2'
+import { runBoundedSourceTasks, sourceProgressSummary, validParallelWorkers } from './source-distance-queue.js?v=0.22.3'
+import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.3'
+import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.3'
+import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.3'
+import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.3'
+import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.3'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.3'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.3'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.3'
+import { renderResultsOverview } from './results-overview.js?v=0.22.3'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.3'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -17,8 +18,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.22.2'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.2'
+import { methodDocs } from './docs-content.js?v=0.22.3'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.3'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -32,7 +33,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.22.2'
+const APP_VERSION = '0.22.3'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -117,6 +118,8 @@ const state = {
   i2bBusy: false,
   i2bErrors: [],
   i2bProgress: '',
+  i2bProgressRows: [],
+  i2bParallelWorkers: 2,
   i2Result: null,
   i2Busy: false,
   i2Error: '',
@@ -256,7 +259,7 @@ function replaceScienceWorker() {
   if (state.wasmMemorySample) state.wasmMemorySample = { ...state.wasmMemorySample, active: false }
 }
 function stopScienceWork() {
-  if (activeI2bController) { activeI2bController.abort(); state.i2bProgress = 'Direct distance calculation stopped. Completed modality distances were kept.'; return }
+  if (activeI2bController) { activeI2bController.abort(); state.i2bProgress = 'Stopping active source calculations; completed results will be kept.'; return }
   if (activeCompareController) {
     activeCompareController.abort()
     state.projectMessage = 'Comparison stopped. Completed modality results are retained.'
@@ -417,6 +420,8 @@ function resetQcStateAfterInputsChange() {
   state.i2ImportedViews = []
   state.i2bDirectViews = []
   state.i2bErrors = []
+  state.i2bProgressRows = []
+  state.i2bProgress = ''
   state.alignmentError = ''
   state.hitProgress = null
 
@@ -606,6 +611,8 @@ function clearProject() {
   state.i2ImportedViews = []
   state.i2bDirectViews = []
   state.i2bErrors = []
+  state.i2bProgressRows = []
+  state.i2bProgress = ''
   state.alignmentError = ''
   state.hitProgress = null
   state.qcConfig.metadataId = ''
@@ -2435,7 +2442,7 @@ function i1AlignmentPanel() {
     <p class="integrative-message"><strong>Scientific limit:</strong> Sample alignment checks identities and source availability only. It does not read quantitative feature matrices, normalize joint distances, impute missing modalities or fit a multi-omics model. Joint sample analysis below can combine full unsupervised sample distances; native/browser parity and source-level validation are required.</p>
   </section>`
 }
-function i1ResetPreview() { state.alignmentPreview = null; state.alignmentError = ''; state.i2Result = null; state.i2bDirectViews = []; state.i2bErrors = []; state.i2StructureResult = null }
+function i1ResetPreview() { state.alignmentPreview = null; state.alignmentError = ''; state.i2Result = null; state.i2bDirectViews = []; state.i2bErrors = []; state.i2bProgressRows = []; state.i2bProgress = ''; state.i2StructureResult = null }
 async function i1RunAlignment() {
   if (state.alignmentBusy || state.busy || state.mergeBusy) return
   const draft = state.alignmentSource === 'draft'
@@ -2557,6 +2564,22 @@ function i2HeatmapSvg(result) {
   }
   return `<div class="plot-scroll i2-heatmap-scroll"><svg class="science-plot i2-fusion-heatmap" viewBox="0 0 ${width} ${height}" role="img" aria-label="Fused distance heatmap, first ${observations.length} aligned observations">${rectangles.join('')}${labels}</svg></div><p class="method-note">First ${observations.length} aligned observations only, in metadata order. Grey = insufficient measured view coverage. The complete fused distance list is in the export.</p>`
 }
+function i2bProgressMarkup() {
+  const rows=state.i2bProgressRows
+  if(!rows?.length)return state.i2bProgress?`<p id="i2b-progress" class="i2b-progress-highlight" role="status">${escapeHtml(state.i2bProgress)}</p>`:''
+  const summary=sourceProgressSummary(rows)
+  return `<section class="i2b-progress-panel" aria-label="Source-distance calculation progress">
+    <div class="i2b-progress-heading"><strong>Local distance calculation</strong><span id="i2b-progress-headline">${summary.finished} of ${summary.views} data types finished · ${summary.percent}% of reported steps</span></div>
+    <progress id="i2b-overall-progress" max="${Math.max(1,summary.total)}" value="${summary.completed}" aria-label="All source-distance processing steps"></progress>
+    <div class="i2b-progress-grid">${rows.map(row=>`<div class="i2b-progress-row" data-i2b-progress-row="${row.index}" data-status="${escapeHtml(row.status)}">
+      <div class="i2b-progress-row-head"><strong>${escapeHtml(I1_MODALITIES.find(m=>m.key===row.modality)?.label||row.modality)}</strong><span data-i2b-state>${row.status==='running'?'Processing':row.status==='complete'?'Complete':row.status==='failed'?'Needs review':row.status==='stopped'?'Stopped':'Queued'}</span></div>
+      <progress max="${Math.max(1,row.total)}" value="${row.completed}" aria-label="${escapeHtml(row.modality)} processing steps"></progress>
+      <small data-i2b-stage>${escapeHtml(row.message)}</small>
+    </div>`).join('')}</div>
+    <p class="method-note">Steps count parsed files and final distance calculations. They are not a time estimate. Each data type uses a separate on-device worker; no source data is uploaded.</p>
+    ${state.i2bProgress?`<p id="i2b-progress" class="i2b-progress-highlight">${escapeHtml(state.i2bProgress)}</p>`:''}
+  </section>`
+}
 function i2DistancePanel() {
   const result = state.i2Result
   const alignment = state.alignmentPreview
@@ -2584,8 +2607,9 @@ function i2DistancePanel() {
   }
   return `<section class="card i2-distance-fusion" id="i2-distance-fusion"><div class="card-heading"><div><h3>Joint sample similarity</h3><p>Combine full, unsupervised distances from at least two data types after exact sample alignment. Each view receives a scale adjustment. Missing pairs stay missing.</p></div><span class="tag neutral">Combined distances</span></div>
     <p class="method-note">Input: full sample distances from the Longitudinal analysis. Gene and transcript results from the current browser session are used when available. Use Calculate local source distances to process the five other data types, or select native Longitudinal distance JSON files as an alternative. Corrected Compare Groups results and 2D plots are not valid inputs.</p>
+    <div class="form-grid i2b-execution-controls"><label><span>Parallel data types</span><select id="i2b-parallel-workers" ${state.i2bBusy?'disabled':''}>${[1,2,3].map(n=>`<option value="${n}" ${state.i2bParallelWorkers===n?'selected':''}>${n} ${n===1?'worker':'workers'}</option>`).join('')}</select></label><p class="method-note">Start with 2 workers. Choose 1 if memory use is high. More workers can increase peak memory, and may not be faster on all devices.</p></div>
     <div class="run-row i2b-source-actions"><div><strong>Calculate distances directly from the aligned local data</strong><span>Uses all selected and available data types. One source workbook is read at a time. BCR/TCR use Morisita–Horn; isotypes use Aitchison; immune data uses standardized ssGSEA distances; expression uses the existing W4 distance method. No group labels or adjusted hits are used.</span></div><button type="button" id="i2b-run-direct" class="primary-button" ${!alignment || !state.wasmReady || state.i2bBusy || state.i2Busy || state.busy || state.alignmentBusy ? 'disabled' : ''}>${state.i2bBusy ? 'Calculating direct distances…' : 'Calculate local source distances'}</button></div>
-    ${state.i2bProgress ? `<p id="i2b-progress" class="method-note" role="status">${escapeHtml(state.i2bProgress)}</p>` : ''}
+    ${i2bProgressMarkup()}
     ${state.i2bDirectViews.length ? `<div class="run-row"><p class="method-note">Direct distances ready: ${escapeHtml(state.i2bDirectViews.map(v=>v.modality).join(', '))}. These take priority over imported distances for the same data type.</p><button type="button" class="secondary-button" id="i2b-export-sources">Save full source-distance JSON</button></div>` : ''}
     ${state.i2bErrors.length ? `<details class="details-block" open><summary>${state.i2bErrors.length} data type(s) need review</summary><div class="analysis-warnings">${state.i2bErrors.map(e=>`<div>${escapeHtml(e.modality)}: ${escapeHtml(e.message)}</div>`).join('')}</div></details>` : ''}
     <p class="method-note">After direct distances are ready, run Joint distance fusion below. Missing or failed views are not imputed. Large source tables can still exceed browser memory.</p>
@@ -2607,6 +2631,7 @@ async function i2bRunDirect() {
   state.busy = true
   state.i2bErrors = []
   state.i2bDirectViews = []
+  state.i2bProgressRows = []
   state.i2Result = null
   state.i2StructureResult = null
   const selectedMerged = {gene: state.compareConfig.geneMergedId, transcript: state.compareConfig.transcriptMergedId}
@@ -2614,59 +2639,90 @@ async function i2bRunDirect() {
     const {requests, errors} = prepareI2BRequests(state.alignmentPreview, state.records, selectedFile,
       selectedMerged, state.hitConfig.integrativeModalities || {})
     state.i2bErrors = errors
+    state.i2bProgressRows = requests.map((entry,index)=>({
+      index, modality:entry.modality, status:'queued', message:'Queued', completed:0,
+      total:Math.max(1,entry.files.length)+(entry.sampleIds?0:1),
+    }))
+    state.i2bProgress = `Preparing ${requests.length} data types with up to ${state.i2bParallelWorkers} local workers`
     render()
-    for (let i = 0; i < requests.length; i++) {
-      if (controller.signal.aborted) break
-      const entry = requests[i]
-      state.i2bProgress = `${entry.modality}: ${i + 1} of ${requests.length} data types`
-      render()
-      try {
-        const response = await isolatedScienceRequest({
-          createWorker: () => new Worker(new URL(`./analysis-worker.js?v=${APP_VERSION}`, import.meta.url), {type: 'module'}),
-          type: 'run-i2b-source-distance',
-          payload: {modality:entry.modality, files:entry.files, sampleIds:entry.sampleIds,
-            options: {ambiguousPolicy: state.compareConfig.ambiguousPolicy,
-              determinedOnly: state.compareConfig.excludeUndeterminedIsotype,
-              minCount: state.longitudinalConfig.minCount,
-              minFractionSamples: state.longitudinalConfig.minFractionSamples}},
-          resourceSettings: state.resources,
-          signal: controller.signal,
-          onProgress: progress => {
-            state.i2bProgress = progress.message
-            const status = document.querySelector('#i2b-progress')
-            if (status) status.textContent = state.i2bProgress
-          },
-          onMemory: report => { const memory = validateWasmMemoryReport(report); if (memory) {state.wasmMemorySample={...memory, active:true};renderSystemInfo()} },
+    const {outcomes} = await runBoundedSourceTasks(requests, {
+      parallel:state.i2bParallelWorkers,
+      signal:controller.signal,
+      run: async(entry,index,onProgress) => {
+        const response=await isolatedScienceRequest({
+        createWorker: () => new Worker(new URL(`./analysis-worker.js?v=${APP_VERSION}`,import.meta.url),{type:'module'}),
+        type:'run-i2b-source-distance',
+        payload:{modality:entry.modality, files:entry.files, sampleIds:entry.sampleIds,
+          options:{ambiguousPolicy:state.compareConfig.ambiguousPolicy,
+            determinedOnly:state.compareConfig.excludeUndeterminedIsotype,
+            minCount:state.longitudinalConfig.minCount,
+            minFractionSamples:state.longitudinalConfig.minFractionSamples}},
+        resourceSettings:state.resources,
+        signal:controller.signal,
+        onProgress,
+        onMemory:report=>{
+          const memory=validateWasmMemoryReport(report)
+          if(memory){state.wasmMemorySample={...memory,active:true};renderSystemInfo()}
+        },
         })
-        if (response.type !== 'i2b-source-distance-result' || response.view?.modality !== entry.modality) {
+        if(response.type!=='i2b-source-distance-result'||response.view?.modality!==entry.modality)
           throw new Error('Source-distance worker returned the wrong result')
+        return response
+      },
+      onUpdate:(row,summary,allRows)=>{
+        state.i2bProgressRows=allRows
+        state.i2bProgress=`${summary.finished} of ${summary.views} data types finished; ${summary.percent}% of reported processing steps`
+        updateI2bProgressDom(row,summary)
+      },
+    })
+    for(const outcome of outcomes){
+      if(outcome?.status==='complete'){
+        const entry=outcome.entry,response=outcome.value
+        if(response.type!=='i2b-source-distance-result'||response.view?.modality!==entry.modality){
+          state.i2bErrors.push({modality:entry.modality,message:'Source-distance worker returned the wrong result'})
+          continue
         }
         state.i2bDirectViews.push({
           ...response.view,
-          input_files: entry.files.map(item => ({name: item.name, sample_id: item.sampleId || null})),
-          input_options: {ambiguousPolicy: state.compareConfig.ambiguousPolicy,
-            determinedOnly: state.compareConfig.excludeUndeterminedIsotype,
-            minCount: state.longitudinalConfig.minCount,
-            minFractionSamples: state.longitudinalConfig.minFractionSamples},
+          input_files:entry.files.map(item=>({name:item.name,sample_id:item.sampleId||null})),
+          input_options:{ambiguousPolicy:state.compareConfig.ambiguousPolicy,
+            determinedOnly:state.compareConfig.excludeUndeterminedIsotype,
+            minCount:state.longitudinalConfig.minCount,
+            minFractionSamples:state.longitudinalConfig.minFractionSamples},
         })
-      } catch(error) {
-        state.i2bErrors.push({modality: entry.modality, message: error instanceof Error ? error.message : String(error)})
-        if (controller.signal.aborted) break
+      }else if(outcome?.status==='failed'){
+        state.i2bErrors.push({modality:outcome.entry.modality,message:outcome.error.message})
       }
-      render()
     }
-  } catch (error) {
-    state.i2bErrors.push({modality: 'alignment', message: error instanceof Error ? error.message : String(error)})
+  } catch(error) {
+    state.i2bErrors.push({modality:'alignment',message:error instanceof Error?error.message:String(error)})
   } finally {
-    activeI2bController = null
-    state.busy = false
-    state.i2bBusy = false
-    state.i2bProgress = controller.signal.aborted ? 'Stopped; completed data types remain available.' : 'Local distance preparation complete.'
-    if (state.wasmMemorySample) state.wasmMemorySample = {...state.wasmMemorySample,active:false}
+    activeI2bController=null
+    state.busy=false
+    state.i2bBusy=false
+    state.i2bProgress=controller.signal.aborted
+      ? 'Stopped; completed data types remain available.'
+      : `Local distance calculation finished; ${state.i2bDirectViews.length} data types ready.`
+    if(state.wasmMemorySample)state.wasmMemorySample={...state.wasmMemorySample,active:false}
     render()
   }
 }
 
+function updateI2bProgressDom(row,summary) {
+  const overall=document.querySelector('#i2b-overall-progress')
+  if(overall){overall.max=Math.max(1,summary.total);overall.value=summary.completed}
+  const headline=document.querySelector('#i2b-progress-headline')
+  if(headline)headline.textContent=`${summary.finished} of ${summary.views} data types finished · ${summary.percent}% of reported steps`
+  const current=document.querySelector(`[data-i2b-progress-row="${row.index}"]`)
+  if(!current)return
+  current.dataset.status=row.status
+  const bar=current.querySelector('progress')
+  if(bar){bar.max=Math.max(1,row.total);bar.value=row.completed}
+  const stage=current.querySelector('[data-i2b-stage]')
+  if(stage)stage.textContent=row.message
+  const stateLabel=current.querySelector('[data-i2b-state]')
+  if(stateLabel)stateLabel.textContent=row.status==='running'?'Processing':row.status==='complete'?'Complete':row.status==='failed'?'Needs review':row.status==='stopped'?'Stopped':'Queued'
+}
 
 async function i2ReadLocalFiles(fileList) {
   state.i2Busy = true
@@ -2702,6 +2758,11 @@ async function i2RunFusion() {
   finally { state.i2Busy = false; render() }
 }
 function bindI2DistanceEvents() {
+  document.querySelector('#i2b-parallel-workers')?.addEventListener('change',event=>{
+    if(state.i2bBusy)return
+    state.i2bParallelWorkers=validParallelWorkers(event.currentTarget.value)
+    render()
+  })
   document.querySelector('#i2b-run-direct')?.addEventListener('click', () => void i2bRunDirect())
   document.querySelector('#i2b-export-sources')?.addEventListener('click', () => {
     if (state.i2bDirectViews.length) void saveTextFile('4c-insight-i2b-source-distances.json',
@@ -2881,6 +2942,10 @@ function jointStabilityPanel() {
     </div>
     <div class="table-scroll"><table><thead><tr><th>Original cluster</th><th>Observations</th><th>Patients</th><th>Measured pairs</th><th>Co-assignment</th></tr></thead><tbody>${outcome.clusters_summary.map(row=>`<tr><td>${row.cluster}</td><td>${row.observations}</td><td>${row.patients}</td><td>${row.informative_pairs}</td><td>${row.within_cluster_coassignment===null?'Unavailable':`${(100*row.within_cluster_coassignment).toFixed(1)}%`}</td></tr>`).join('')}</tbody></table></div>
     <p class="method-note">${outcome.patients} unique patients; ${outcome.sampled_patients_per_repeat} selected per repeat. ${outcome.patients_with_repeated_visits} patients have repeated observations; ${outcome.patients_crossing_original_clusters} have visits in different original clusters.</p>
+    <details class="details-block"><summary>How to interpret cluster stability</summary>
+      <p class="method-note">Cluster agreement measures how often the original groupings persist when patients are resampled. It does not identify biological pathways or validate a clinical subtype.</p>
+      <p class="method-note">Next: compare two, three and four clusters; change the random seed; inspect distant observations and source QC; then compare phenotypes and molecular features using patient-aware tests. Do not use these same labels to claim independent prediction.</p>
+    </details>
     ${outcome.warnings.map(item=>`<p class="method-note">${escapeHtml(item)}</p>`).join('')}
     <div class="button-row"><button id="joint-stability-export" class="secondary-button" type="button">Save patient stability JSON</button></div>`
   }

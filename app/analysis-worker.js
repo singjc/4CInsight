@@ -2,8 +2,8 @@ import { classifyInputFilename } from './file-classifier.js'
 import { validateLocalInputFile } from './resource-controls.js'
 import { measureWasmAllocation } from './wasm-memory.js'
 import { runPortableMerge } from './merge-worker.js'
-import { analyzeJointStructure } from './joint-structure.js?v=0.22.2'
-import { runPatientStabilityAsync } from './joint-stability.js?v=0.22.2'
+import { analyzeJointStructure } from './joint-structure.js?v=0.22.3'
+import { runPatientStabilityAsync } from './joint-stability.js?v=0.22.3'
 
 let wasmModulePromise = null
 let wasmMemory = null

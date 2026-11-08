@@ -1,4 +1,4 @@
-import { multiomicsVisualDefinitions } from './docs-new-modalities.js?v=0.22.2'
+import { multiomicsVisualDefinitions } from './docs-new-modalities.js?v=0.22.3'
 // Visual teaching aids for the illustrative examples in the 4C Insight Docs.
 // These diagrams are not results from your cohort.
 // Keep their numeric labels and claims consistent with docs-toy-examples.js.

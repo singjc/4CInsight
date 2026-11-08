@@ -30,8 +30,8 @@ test('I1 identity audit remains independent of I2A scientific fusion and does no
 test('I1 assets and documentation remain cache-coherent and local-only', () => {
   const main = read('main.js'), html = read('index.html'), css = read('styles.css')
   const version = main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(version, '0.22.2')
-  assert.match(main, /multiomics-alignment\.js\?v=0\.22\.2/)
+  assert.ok(version, 'Missing application release revision')
+  assert.ok(main.includes(`multiomics-alignment.js?v=${version}`))
   assert.ok(html.includes(`main.js?v=${version}`))
   assert.ok(html.includes(`styles.css?v=${version}`))
   assert.match(css, /\.i1-alignment-scroll/)
