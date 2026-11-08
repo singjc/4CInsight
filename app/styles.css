@@ -732,3 +732,18 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .integrative-evidence-table td:nth-child(n+3) { font-variant-numeric: tabular-nums; }
 .integrative-message { margin-top: 10px; font-size: 12px; line-height: 1.55; color: #667085; }
 @media (max-width: 720px) { .h0-modality-card { padding: 12px; } .integrative-selector label { flex: 1 1 180px; } }
+
+/* I1 source-alignment review: the scientific rows are not truncated. */
+.i1-role-grid { grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); }
+.i1-alignment .integrative-selector { margin: 1rem 0; }
+.i1-alignment-scroll { max-height: 560px; overflow: auto; }
+.i1-alignment-scroll table { width: max-content; min-width: 1540px; table-layout: fixed; }
+.i1-alignment-scroll th { min-width: 124px; position: sticky; top: 0; z-index: 2; }
+.i1-alignment-scroll td { vertical-align: top; min-width: 124px; }
+.i1-alignment-scroll td small, .i1-alignment-scroll th small { display: block; opacity: .72; font-size: .73rem; margin-top: .2rem; overflow-wrap: anywhere; }
+.i1-source-status { display: inline-block; font-size: .78rem; font-weight: 600; }
+.i1-status-present { color: #146b43; }
+.i1-status-missing, .i1-status-source-error { color: #98520a; }
+.i1-status-ambiguous { color: #ad3232; }
+.i1-status-not-selected { color: #667085; }
+@media (max-width: 720px) { .i1-alignment-scroll { max-height: 420px; } }

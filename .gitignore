@@ -7,3 +7,11 @@
 # 4C Insight private local development notes
 **/4C_INSIGHT_HANDOFF*.md
 **/4C_INSIGHT_CONTINUATION_PROMPT*.md
+/.local/4c-insight/
+/docs/*HANDOFF*.md
+/docs/*CONTINUATION_PROMPT*.md
+/docs/*AUDIT*.md
+/docs/*PLAN*.md
+/docs/*TASK_PROMPT*.md
+
+# Internal project context stays on this device, outside public docs.

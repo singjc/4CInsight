@@ -72,7 +72,7 @@ test('I0 navigation is clear about current evidence versus future true joint ana
   assert.match(main,/Expression-only selected-hit structure/)
   assert.match(main,/Run expression hit clustering/)
   assert.match(main,/function runSignificantHits\(\)/)
-  assert.match(main,/integrative-evidence\.js\?v=0\.21\.0-i0-integrative-evidence/)
+  assert.match(main,/integrative-evidence\.js\?v=0\.21\.0-i1-observation-alignment/)
   const index=read('index.html')
   const rev=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
   assert.ok(rev)

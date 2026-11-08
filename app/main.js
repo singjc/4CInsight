@@ -1,8 +1,9 @@
-import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.21.0-i0-integrative-evidence'
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.21.0-i0-integrative-evidence'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-i0-integrative-evidence'
-import { renderResultsOverview } from './results-overview.js?v=0.21.0-i0-integrative-evidence'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-i0-integrative-evidence'
+import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.21.0-i1-observation-alignment'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.21.0-i1-observation-alignment'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.21.0-i1-observation-alignment'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-i1-observation-alignment'
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-i1-observation-alignment'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-i1-observation-alignment'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -12,8 +13,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-i0-integrative-evidence'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-i0-integrative-evidence'
+import { methodDocs } from './docs-content.js?v=0.21.0-i1-observation-alignment'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-i1-observation-alignment'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -27,7 +28,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-i0-integrative-evidence'
+const APP_VERSION = '0.21.0-i1-observation-alignment'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -101,6 +102,12 @@ const state = {
   longitudinalResult: null,
   hitProgress: null,
   hitResult: null,
+  alignmentSource: 'active',
+  alignmentRoles: { observation: '', subject: '', time: '' },
+  alignmentColumns: [],
+  alignmentPreview: null,
+  alignmentBusy: false,
+  alignmentError: '',
   historyEntries: [],
   historyLoaded: false,
   historyBusy: false,
@@ -379,6 +386,8 @@ function resetQcStateAfterInputsChange() {
   state.longitudinalResult = null
   state.longitudinalProgress = null
   state.hitResult = null
+  state.alignmentPreview = null
+  state.alignmentError = ''
   state.hitProgress = null
 
   const geneMerged = recordsOfKind('merged-gene-expression')
@@ -561,6 +570,8 @@ function clearProject() {
   state.longitudinalResult = null
   state.longitudinalProgress = null
   state.hitResult = null
+  state.alignmentPreview = null
+  state.alignmentError = ''
   state.hitProgress = null
   state.qcConfig.metadataId = ''
   state.qcConfig.metadataIdColumn = ''
@@ -2299,7 +2310,7 @@ function renderIntegrativeEvidenceOverview() {
     ${totals.included ? `<div class="table-scroll"><table class="integrative-evidence-table"><thead><tr><th>Data type</th><th>Result</th><th>Samples</th><th>Adjusted tests</th><th>Selected findings</th><th>Effect interpretation</th></tr></thead><tbody>${body}</tbody></table></div>` : '<p class="integrative-message">Select one or more available data types to review.</p>'}
     <div class="run-row"><div><strong>Selected findings from all included data types</strong><span>Save a complete table with modality names, feature families, original q-values, and effects.</span></div><button id="integrative-export-csv" class="secondary-button" type="button" ${totals.selectedTests ? '' : 'disabled'}>Save combined evidence CSV</button></div>
     <p class="integrative-message">These are results from separate adjusted analyses, not one joint statistical model. BH q-values are corrected within their original test families. Effect sizes use different scales and must not be compared directly across data types.</p>
-    <p class="integrative-message"><strong>Joint sample-level integration is not available in this version.</strong> It needs sample alignment, missing-data checks, and validated combined-distance or latent-factor calculations.</p>
+    <p class="integrative-message"><strong>Joint sample-level integration is not available in this version. The I1 sample alignment below checks identity and source availability only; it does not fit a combined model.</strong> It needs sample alignment, missing-data checks, and validated combined-distance or latent-factor calculations.</p>
   </section>`
 }
 
@@ -2332,6 +2343,150 @@ function renderAdjustedOmicsReview() {
   </section>`
 }
 
+// I1 aligns observations across source inventories. It does not fit a joint model.
+function i1ExclusionRules() {
+  const cfg = state.compareConfig
+  return [
+    { enabled: cfg.qcExclusionEnabled, label: 'Reviewed QC exclusion', column: cfg.qcExclusionColumn, values: cfg.qcExclusionValues || [] },
+    { enabled: cfg.customExclusionEnabled, label: 'Custom metadata exclusion', column: cfg.customExclusionColumn, values: cfg.customExclusionValues || [] },
+  ]
+}
+function i1SourceOptions() {
+  const columns = state.alignmentSource === 'draft'
+    ? state.metadataEditor.table?.columns || []
+    : state.metadataInspection?.columns || state.alignmentColumns || []
+  const choose = (value, blank) => `<option value="${escapeHtml(value)}" ${blank === value ? 'selected' : ''}>${escapeHtml(value || 'Not selected')}</option>`
+  const selection = (id, label, value, optional = false) => `<label><span>${label}</span><select id="${id}">${optional ? choose('', value) : ''}${columns.map(col => choose(col, value)).join('')}</select></label>`
+  const selectedObservation = state.alignmentRoles.observation || (columns.includes(state.qcConfig.metadataIdColumn) ? state.qcConfig.metadataIdColumn : columns.includes('sample_id') ? 'sample_id' : '')
+  return `${selection('i1-observation-column', 'Observation ID column', selectedObservation, true)}
+    ${selection('i1-subject-column', 'Patient / subject ID column', state.alignmentRoles.subject, true)}
+    ${selection('i1-time-column', 'Timepoint / visit column', state.alignmentRoles.time, true)}`
+}
+function i1AlignmentPanel() {
+  const preview = state.alignmentPreview
+  const activeFile = selectedFile(state.qcConfig.metadataId)
+  const hasDraft = Boolean(state.metadataEditor.table)
+  const chosen = state.hitConfig.integrativeModalities || {}
+  const selectors = I1_MODALITIES.map(m => `<label><input type="checkbox" data-i1-modality="${m.key}" ${chosen[m.key] !== false ? 'checked' : ''}/><span>${escapeHtml(m.label)}</span></label>`).join('')
+  let results = ''
+  if (preview) {
+    const counts = preview.summary.counts.filter(c => c.selected)
+    const heads = I1_MODALITIES.map(m => `<th>${escapeHtml(m.label)}<small>Source status</small></th>`).join('')
+    dynamicTableSources.set('i1-alignment-table', {
+      rows: preview.rows,
+      cells: row => [row.observation, row.subject, row.timepoint, row.excluded ? 'Excluded' : 'Included', ...I1_MODALITIES.map(m => row.modalities[m.key].status)],
+      rowHtml: row => `<tr><td><strong>${escapeHtml(row.observation)}</strong></td><td>${escapeHtml(row.subject || '—')}</td><td>${escapeHtml(row.timepoint || '—')}</td><td>${row.excluded ? `<span class="tag warning" title="${escapeHtml(row.exclusions.join(' | '))}">Excluded</span>` : 'Included'}</td>${I1_MODALITIES.map(m => { const v = row.modalities[m.key]; return `<td title="${escapeHtml(v.source || v.alias)}"><span class="i1-source-status i1-status-${escapeHtml(v.status)}">${escapeHtml(v.status)}</span><small>${escapeHtml(v.alias)}</small></td>` }).join('')}</tr>`,
+    })
+    results = `<div class="summary-grid compact-grid">
+      ${summaryCard('Metadata observations', preview.summary.total.toLocaleString(), `${preview.summary.excluded} excluded by current rules`)}
+      ${summaryCard('Eligible observations', preview.summary.eligible.toLocaleString(), 'After metadata exclusions')}
+      ${summaryCard('At least two source types', preview.summary.pairedTwo.toLocaleString(), 'Exact links; not paired biological measures')}
+      ${summaryCard('Complete selected coverage', preview.summary.complete.toLocaleString(), 'Present in every selected source type')}
+    </div>
+    <div class="table-scroll i1-coverage-scroll"><table><thead><tr><th>Data type</th><th>Matched</th><th>Missing</th><th>Ambiguous</th><th>Source error</th></tr></thead><tbody>${counts.map(c => `<tr><td>${escapeHtml(c.label)}</td><td>${c.present}</td><td>${c.missing}</td><td>${c.ambiguous}</td><td>${c['source-error']}</td></tr>`).join('')}</tbody></table></div>
+    ${preview.warnings.length ? `<details class="details-block"><summary>Review ${preview.warnings.length.toLocaleString()} alignment warning(s)</summary><div class="analysis-warnings">${preview.warnings.map(message => `<div>${escapeHtml(message)}</div>`).join('')}</div></details>` : ''}
+    <div class="table-scroll i1-alignment-scroll" data-dynamic-table="i1-alignment-table" role="region" aria-label="All aligned observations" tabindex="0"><table><thead><tr><th>Observation</th><th>Patient</th><th>Visit</th><th>Eligibility</th>${heads}</tr></thead><tbody></tbody></table></div>
+    <div class="button-row"><button type="button" class="secondary-button" id="i1-export-json">Save exact alignment JSON</button><button type="button" class="secondary-button" id="i1-export-tsv">Save review TSV</button></div>
+    <p class="method-note">The JSON keeps exact source IDs for later joint modeling. The TSV protects spreadsheet cells that look like formulas. Source presence does not prove that a sample passed quality control or was used in a fitted model.</p>`
+  }
+  return `<section class="card i1-alignment" id="i1-observation-alignment"><div class="card-heading"><div><h3>Sample alignment across data types</h3><p>Match exact sample IDs, patient IDs, visits and source aliases. Review missing data and excluded observations before any joint analysis.</p></div><span class="tag neutral">I1 · Source alignment</span></div>
+    <div class="form-grid i1-role-grid"><label><span>Metadata source</span><select id="i1-source"><option value="active" ${state.alignmentSource !== 'draft' ? 'selected' : ''}>Active analysis metadata</option>${hasDraft ? `<option value="draft" ${state.alignmentSource === 'draft' ? 'selected' : ''}>Open metadata draft (not necessarily used by comparison)</option>` : ''}</select></label>${i1SourceOptions()}</div>
+    ${!activeFile && state.alignmentSource !== 'draft' ? `<p class="notice-banner">Select an analysis metadata file in Project before alignment.</p>` : ''}
+    <div class="integrative-selector" role="group" aria-label="Data types for alignment">${selectors}</div>
+    <p class="method-note">Uses the two current Compare Groups exclusion rules, when enabled. Matches are case-sensitive and exact after trimming surrounding spaces. An explicit alias is never replaced by a guessed ID. A source conflict is not resolved automatically.</p>
+    <div class="run-row"><div><strong>Build an observation-level alignment manifest</strong><span>Reads metadata and only the header of each selected merged expression table; raw sample workbooks are not opened.</span></div><button id="i1-run-alignment" class="primary-button" type="button" ${state.alignmentBusy || state.busy || state.mergeBusy || (state.alignmentSource !== 'draft' && !activeFile) ? 'disabled' : ''}>${state.alignmentBusy ? 'Checking sources…' : 'Check sample alignment'}</button></div>
+    ${state.alignmentError ? `<div class="analysis-warnings" role="alert">${escapeHtml(state.alignmentError)}</div>` : ''}
+    ${results}
+    <p class="integrative-message"><strong>Scientific limit:</strong> I1 checks identities and source availability only. It does not read quantitative feature matrices, normalize joint distances, impute missing modalities or fit a multi-omics model. I2 requires full per-data-type sample distances and native/browser parity.</p>
+  </section>`
+}
+function i1ResetPreview() { state.alignmentPreview = null; state.alignmentError = '' }
+async function i1RunAlignment() {
+  if (state.alignmentBusy || state.busy || state.mergeBusy) return
+  const draft = state.alignmentSource === 'draft'
+  const metadataFile = selectedFile(state.qcConfig.metadataId)
+  if (!draft && !metadataFile) { state.alignmentError = 'Select the active metadata file first'; render(); return }
+  state.alignmentBusy = true
+  i1ResetPreview()
+  render()
+  try {
+    let table
+    if (draft) {
+      if (!state.metadataEditor.table) throw new Error('Open a metadata draft first')
+      table = state.metadataEditor.table
+    } else {
+      const response = await workerRequest('load-metadata-table', { file: metadataFile })
+      table = response.table
+    }
+    const merged = {}
+    for (const [key, kind] of [['gene', 'merged-gene-expression'], ['transcript', 'merged-transcript-expression']]) {
+      const candidates = recordsOfKind(kind)
+      const chosenId = key === 'gene' ? state.compareConfig.geneMergedId : state.compareConfig.transcriptMergedId
+      const record = candidates.find(item => item.id === chosenId) || (candidates.length === 1 ? candidates[0] : null)
+      if (!record && candidates.length > 1) { merged[key] = { error: 'Several merged tables were found. Select one in Compare Groups.' }; continue }
+      if (!record) continue
+      const file = selectedFile(record.id)
+      if (!file) { merged[key] = { error: 'Selected merged file is not connected' }; continue }
+      try {
+        const header = await readFirstTsvRecord(file)
+        merged[key] = { sampleIds: mergedSampleIds(header, key), source: record.relativePath || record.name }
+      } catch (error) {
+        merged[key] = { error: error instanceof Error ? error.message : String(error), source: record.name }
+      }
+    }
+    const columns = table.columns || []
+    state.alignmentColumns = [...columns]
+    if (!state.alignmentRoles.observation) {
+      const fromQc = state.qcConfig.metadataIdColumn || 'sample_id'
+      if (columns.includes(fromQc)) state.alignmentRoles.observation = fromQc
+    }
+    if (!state.alignmentRoles.subject && columns.includes(state.compareConfig.subjectColumn)) {
+      state.alignmentRoles.subject = state.compareConfig.subjectColumn
+    }
+    if (!state.alignmentRoles.time && columns.includes(state.longitudinalConfig.timeColumn)) {
+      state.alignmentRoles.time = state.longitudinalConfig.timeColumn
+    }
+    const observationColumn = state.alignmentRoles.observation
+    if (!observationColumn) throw new Error('Choose an observation ID column in the alignment settings')
+    const preview = alignObservations({
+      table, records: state.records, merged,
+      observationColumn,
+      subjectColumn: state.alignmentRoles.subject,
+      timeColumn: state.alignmentRoles.time,
+      exclusions: i1ExclusionRules(),
+      enabled: state.hitConfig.integrativeModalities || {},
+    })
+    preview.metadataSource = draft ? `Open local metadata draft: ${state.metadataEditor.sourceName || 'untitled'}` : `Active analysis metadata: ${metadataFile.name}`
+    preview.mergedSources = Object.fromEntries(Object.entries(merged).map(([key, v]) => [key, { source: v.source || '', error: v.error || null }]))
+    state.alignmentPreview = preview
+  } catch (error) {
+    state.alignmentError = `Sample alignment: ${error instanceof Error ? error.message : String(error)}`
+  } finally { state.alignmentBusy = false; render() }
+}
+function bindI1AlignmentEvents() {
+  document.querySelector('#i1-source')?.addEventListener('change', event => { state.alignmentSource = event.currentTarget.value; state.alignmentColumns = []; i1ResetPreview(); render() })
+  for (const [id, role] of [['i1-observation-column', 'observation'], ['i1-subject-column', 'subject'], ['i1-time-column', 'time']]) {
+    document.querySelector(`#${id}`)?.addEventListener('change', event => { state.alignmentRoles[role] = event.currentTarget.value; i1ResetPreview(); render() })
+  }
+  document.querySelectorAll('[data-i1-modality]').forEach(input => input.addEventListener('change', event => {
+    if (!state.hitConfig.integrativeModalities) state.hitConfig.integrativeModalities = {}
+    state.hitConfig.integrativeModalities[event.currentTarget.dataset.i1Modality] = event.currentTarget.checked
+    i1ResetPreview(); render()
+  }))
+  document.querySelector('#i1-run-alignment')?.addEventListener('click', () => void i1RunAlignment())
+  document.querySelector('#i1-export-json')?.addEventListener('click', () => {
+    if (!state.alignmentPreview) return
+    void saveTextFile('4c-insight-observation-alignment.json', JSON.stringify(state.alignmentPreview, null, 2) + '\n')
+      .catch(error => { state.alignmentError = error.message; render() })
+  })
+  document.querySelector('#i1-export-tsv')?.addEventListener('click', () => {
+    if (!state.alignmentPreview) return
+    void saveTextFile('4c-insight-observation-alignment-review.tsv', alignmentTsv(state.alignmentPreview))
+      .catch(error => { state.alignmentError = error.message; render() })
+  })
+}
+
+
 function significantHitsView() {
   const cfg = state.hitConfig
   const compare = state.compareResult
@@ -2343,7 +2498,7 @@ function significantHitsView() {
   if (!compare) {
     return `<section class="page-heading"><div><span class="eyebrow">Integrative Analysis · I0</span><h2>Review multi-omics evidence and sample patterns</h2><p>This workflow starts from a completed Compare Groups analysis so the cohort definition, exclusions, covariates, and Case/Control labels cannot drift between feature selection and visualization.</p></div></section>
       ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
-      <section class="card migration-card"><span class="tag warning">Comparison required</span><h3>Run Compare Groups first.</h3><p>Start with the corrected comparison to review evidence from all seven data types. Complete the group comparison before opening this workflow.</p><div class="button-row"><button id="hits-open-compare" class="primary-button">Go to Compare Groups</button></div></section>`
+      ${i1AlignmentPanel()}<section class="card migration-card"><span class="tag warning">Comparison required</span><h3>Run Compare Groups first.</h3><p>Start with the corrected comparison to review evidence from all seven data types. Complete the group comparison before opening this workflow.</p><div class="button-row"><button id="hits-open-compare" class="primary-button">Go to Compare Groups</button></div></section>`
   }
 
   const comparisonName = compare.comparisonName || 'Current corrected comparison'
@@ -2354,6 +2509,7 @@ function significantHitsView() {
   <section class="card"><div class="card-heading"><div><h3>1. Comparison and sample definition</h3><p>This view reuses the current Compare Groups metadata roles, groups, covariates, exclusions, and merged tables. Change them in Compare Groups, then rerun that workflow if needed.</p></div><span class="tag success">${escapeHtml(comparisonName)}</span></div><div class="summary-grid compact-grid">${summaryCard('Case', frozen.case_label || 'Case', `${state.compareConfig.caseValues.length} selected metadata value${state.compareConfig.caseValues.length === 1 ? '' : 's'}`)}${summaryCard('Control', frozen.control_label || 'Control', `${state.compareConfig.controlValues.length} selected metadata value${state.compareConfig.controlValues.length === 1 ? '' : 's'}`)}${summaryCard('Subject / patient', state.compareConfig.subjectColumn || 'Not selected', state.compareConfig.subjectColumn ? 'Used for repeated-measure robust inference' : 'Samples treated as independent subjects')}${summaryCard('Covariates', state.compareConfig.covariates.length, state.compareConfig.covariates.length ? state.compareConfig.covariates.join(', ') : 'No adjustment covariates')}</div></section>
   ${globalThresholdControls()}
   ${renderIntegrativeEvidenceOverview()}
+  ${i1AlignmentPanel()}
   <section class="card"><div class="card-heading"><div><h3>3. Expression-only selected-hit structure: display limits</h3><p>The global FDR/log2FC thresholds define the expression hit set. These limits only cap how many selected features are drawn in dense views.</p></div></div><div class="form-grid hit-settings-grid"><label><span>Maximum PCA/clustering features</span><input id="hit-max-analysis" type="number" min="2" step="1" value="${cfg.maxAnalysisFeatures}"/></label><label><span>Maximum heatmap features</span><input id="hit-max-heatmap" type="number" min="1" step="1" value="${cfg.maxHeatmapFeatures}"/></label></div></section>
   <section class="card"><div class="card-heading"><div><h3>3a. Expression-only selected-hit structure</h3><p>This existing analysis runs gene and transcript selected-hit PCA and clustering only. It does not combine all seven modalities into one PCA.</p></div></div><div class="config-grid expression-source-grid"><div class="config-block stacked ${geneAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-gene-enabled" type="checkbox" ${cfg.geneEnabled && geneAvailable ? 'checked' : ''} ${geneAvailable ? '' : 'disabled'}/><span><strong>Gene expression</strong><small>Selected corrected gene hits</small></span></label><span class="tag ${geneAvailable ? 'success' : 'neutral'}">${geneAvailable ? 'Available' : 'Run W3 first'}</span></div></div><div class="config-block stacked ${transcriptAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-transcript-enabled" type="checkbox" ${cfg.transcriptEnabled && transcriptAvailable ? 'checked' : ''} ${transcriptAvailable ? '' : 'disabled'}/><span><strong>Transcript / isoform expression</strong><small>Selected corrected transcript hits</small></span></label><span class="tag ${transcriptAvailable ? 'success' : 'neutral'}">${transcriptAvailable ? 'Available' : 'Run W3 first'}</span></div></div></div>
   <div class="run-row"><div><strong>${enabledCount} expression data type${enabledCount === 1 ? '' : 's'} enabled for this separate analysis</strong><span>The corrected W3 model is rerun locally with the frozen settings, then only the selected-hit structure is retained.</span></div><button id="run-significant-hits" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run expression hit clustering'}</button></div></section>
@@ -2416,6 +2572,7 @@ async function runSignificantHits() {
 
 function bindSignificantHitEvents() {
   const cfg = state.hitConfig
+  bindI1AlignmentEvents()
   document.querySelectorAll('[data-integrative-modality]').forEach(input => {
     input.addEventListener('change', event => {
       if (!cfg.integrativeModalities || typeof cfg.integrativeModalities !== 'object') cfg.integrativeModalities = {}
