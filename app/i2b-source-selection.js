@@ -1,7 +1,7 @@
 /** I2B: local, identity-only source selection for unsupervised distances.
  * Never uses phenotype groups, adjusted hits, approximate aliases or imputation.
  */
-import { I1_MODALITIES } from './multiomics-alignment.js?v=0.21.0-i2b-source-distances'
+import { I1_MODALITIES } from './multiomics-alignment.js?v=0.22.0'
 const SOURCE_KEYS = new Set(I1_MODALITIES.map(mod => mod.key))
 const exact = x => typeof x === 'string' ? x.trim() : ''
 
@@ -11,7 +11,7 @@ const exact = x => typeof x === 'string' ? x.trim() : ''
  */
 export function prepareI2BRequests(alignment, records, resolveFile, selectedMerged = {}, enabled = {}) {
   if (alignment?.schema !== '4c-insight-observation-alignment-v1' || !Array.isArray(alignment.rows)) {
-    throw new Error('Run the I1 sample alignment before I2B distance generation')
+    throw new Error('Check sample alignment before source-distance calculation')
   }
   if (!Array.isArray(records) || typeof resolveFile !== 'function') throw new Error('A local source inventory is required')
   const requests = [], errors = []

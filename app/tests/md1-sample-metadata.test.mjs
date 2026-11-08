@@ -86,7 +86,7 @@ test('UI includes create/open/edit/mapping/export and activates metadata in scie
   assert.match(main, /metadataUseInAnalyses/)
   assert.match(main, /state\.qcConfig\.metadataId = editor\.generatedId/)
   assert.match(main, /Download file map TSV/)
-  assert.match(html, /styles\.css\?v=0\.21\.0-[a-z0-9-]+/)
+  assert.ok(html.includes(`styles.css?v=${main.match(/const APP_VERSION = '([^']+)'/)?.[1]}`), 'CSS must use the declared application cache revision')
 })
 
 test('file mappings can populate standard modality aliases without changing sample identities', async () => {

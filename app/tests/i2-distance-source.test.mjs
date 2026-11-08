@@ -29,9 +29,9 @@ test('I2A UI consumes only W4 full distances and retains I1 alignment', async ()
   assert.match(bridge,/status !== 'present'/)
   assert.match(bridge,/if \(!a \|\| !b\) \{ unmatched\+\+; continue \}/)
   assert.doesNotMatch(bridge,/q_value|beta_group|pca\.coordinates/)
-  assert.match(main,/I1 sample alignment/)
+  assert.match(main,/sample alignment/)
   const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(version,'0.21.0-i2b-source-distances')
+  assert.equal(version,'0.22.0')
   assert.match(index,new RegExp(`main.js\\?v=${version.replaceAll('.','\\.')}`))
 })
 

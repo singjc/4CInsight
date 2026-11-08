@@ -67,12 +67,12 @@ test('I0 full-width corrected tables have scroll containers, sticky headers and 
 test('I0 navigation is clear about current evidence versus future true joint analysis', () => {
   const main=read('main.js')
   assert.match(main,/\['hits', 'Integrative Analysis', '5'\]/)
-  assert.match(main,/Integrative evidence overview/)
-  assert.match(main,/Joint sample-level distance fusion is available below after I1 alignment/)
-  assert.match(main,/Expression-only selected-hit structure/)
-  assert.match(main,/Run expression hit clustering/)
+  assert.match(main,/Corrected evidence across data types/)
+  assert.match(main,/function i2DistancePanel\(\)/)
+  assert.match(main,/function significantPanelSection\(/)
+  assert.match(main,/function runSignificantHits\(/)
   assert.match(main,/function runSignificantHits\(\)/)
-  assert.match(main,/integrative-evidence\.js\?v=0\.21\.0-i2b-source-distances/)
+  assert.match(main,/integrative-evidence\.js\?v=0\.22\.0/)
   const index=read('index.html')
   const rev=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
   assert.ok(rev)

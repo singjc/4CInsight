@@ -1,7 +1,7 @@
 /** I2A bridge: convert full unsupervised W4 distances to exact I1 observation IDs.
  * No use of corrected group coefficients, q-values, phenotype labels, or PCA axes.
  */
-import { I1_MODALITIES } from './multiomics-alignment.js?v=0.21.0-i2b-source-distances'
+import { I1_MODALITIES } from './multiomics-alignment.js?v=0.22.0'
 
 const NAMES = Object.freeze({
   'Gene expression': 'gene',
@@ -77,7 +77,7 @@ export function extractFullDistanceViews(value) {
  */
 export function prepareJointDistanceInput(alignment, sourceViews, { minViews = 2 } = {}) {
   if (alignment?.schema !== '4c-insight-observation-alignment-v1' || !Array.isArray(alignment.rows)) {
-    throw new Error('Run I1 sample alignment with current metadata before distance fusion')
+    throw new Error('Check sample alignment with current metadata before distance fusion')
   }
   if (!Array.isArray(sourceViews)) throw new Error('No distance views were supplied')
   const retained = alignment.rows.filter(row => !row.excluded)

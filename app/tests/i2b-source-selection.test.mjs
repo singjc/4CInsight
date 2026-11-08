@@ -48,7 +48,7 @@ test('I2B rejects ambiguous and disconnected sources without blocking other moda
 })
 
 test('I2B rejects invalid and duplicate I1 observation or source aliases',()=>{
-  assert.throws(()=>prepareI2BRequests({},records,id=>files.get(id),chosen),/Run the I1 sample alignment/)
+  assert.throws(()=>prepareI2BRequests({},records,id=>files.get(id),chosen),/Check sample alignment/)
   const dup={...alignment,rows:[...alignment.rows,{...makeRow('ANOTHER'),modalities:{...makeRow('ANOTHER').modalities,bcr:{status:'present',alias:'S1'}}}]}
   const output=prepareI2BRequests(dup,records,id=>files.get(id),chosen)
   assert.ok(output.errors.some(e=>e.modality==='bcr' && /Duplicate/.test(e.message)))

@@ -39,7 +39,7 @@ jobs:
             --out-dir ../app/wasm \
             --out-name four_c_insight_wasm \
             --release
-          CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/ux9-wasm-memory.test.mjs app/tests/m1-wasm-integration.test.mjs app/tests/md1-sample-metadata.test.mjs app/tests/m2-multiomics.test.mjs app/tests/m2r6c-repertoire-clock.test.mjs app/tests/i2-distance-source.test.mjs app/tests/i2b-compiled-wasm.test.mjs
+          CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/ux9-wasm-memory.test.mjs app/tests/m1-wasm-integration.test.mjs app/tests/md1-sample-metadata.test.mjs app/tests/m2-multiomics.test.mjs app/tests/m2r6c-repertoire-clock.test.mjs app/tests/i2-distance-source.test.mjs app/tests/i2b-compiled-wasm.test.mjs app/tests/joint-structure-wasm.test.mjs
 
   web-static:
     runs-on: ubuntu-latest

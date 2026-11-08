@@ -757,3 +757,12 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .i2-neighbors { max-height: 440px; overflow: auto; }
 .i2-neighbors th { position: sticky; top: 0; z-index: 2; }
 @media (max-width: 830px) { .i2-result-grid { grid-template-columns: minmax(0, 1fr); } }
+/* Joint multi-modal ordination: full clustered matrix, no display row cap. */
+.joint-structure-plots { grid-template-columns: minmax(0,1fr); }
+.joint-structure .plot-card, .joint-structure .plot-shell { min-width:0; }
+.joint-structure .joint-point { fill:#576fae; fill-opacity:.8; stroke:#ffffff; stroke-width:.8; }
+.joint-cluster-scroll { overflow:auto; max-width:100%; max-height:660px; padding:8px; border:1px solid var(--border,#dce1e9); border-radius:8px; }
+.joint-cluster-scroll .joint-dendrogram { display:block; }
+.joint-dendrogram g { fill:none; stroke:#5c6c85; stroke-width:1; }
+#joint-structure-heatmap { display:block; max-width:none; height:auto; image-rendering:auto; }
+.joint-structure .check-label { margin-top:10px; }

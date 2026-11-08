@@ -2,6 +2,7 @@ import { classifyInputFilename } from './file-classifier.js'
 import { validateLocalInputFile } from './resource-controls.js'
 import { measureWasmAllocation } from './wasm-memory.js'
 import { runPortableMerge } from './merge-worker.js'
+import { analyzeJointStructure } from './joint-structure.js?v=0.22.0'
 
 let wasmModulePromise = null
 let wasmMemory = null
@@ -463,7 +464,7 @@ self.addEventListener('message', async (event) => {
       const wasm = await loadWasm()
       if (!wasm?.i2b_begin_json || !wasm?.i2b_add_sample_json || !wasm?.i2b_finish_json ||
           !wasm?.i2b_abort || !wasm?.i2b_expression_distance_json) {
-        throw new Error('Build the I2B WASM source-distance engine before running direct integration')
+        throw new Error('Rebuild the browser WASM source-distance engine before running direct integration')
       }
       const kind = request.modality
       const files = request.files || []
@@ -496,9 +497,14 @@ self.addEventListener('message', async (event) => {
       self.postMessage({ type: 'i2b-source-distance-result', requestId: request.requestId, view })
       return
     }
+    if (request.type === 'run-joint-structure') {
+      const result = analyzeJointStructure(request.result, request.options || {})
+      self.postMessage({ type: 'joint-structure-result', requestId: request.requestId, result })
+      return
+    }
     if (request.type === 'run-integrative-distance') {
       const wasm = await loadWasm()
-      if (!wasm?.fuse_integrative_distances_json) throw new Error('Build the I2A Rust/WASM distance engine before running this analysis')
+      if (!wasm?.fuse_integrative_distances_json) throw new Error('Rebuild the Rust/WASM distance engine before running this analysis')
       postProgress(request.requestId, 0, 1, 'Combining aligned full-distance views')
       const result = JSON.parse(wasm.fuse_integrative_distances_json(JSON.stringify(request.input)))
       postWasmMemory(request.requestId, true)

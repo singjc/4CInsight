@@ -73,6 +73,6 @@ test('Firefox display prioritizes engine memory rather than an unavailable-RAM w
   assert.match(main, /info\.deviceMemoryGiB !== null \?/)
   assert.doesNotMatch(main, /\$\{escapeHtml\(info\.memory\)\}.*On-device analysis/)
   assert.match(main, /Analysis memory is not total or free device RAM./)
-  assert.match(html, /0\.21\.0-[a-z0-9-]+/)
+  assert.ok(html.includes(`main.js?v=${main.match(/const APP_VERSION = '([^']+)'/)?.[1]}`), 'Main script must use the declared application cache revision')
   assert.doesNotMatch(main, /nativeMonitor|connect-native-monitor|resource-ram/)
 })
