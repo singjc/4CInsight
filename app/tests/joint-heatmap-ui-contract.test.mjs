@@ -26,7 +26,7 @@ test('joint heatmap has explicit original-distance labels, expand, independent r
 test('all external app assets refer to the declared application cache revision',()=>{
   const main=read('../main.js'),html=read('../index.html')
   const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(version,'0.22.5')
+  assert.equal(version,'0.22.6')
   for(const token of [`main.js?v=${version}`,`styles.css?v=${version}`])assert.ok(html.includes(token))
   assert.ok(main.includes(`joint-heatmap-viewer.js?v=${version}`))
   assert.ok(main.includes(`joint-structure.js?v=${version}`))

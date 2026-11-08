@@ -1,7 +1,7 @@
 /** I2A bridge: convert full unsupervised W4 distances to exact I1 observation IDs.
  * No use of corrected group coefficients, q-values, phenotype labels, or PCA axes.
  */
-import { I1_MODALITIES } from './multiomics-alignment.js?v=0.22.5'
+import { I1_MODALITIES } from './multiomics-alignment.js?v=0.22.6'
 
 const NAMES = Object.freeze({
   'Gene expression': 'gene',
@@ -23,6 +23,7 @@ function normalizedView(key, source) {
   return {
     modality: key,
     distance_label: method,
+    ...(Array.isArray(source.feature_samples) ? {feature_samples:source.feature_samples} : {}),
     pairs: source.pairwise_distances.map((pair, i) => {
       const a = trimmed(pair?.sample_a ?? pair?.a)
       const b = trimmed(pair?.sample_b ?? pair?.b)

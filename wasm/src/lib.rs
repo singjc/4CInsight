@@ -119,6 +119,7 @@ struct I2bSession {
     repertoire: Option<corrected::PortableRepertoireAccumulator>,
     maps: Vec<(String, HashMap<String, f64>)>,
     source_ids: HashSet<String>,
+    feature_samples: Vec<serde_json::Value>,
 }
 thread_local! {
     static I2B_SESSION: RefCell<Option<I2bSession>> = const { RefCell::new(None) };
@@ -136,6 +137,7 @@ fn i2b_kind_name(modality: cohort::CohortModality) -> &'static str {
 fn i2b_output(
     modality: &str,
     raw: corrected::UnsupervisedDistanceMatrix,
+    feature_samples: Vec<serde_json::Value>,
 ) -> Result<String, JsValue> {
     if raw.sample_ids.len() < 3
         || raw.distances.len() != raw.sample_ids.len()
@@ -162,6 +164,7 @@ fn i2b_output(
         "modality":modality,"distance_label":raw.distance_label,
         "pairs":pairs,"samples":raw.sample_ids.len(),"warnings":raw.warnings,
         "source":"direct-local-workbooks", "model":"unsupervised-native-w4-distance-kernel",
+        "feature_samples":feature_samples,
     }))
     .map_err(js_error)
 }
@@ -240,6 +243,7 @@ pub fn i2b_begin_json(modality: &str, options: &str) -> Result<String, JsValue> 
             repertoire,
             maps: Vec::new(),
             source_ids: HashSet::new(),
+            feature_samples: Vec::new(),
         });
         Ok("{\"status\":\"ready\"}".to_string())
     })
@@ -269,19 +273,46 @@ pub fn i2b_add_sample_json(
         if session.source_ids.contains(sample_id) {
             return Err(js_error(format!("Duplicate I2B source ID: {sample_id}")));
         }
-        if let Some(repertoire) = session.repertoire.as_mut() {
-            repertoire
-                .add_bytes(file_name, bytes, sample_id, "Eligible")
-                .map_err(js_error)?;
-        } else if session.modality == cohort::CohortModality::BcrIsotype {
-            let map =
-                corrected::parse_isotype_bytes(bytes, session.spec.exclude_undetermined_isotype)
+        let (features, complete_families): (Vec<serde_json::Value>, Vec<&str>) =
+            if let Some(repertoire) = session.repertoire.as_mut() {
+                repertoire
+                    .add_bytes(file_name, bytes, sample_id, "Eligible")
                     .map_err(js_error)?;
-            session.maps.push((sample_id.to_string(), map));
-        } else {
-            let map = corrected::parse_immune_bytes(bytes).map_err(js_error)?;
-            session.maps.push((sample_id.to_string(), map));
-        }
+                let native = repertoire.last_sample_feature_values().map_err(js_error)?;
+                // Mark a composition family complete only if this source actually
+                // measured that family. Never turn a missing column into zeros.
+                let families = ["V gene fraction", "D gene fraction", "J gene fraction", "Isotype fraction"]
+                    .into_iter()
+                    .filter(|family| native.iter().any(|(label, _, _, _)| label.as_str() == *family))
+                    .collect::<Vec<_>>();
+                (native.into_iter().map(|(family, name, value, unit)|
+                    serde_json::json!({"family":family,"name":name,"value":value,"unit":unit})
+                ).collect(), families)
+            } else if session.modality == cohort::CohortModality::BcrIsotype {
+                let map = corrected::parse_isotype_bytes(bytes, session.spec.exclude_undetermined_isotype)
+                    .map_err(js_error)?;
+                let total: f64 = map.values().filter(|v| v.is_finite() && **v > 0.0).sum();
+                let values = if total > 0.0 { map.iter().filter_map(|(name, value)| {
+                    if value.is_finite() && *value >= 0.0 {
+                        Some(serde_json::json!({"family":"Isotype fraction","name":name,"value":value / total,"unit":"fraction"}))
+                    } else { None }
+                }).collect() } else { Vec::new() };
+                session.maps.push((sample_id.to_string(), map));
+                (values, vec!["Isotype fraction"])
+            } else {
+                let map = corrected::parse_immune_bytes(bytes).map_err(js_error)?;
+                let values = map.iter().filter_map(|(name, value)| {
+                    if value.is_finite() {
+                        Some(serde_json::json!({"family":"Immune signature score","name":name,"value":value,"unit":"native score"}))
+                    } else { None }
+                }).collect();
+                session.maps.push((sample_id.to_string(), map));
+                (values, Vec::new())
+            };
+        session.feature_samples.push(serde_json::json!({
+            "sample_id":sample_id,"features":features,"complete_families":complete_families,
+            "source":"native-corrected-parser"
+        }));
         session.source_ids.insert(sample_id.to_string());
         serde_json::to_string(
             &serde_json::json!({"status":"added","samples":session.source_ids.len()}),
@@ -301,6 +332,7 @@ pub fn i2b_finish_json() -> Result<String, JsValue> {
     let session = I2B_SESSION
         .with(|cell| cell.borrow_mut().take())
         .ok_or_else(|| js_error("No I2B session is active"))?;
+    let feature_samples = session.feature_samples;
     let raw = match session.modality {
         cohort::CohortModality::Bcr
         | cohort::CohortModality::TcrAlpha
@@ -321,7 +353,7 @@ pub fn i2b_finish_json() -> Result<String, JsValue> {
         }
         _ => return Err(js_error("Unsupported I2B modality")),
     };
-    i2b_output(i2b_kind_name(session.modality), raw)
+    i2b_output(i2b_kind_name(session.modality), raw, feature_samples)
 }
 #[wasm_bindgen]
 pub fn i2b_abort() {
@@ -382,7 +414,7 @@ pub fn i2b_expression_distance_json(
         |_, _, _| {},
     )
     .map_err(js_error)?;
-    i2b_output(modality, raw)
+    i2b_output(modality, raw, Vec::new())
 }
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {

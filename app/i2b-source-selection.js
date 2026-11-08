@@ -1,7 +1,7 @@
 /** I2B: local, identity-only source selection for unsupervised distances.
  * Never uses phenotype groups, adjusted hits, approximate aliases or imputation.
  */
-import { I1_MODALITIES } from './multiomics-alignment.js?v=0.22.5'
+import { I1_MODALITIES } from './multiomics-alignment.js?v=0.22.6'
 const SOURCE_KEYS = new Set(I1_MODALITIES.map(mod => mod.key))
 const exact = x => typeof x === 'string' ? x.trim() : ''
 

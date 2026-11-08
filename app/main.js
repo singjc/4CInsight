@@ -1,17 +1,18 @@
-import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.5'
-import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.5'
-import { selectFeatureSamples, expressionAssociationsTsv } from './biological-feature-ranking.js?v=0.22.5'
-import { runBoundedSourceTasks, sourceProgressSummary, validParallelWorkers } from './source-distance-queue.js?v=0.22.5'
-import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.5'
-import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.5'
-import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.5'
-import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.5'
-import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.5'
-import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.5'
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.5'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.5'
-import { renderResultsOverview } from './results-overview.js?v=0.22.5'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.5'
+import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.6'
+import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.6'
+import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.6'
+import { selectFeatureSamples, expressionAssociationsTsv } from './biological-feature-ranking.js?v=0.22.6'
+import { runBoundedSourceTasks, sourceProgressSummary, validParallelWorkers } from './source-distance-queue.js?v=0.22.6'
+import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.6'
+import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.6'
+import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.6'
+import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.6'
+import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.6'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.6'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.6'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.6'
+import { renderResultsOverview } from './results-overview.js?v=0.22.6'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.6'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -21,8 +22,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.22.5'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.5'
+import { methodDocs } from './docs-content.js?v=0.22.6'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.6'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -36,7 +37,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.22.5'
+const APP_VERSION = '0.22.6'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -123,6 +124,8 @@ const state = {
   bioFeatureResult: null,
   bioFeatureAxis: 'pcoa1_spearman',
   bioSelectedProfile: '',
+  bioSelectedSourceFeature: '',
+  bioInspectObservation: '',
   bioFeatureBusy: false,
   bioFeatureError: '',
   bioFeatureBytes: 0,
@@ -3140,11 +3143,12 @@ function biologicalFindingsPanel() {
     </div>
     ${state.bioError?`<div class="analysis-warnings" role="alert">${escapeHtml(state.bioError)}</div>`:''}
     ${reportMarkup}
-    <div class="bio-feature-heading"><div><h4>Associated molecular signals</h4><p>Seven data types are shown above. Feature-level ranking is currently available only for gene and transcript TPM. BCR, TCR, isotype and immune feature extraction needs separate scientific validation.</p></div>
+    <div class="bio-feature-heading"><div><h4>Associated molecular signals</h4><p>RNA rankings use gene and transcript TPM. Repertoire, isotype and immune feature summaries from the native source parsers are shown below after the direct source distances are recalculated.</p></div>
       <button id="bio-feature-run" type="button" class="primary-button" ${!report||state.busy||state.bioFeatureBusy?'disabled':''}>${state.bioFeatureBusy?'Reading local RNA…':'Rank associated features from both RNA types'}</button></div>
     ${state.bioFeatureBusy?`<progress class="bio-feature-progress" max="${Math.max(1,state.bioFeatureTotal)}" value="${state.bioFeatureBytes}" aria-label="Current RNA table bytes processed"></progress><p role="status" class="i2b-progress-highlight">${escapeHtml(state.bioFeatureProgress||'Reading local RNA data')}</p>`:''}
     ${state.bioFeatureError?`<div class="analysis-warnings" role="alert">${escapeHtml(state.bioFeatureError)}</div>`:''}
     ${featureMarkup||'<p class="method-note">Select the button once to rank available gene and transcript measurements together. The source files stay on this device. Missing data types remain marked as unavailable.</p>'}
+    ${sourceBiologicalPanel()}
     <details class="details-block bio-exports"><summary>Download results and provenance</summary><div class="button-row">
       <button id="bio-export-json" type="button" class="secondary-button" ${!report?'disabled':''}>Joint interpretation JSON</button>
       <button id="bio-export-tsv" type="button" class="secondary-button" ${!report?'disabled':''}>Sample annotations TSV</button>
@@ -3194,6 +3198,7 @@ async function runBiologicalFeatureRanking() {
   finally{state.bioFeatureBusy=false;state.busy=false;state.bioFeatureProgress='';render()}
 }
 function bindBiologicalFindingsEvents() {
+  bindSourceBiologicalEvents()
   document.querySelector('#bio-metadata-column')?.addEventListener('change',event=>{
     state.bioMetadataColumn=event.currentTarget.value;state.bioResult=null;state.bioError='';render()
   })
@@ -3217,6 +3222,115 @@ function bindBiologicalFindingsEvents() {
   document.querySelector('#bio-export-tsv')?.addEventListener('click',()=>state.bioResult&&save('4c-insight-biological-findings.tsv',findingsTsv(state.bioResult)))
   document.querySelector('#bio-features-tsv')?.addEventListener('click',()=>state.bioFeatureResult&&save('4c-insight-all-rna-feature-associations.tsv',combinedFeatureTsv(state.bioFeatureResult),true))
   document.querySelector('#bio-features-json')?.addEventListener('click',()=>state.bioFeatureResult&&save('4c-insight-all-rna-feature-associations.json',JSON.stringify(state.bioFeatureResult,null,2)+'\n',true))
+}
+
+// Cache one post-fit analysis per fixed structure, alignment, cluster cut and
+// direct source object identity. Do not recompute thousands of rank correlations
+// on every UI render or progress message.
+let sourceBiologicalCache = null
+function cachedSourceBiological(structure,alignment,views,clusters,clusterCount){
+  const prev=sourceBiologicalCache
+  if(prev && prev.structure===structure && prev.alignment===alignment && prev.clusterCount===clusterCount &&
+    prev.views.length===views.length && prev.views.every((view,i)=>view===views[i]))return prev.result
+  const result=rankDirectSourceFeatures(structure,alignment,views,clusters)
+  sourceBiologicalCache={structure,alignment,views,clusterCount,result}
+  return result
+}
+// Post-fit measured features and sample inspection, without further file parsing.
+function sourceBiologicalPanel(){
+  const structure=state.i2StructureResult, alignment=state.alignmentPreview
+  if(!structure||!alignment)return ''
+  let found,views
+  try{
+    views=i2AvailableViews()
+    const clusters=Object.fromEntries((state.bioResult?.points||[]).map(p=>[p.observation,p.cluster]))
+    found=cachedSourceBiological(structure,alignment,views,clusters,state.bioClusterCount)
+  }catch(error){return `<p class="analysis-warnings" role="alert">Source feature interpretation: ${escapeHtml(error.message)}</p>`}
+  const labels=Object.fromEntries(I1_MODALITIES.map(m=>[m.key,m.label]))
+  const ids=structure.observations
+  const selected=ids.includes(state.bioInspectObservation)?state.bioInspectObservation:ids[0]
+  let inspect
+  try{ inspect=inspectJointObservation(structure,alignment,views,selected) }
+  catch(error){ return `<p class="analysis-warnings" role="alert">Sample inspection: ${escapeHtml(error.message)}</p>` }
+  const outliers=ids.map((id,i)=>{
+    const n=ids.length, ds=ids.map((_,j)=>structure.distances[i*n+j]).filter((v,j)=>j!==i&&Number.isFinite(v))
+    ds.sort((a,b)=>a-b)
+    return {id,median:ds.length?ds[Math.floor(ds.length/2)]:null}
+  }).filter(x=>x.median!==null).sort((a,b)=>b.median-a.median).slice(0,8)
+  const reportRows=Object.values(found.byModality).flatMap(m=>m.rows)
+  const profiles=Object.values(found.byModality).flatMap(m=>m.profiles)
+  const selectedProfile=profiles.find(p=>`${p.modality}|${p.family}|${p.feature}`===state.bioSelectedSourceFeature)||profiles[0]
+  const summary=I1_MODALITIES.filter(m=>!['gene','transcript'].includes(m.key)).map(m=>{
+    const data=found.byModality[m.key]
+    return `<article class="bio-native-modality"><strong>${escapeHtml(m.label)}</strong><span>${data?`${data.features_ranked.toLocaleString()} associated signals · ${data.sample_count} measured samples`:'Unavailable — recalculate local source distances'}</span>
+      ${data?.rows?.length?data.rows.slice(0,5).map(r=>{
+        const rho=r.pcoa1_spearman??0
+        const w=(Math.min(1,Math.abs(rho))*50).toFixed(2),left=rho>=0?50:50-Number(w)
+        return `<div class="bio-native-rank"><span title="${escapeHtml(r.family)}">${escapeHtml(r.feature)}</span><div class="bio-rank-track"><i class="bio-rank-zero"></i><b style="left:${left}%;width:${w}%;background:${rho<0?'#bd4656':'#3159d9'}"></b></div><small>${formatNumber(rho,3)}</small></div>`
+      }).join(''):'<p class="method-note">No source-level feature scores are available.</p>'}</article>`
+  }).join('')
+  const exactRows=reportRows.map(r=>({ ...r, modality_label:labels[r.modality]||r.modality }))
+  dynamicTableSources.set('bio-native-features',{
+    rows:exactRows,
+    cells:r=>[r.modality_label,r.family,r.feature,r.unit,r.n_used,r.pcoa1_spearman,r.pcoa2_spearman,r.cluster1_mean_difference],
+    rowHtml:r=>`<tr><td>${escapeHtml(r.modality_label)}</td><td>${escapeHtml(r.family)}</td><td>${escapeHtml(r.feature)}</td><td>${escapeHtml(r.unit)}</td><td>${r.n_used}</td><td>${r.pcoa1_spearman===null?'—':formatNumber(r.pcoa1_spearman,4)}</td><td>${r.pcoa2_spearman===null?'—':formatNumber(r.pcoa2_spearman,4)}</td><td>${r.cluster1_mean_difference===null?'—':formatNumber(r.cluster1_mean_difference,4)}</td></tr>`,
+  })
+  let profilePlot=''
+  if(selectedProfile&&state.bioResult){
+    const numbers=new Map(selectedProfile.values.map(v=>[v.observation,v.value]))
+    const vals=[...numbers.values()].filter(Number.isFinite)
+    if(vals.length){
+      const lo=Math.min(...vals),hi=Math.max(...vals)
+      const pts=state.bioResult.points
+      const [xmin,xmax]=paddedExtent(pts.map(p=>p.x)),[ymin,ymax]=paddedExtent(pts.map(p=>p.y))
+      const w=650,h=310,pad=48
+      const circles=pts.map(p=>{
+        const value=numbers.get(p.observation),valid=Number.isFinite(value)
+        const ratio=valid?(hi>lo?(value-lo)/(hi-lo):0.5):0
+        const color=valid?`rgb(${Math.round(237-196*ratio)},${Math.round(240-163*ratio)},${Math.round(250-35*ratio)})`:'#bbc4d3'
+        return `<circle cx="${(pad+(p.x-xmin)/(xmax-xmin)*(w-pad*2)).toFixed(2)}" cy="${(h-pad-(p.y-ymin)/(ymax-ymin)*(h-pad*2)).toFixed(2)}" r="4.3" fill="${color}"><title>${escapeHtml(p.observation)} · ${escapeHtml(selectedProfile.feature)}: ${valid?formatNumber(value,3):'Missing'} ${escapeHtml(selectedProfile.unit)}</title></circle>`
+      }).join('')
+      profilePlot=`<figure class="bio-native-plot"><svg viewBox="0 0 ${w} ${h}" aria-label="Fixed joint coordinates colored by measured ${escapeHtml(selectedProfile.feature)}"><rect x="${pad}" y="${pad}" width="${w-2*pad}" height="${h-2*pad}" fill="white" stroke="#e3e8f1"/>${circles}</svg><figcaption>${escapeHtml(labels[selectedProfile.modality])} · ${escapeHtml(selectedProfile.family)} · ${escapeHtml(selectedProfile.unit)} · range ${formatNumber(lo,3)}–${formatNumber(hi,3)} · gray: missing. Fixed PCoA coordinates.</figcaption></figure>`
+    }
+  }
+  const qcTable=state.alignmentTable
+  const qcCells=qcTable?.rows?.[inspect.metadata_row-2]||[]
+  const qcFields=(qcTable?.columns||[]).map((name,i)=>({name,value:qcCells[i]}))
+    .filter(x=>/qc|quality|batch|status|failure|processing|site|lane/i.test(x.name))
+  const modalities=inspect.modalities.map(row=>`<tr><td>${escapeHtml(labels[row.modality]||row.modality)}</td><td>${escapeHtml(row.status)}</td><td>${row.matched_pairs}/${row.expected_pairs}</td><td>${row.median_distance===null?'—':formatNumber(row.median_distance,4)}</td><td>${escapeHtml(row.nearest_neighbor||'—')}</td><td>${row.nearest_distance===null?'—':formatNumber(row.nearest_distance,4)}</td></tr>`).join('')
+  const summaryFeatures=inspect.modalities.flatMap(row=>row.features.filter(f=>f.family==='Repertoire metric'||f.family==='Immune signature score'||f.family==='Isotype fraction').slice(0,8).map(f=>({modality:row.modality,...f})))
+  return `<div class="bio-native-section"><h4>Measured repertoire, isotype and immune features</h4>
+    <p class="method-note">Five direct-workbook data types, scored on the fixed joint sample coordinates. Receptor features include native diversity/QC metrics and V/D/J fractions; isotypes use per-sample proportions; immune values use the reported signature scores. Zero is used only for an absent feature within a complete measured composition. Missing sources remain missing.</p>
+    <div class="bio-native-grid">${summary}</div>
+    ${found.warnings.map(w=>`<p class="method-note">${escapeHtml(w)}</p>`).join('')}
+    ${profiles.length?`<label>Inspect associated signal <select id="bio-native-profile">${profiles.map(p=>{const id=`${p.modality}|${p.family}|${p.feature}`;return `<option value="${escapeHtml(id)}" ${p===selectedProfile?'selected':''}>${escapeHtml(labels[p.modality])}: ${escapeHtml(p.feature)}</option>`}).join('')}</select></label>${profilePlot}`:''}
+    <details class="details-block"><summary>Search all ${reportRows.length.toLocaleString()} measured non-RNA feature associations</summary><div class="table-scroll differential-table" data-dynamic-table="bio-native-features"><table><thead><tr><th>Data type</th><th>Family</th><th>Feature</th><th>Unit</th><th>Samples</th><th>Spearman PCo1</th><th>Spearman PCo2</th><th>Cluster 1 mean difference</th></tr></thead><tbody></tbody></table></div></details>
+    <details class="details-block"><summary>Export non-RNA features</summary><button id="bio-native-tsv" type="button" class="secondary-button">All measured features TSV</button><button id="bio-native-json" type="button" class="secondary-button">Measured feature associations JSON</button></details>
+    <h4>Inspect an individual observation</h4><p class="method-note">Choose any retained observation to review source-specific distances and available measured features. This is a QC and biological hypothesis review, not an automated outlier test.</p>
+    <label>Fitted observation <select id="bio-inspect-observation"><optgroup label="Largest median joint distances — QC review">${outliers.map(x=>`<option value="${escapeHtml(x.id)}" ${x.id===selected?'selected':''}>${escapeHtml(x.id)} · ${formatNumber(x.median,3)}</option>`).join('')}</optgroup><optgroup label="All retained observations">${ids.map(id=>`<option value="${escapeHtml(id)}" ${id===selected&&!outliers.some(x=>x.id===id)?'selected':''}>${escapeHtml(id)}</option>`).join('')}</optgroup></select></label>
+    <p class="method-note">Patient ${escapeHtml(inspect.patient||'Not assigned')} · Visit ${escapeHtml(inspect.timepoint||'Not selected')} · Median joint distance ${inspect.joint_median_distance===null?'—':formatNumber(inspect.joint_median_distance,4)}</p>
+    ${qcFields.length?`<p class="method-note"><strong>Recorded QC and batch metadata:</strong> ${qcFields.map(x=>`${escapeHtml(x.name)}: ${escapeHtml(x.value||'Missing')}`).join(' · ')}</p>`:'<p class="method-note">No QC or batch columns identified in the active metadata.</p>'}
+    <p class="method-note"><strong>Nearest in joint distances:</strong> ${inspect.joint_nearest.map(x=>`${escapeHtml(x.observation)} (${formatNumber(x.distance,4)})`).join(' · ')}</p>
+    <div class="table-scroll"><table><thead><tr><th>Data type</th><th>Source status</th><th>Measured pairs</th><th>Median distance</th><th>Nearest observation</th><th>Nearest distance</th></tr></thead><tbody>${modalities}</tbody></table></div>
+    <details class="details-block"><summary>Measured values for this observation (${summaryFeatures.length} shown)</summary><div class="table-scroll"><table><thead><tr><th>Data type</th><th>Measurement</th><th>Value</th><th>Unit</th></tr></thead><tbody>${summaryFeatures.map(f=>`<tr><td>${escapeHtml(labels[f.modality])}</td><td>${escapeHtml(f.name)}</td><td>${formatNumber(f.value,4)}</td><td>${escapeHtml(f.unit)}</td></tr>`).join('')}</tbody></table></div></details>
+    <button id="bio-inspect-json" type="button" class="secondary-button">Save observation review JSON</button>
+    <p class="method-note">All associations are post-fit and descriptive. No new p-values, FDR or biomarker claims are calculated. Confirm signals using patient-aware inference and external samples.</p>
+  </div>`
+}
+function bindSourceBiologicalEvents(){
+  document.querySelector('#bio-native-profile')?.addEventListener('change',event=>{state.bioSelectedSourceFeature=event.currentTarget.value;render()})
+  document.querySelector('#bio-inspect-observation')?.addEventListener('change',event=>{state.bioInspectObservation=event.currentTarget.value;render()})
+  const getResults=()=>{
+    const clusters=Object.fromEntries((state.bioResult?.points||[]).map(p=>[p.observation,p.cluster]))
+    return cachedSourceBiological(state.i2StructureResult,state.alignmentPreview,i2AvailableViews(),clusters,state.bioClusterCount)
+  }
+  document.querySelector('#bio-native-tsv')?.addEventListener('click',()=>void saveTextFile('4c-insight-non-rna-source-features.tsv',directFeatureTsv(getResults())))
+  document.querySelector('#bio-native-json')?.addEventListener('click',()=>void saveTextFile('4c-insight-non-rna-source-features.json',JSON.stringify(getResults(),null,2)+'\n'))
+  document.querySelector('#bio-inspect-json')?.addEventListener('click',()=>{
+    const id=state.bioInspectObservation||state.i2StructureResult?.observations?.[0]
+    if(!id)return
+    void saveTextFile('4c-insight-observation-review.json',JSON.stringify(inspectJointObservation(state.i2StructureResult,state.alignmentPreview,i2AvailableViews(),id),null,2)+'\n')
+  })
 }
 
 function significantHitsView() {

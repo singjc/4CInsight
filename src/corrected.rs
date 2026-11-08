@@ -3118,6 +3118,43 @@ impl PortableRepertoireAccumulator {
         Ok(self.parsed.len())
     }
 
+
+    /// Native parser-derived sample features for post-fit interpretation.
+    /// Uses the already parsed workbook, with no second XLSX read or duplicate
+    /// clonotype working set. All V/D/J fractions use the parser's exact call
+    /// resolution. No disease or comparison labels are used.
+    pub(crate) fn last_sample_feature_values(&self) -> Result<Vec<(String, String, f64, String)>> {
+        let sample = self.parsed.last().ok_or_else(|| anyhow!("No repertoire sample parsed"))?;
+        let scalars = repertoire_qc_metrics_from_counts(
+            &sample.counts,
+            sample.top_clone_fraction,
+            sample.weighted_mean_cdr3_aa_length,
+        )?;
+        let mut result = Vec::new();
+        for (name, value) in scalars {
+            if !value.is_finite() { continue; }
+            let unit = match name.as_str() {
+                "Total clone count" => "clones",
+                "Observed richness" => "clonotypes",
+                "Shannon diversity" => "nats",
+                "Weighted mean CDR3 AA length" => "residues",
+                _ => "fraction",
+            };
+            result.push(("Repertoire metric".to_string(), name, value, unit.to_string()));
+        }
+        for family in ["V gene", "D gene", "J gene", "Isotype"] {
+            if let Some(values) = sample.feature_maps.get(family) {
+                let family_label = format!("{family} fraction");
+                for (feature, value) in values {
+                    if value.is_finite() && *value >= 0.0 {
+                        result.push((family_label.clone(), feature.clone(), *value, "fraction".to_string()));
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// I2B: use the same unsupervised clonotype-distance kernel as native W4.
     /// File bytes were released after each add_bytes call. No group fit is run.
     pub(crate) fn finish_unsupervised(self) -> Result<UnsupervisedDistanceMatrix> {

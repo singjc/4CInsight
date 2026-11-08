@@ -891,3 +891,23 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .biological-findings .bio-findings-summary { margin-bottom:12px; }
 @media(max-width:1180px) { .bio-dashboard-top { grid-template-columns:minmax(0,1fr); } .bio-modality-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media(max-width:760px) { .bio-rank-columns,.bio-modality-grid {grid-template-columns:minmax(0,1fr)} .bio-feature-heading {flex-direction:column;align-items:stretch} .bio-feature-selection label {display:block} .bio-feature-selection select {width:100%;min-width:0} }
+
+/* Post-fit, source-backed feature overview and exact sample inspection. */
+.bio-native-section { margin-top: 22px; border-top: 1px solid #e0e6ef; padding-top: 18px; }
+.bio-native-section h4 { margin: 14px 0 8px; }
+.bio-native-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(235px,1fr)); gap: 12px; margin: 12px 0 18px; }
+.bio-native-modality { border: 1px solid #dde4f0; background: #fbfcff; border-radius: 10px; padding: 12px; min-width: 0; }
+.bio-native-modality > strong, .bio-native-modality > span { display: block; }
+.bio-native-modality > strong { font-size: 13px; }
+.bio-native-modality > span { margin: 4px 0 12px; font-size: 11px; color: #5b6880; }
+.bio-native-rank { display:grid; grid-template-columns: minmax(0,1fr) minmax(76px,1.2fr) 39px; gap: 8px; align-items: center; margin: 8px 0; font-size: 11px; }
+.bio-native-rank > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bio-native-rank .bio-rank-track { height: 13px; }
+.bio-native-rank small { font-variant-numeric:tabular-nums; text-align:right; }
+.bio-native-section > label { display:block; margin: 12px 0; }
+.bio-native-section select { max-width: min(100%,620px); min-width: 190px; }
+.bio-native-plot { margin: 14px auto 18px; width: min(100%,740px); }
+.bio-native-plot svg { display:block; width:100%; height:auto; }
+.bio-native-plot figcaption { color:#586781; font-size:11px; margin-top:8px; }
+.bio-native-section .table-scroll { max-height: 480px; overflow:auto; }
+@media (max-width:680px) { .bio-native-grid { grid-template-columns: 1fr; } }

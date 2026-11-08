@@ -9,7 +9,8 @@ test('Biological Findings shows one combined all-seven-modality dashboard',()=>{
  assert.match(main,/combinedFeatureRows\(feature\)/)
  assert.match(main,/biologicalFeatureScatterSvg\(report,profile\)/)
  assert.match(main,/biologicalFindingsPanel\(\)/)
- assert.match(main,/Seven data types are shown above/)
+ assert.match(main,/\$\{sourceBiologicalPanel\(\)\}/)
+ assert.match(main,/RNA rankings use gene and transcript TPM/)
 })
 test('post-fit dashboard updates metadata without another Run or Next action',()=>{
  const main=read('../main.js')
@@ -21,10 +22,16 @@ test('post-fit dashboard updates metadata without another Run or Next action',()
  assert.match(fn,/for\(const kind of \['gene','transcript'\]\)/)
  assert.match(fn,/operation stopped\|operation cancelled\|aborted/)
 })
-test('no invented feature ranking for TCR, BCR, isotypes or immune signatures',()=>{
+test('non-RNA feature rankings come from exact native measurements, never fabricated significance',()=>{
  const main=read('../main.js'),helper=read('../biological-dashboard.js')
- assert.match(main,/feature-level ranking is currently available only for gene and transcript TPM/i)
+ const native=read('../source-biological-interpretation.js')
+ assert.match(main,/rankDirectSourceFeatures\(structure,alignment,views,clusters\)/)
+ assert.match(main,/\$\{sourceBiologicalPanel\(\)\}/)
+ assert.match(native,/DIRECT_FEATURE_MODALITIES = Object\.freeze\(\['bcr','tcrAlpha','tcrBeta','isotype','immune'\]\)/)
+ assert.match(native,/const owners=sourceOwners\(alignment,modality\)/)
+ assert.match(native,/entry\.complete\.has\(family\)\?0:null/)
  assert.match(helper,/Not in fitted model/)
+ assert.doesNotMatch(native,/\b(?:p_value|q_value|bh_adjusted|caseValues|controlValues)\b/)
  assert.doesNotMatch(helper,/p_value|q_value|BH-adjusted/)
 })
 test('full searchable table and exports preserve all RNA rows',()=>{
@@ -37,7 +44,7 @@ test('full searchable table and exports preserve all RNA rows',()=>{
 test('cache revision is coherent and feature worker stays local',()=>{
  const main=read('../main.js'),html=read('../index.html'),worker=read('../analysis-worker.js')
  const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
- assert.equal(version,'0.22.5')
+ assert.equal(version,'0.22.6')
  assert.ok(html.includes(`main.js?v=${version}`))
  assert.ok(html.includes(`styles.css?v=${version}`))
  assert.ok(main.includes(`biological-dashboard.js?v=${version}`))

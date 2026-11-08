@@ -2,7 +2,7 @@
  * No clinical or molecular feature enters distance fusion, PCoA or clustering.
  * Do not attach inferential p/q values to clusters chosen from these features.
  */
-import {cutHierarchicalTree} from './joint-stability.js?v=0.22.5'
+import {cutHierarchicalTree} from './joint-stability.js?v=0.22.6'
 
 const finite = v => typeof v === 'number' && Number.isFinite(v)
 const exact = v => String(v ?? '').trim()
