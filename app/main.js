@@ -1,7 +1,8 @@
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.21.0-h0-adjusted-omics-review'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-h0-adjusted-omics-review'
-import { renderResultsOverview } from './results-overview.js?v=0.21.0-h0-adjusted-omics-review'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-h0-adjusted-omics-review'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.21.0-i0-integrative-evidence'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.21.0-i0-integrative-evidence'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-i0-integrative-evidence'
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-i0-integrative-evidence'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-i0-integrative-evidence'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -11,8 +12,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-h0-adjusted-omics-review'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-h0-adjusted-omics-review'
+import { methodDocs } from './docs-content.js?v=0.21.0-i0-integrative-evidence'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-i0-integrative-evidence'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -26,7 +27,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-h0-adjusted-omics-review'
+const APP_VERSION = '0.21.0-i0-integrative-evidence'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -37,7 +38,7 @@ const tabs = [
   ['compare', 'Compare Groups', '3'],
   ['results', 'Results', 'R'],
   ['longitudinal', 'Longitudinal', '4'],
-  ['hits', 'Significant Hits', '5'],
+  ['hits', 'Integrative Analysis', '5'],
   ['history', 'History', '6'],
   ['docs', 'Docs', '?'],
   ['settings', 'Settings', '⚙'],
@@ -2280,14 +2281,33 @@ function significantCoherenceSummary(result) {
     .map(([label, entry]) => ({ label, entry, panel: entry.panel }))
     .sort((a, b) => Number(b.panel.silhouette || -1) - Number(a.panel.silhouette || -1))
   if (!rows.length) return ''
-  return `<section class="card"><div class="card-heading"><div><h3>Cross-modality selected-hit coherence</h3><p>This is a descriptive comparison of the post-selection structures. It is not a predictive ranking or independent validation.</p></div><span class="tag warning">Descriptive</span></div><div class="table-scroll"><table><thead><tr><th>Data type</th><th>Significant hits</th><th>Features analyzed</th><th>Silhouette</th><th>NN group accuracy</th><th>PERMANOVA p</th></tr></thead><tbody>${rows.map(({ label, panel }) => `<tr><td><strong>${escapeHtml(label)}</strong></td><td>${panel.significant_features_total}</td><td>${panel.analysis_features.length}</td><td>${formatNumber(panel.silhouette)}</td><td>${Number.isFinite(Number(panel.nearest_neighbor_group_accuracy)) ? `${(Number(panel.nearest_neighbor_group_accuracy) * 100).toFixed(1)}%` : '—'}</td><td>${formatNumber(panel.pca?.permanova_p)}</td></tr>`).join('')}</tbody></table></div></section>`
+  return `<section class="card"><div class="card-heading"><div><h3>Gene and transcript selected-hit structure comparison</h3><p>This is a descriptive comparison of the post-selection structures. It is not a predictive ranking or independent validation.</p></div><span class="tag warning">Descriptive</span></div><div class="table-scroll"><table><thead><tr><th>Data type</th><th>Significant hits</th><th>Features analyzed</th><th>Silhouette</th><th>NN group accuracy</th><th>PERMANOVA p</th></tr></thead><tbody>${rows.map(({ label, panel }) => `<tr><td><strong>${escapeHtml(label)}</strong></td><td>${panel.significant_features_total}</td><td>${panel.analysis_features.length}</td><td>${formatNumber(panel.silhouette)}</td><td>${Number.isFinite(Number(panel.nearest_neighbor_group_accuracy)) ? `${(Number(panel.nearest_neighbor_group_accuracy) * 100).toFixed(1)}%` : '—'}</td><td>${formatNumber(panel.pca?.permanova_p)}</td></tr>`).join('')}</tbody></table></div></section>`
+}
+
+function renderIntegrativeEvidenceOverview() {
+  const cfg = state.hitConfig
+  const rows = summarizeIntegrativeEvidence(state.compareResult, {
+    ...state.globalThresholds,
+    omicsMinAdjustedEffect: cfg.omicsMinAdjustedEffect ?? 0,
+  }, cfg.integrativeModalities || {})
+  const totals = integrativeSummaryTotals(rows)
+  const controls = rows.map(row => `<label><input type="checkbox" data-integrative-modality="${row.key}" ${row.included ? 'checked' : ''} ${row.available ? '' : 'disabled'}/><span>${escapeHtml(row.label)}${row.available ? '' : ' (no result)'}</span></label>`).join('')
+  const body = rows.filter(row => row.included).map(row => `<tr><td><strong>${escapeHtml(row.label)}</strong></td><td>${row.available ? 'Available' : 'Not available'}</td><td>${row.samples === null ? '—' : row.samples.toLocaleString()}</td><td>${row.available ? row.tested.toLocaleString() : '—'}</td><td>${row.available ? row.selected.toLocaleString() : '—'}</td><td>${escapeHtml(row.effectType)}</td></tr>`).join('')
+  return `<section class="card integrative-evidence" id="integrative-evidence"><div class="card-heading"><div><h3>2. Integrative evidence overview</h3><p>Compare previously calculated findings across all available data types. Choose which results to include below.</p></div><span class="tag neutral">Evidence summary</span></div>
+    <div class="summary-grid compact-grid">${summaryCard('Selected data types', totals.included, `${totals.available} with completed results`)}${summaryCard('Adjusted tests available', totals.adjustedTests.toLocaleString(), 'Across selected data types')}${summaryCard('Selected adjusted findings', totals.selectedTests.toLocaleString(), 'Using each data type’s thresholds')}</div>
+    <div class="integrative-selector" role="group" aria-label="Data types to review">${controls}</div>
+    ${totals.included ? `<div class="table-scroll"><table class="integrative-evidence-table"><thead><tr><th>Data type</th><th>Result</th><th>Samples</th><th>Adjusted tests</th><th>Selected findings</th><th>Effect interpretation</th></tr></thead><tbody>${body}</tbody></table></div>` : '<p class="integrative-message">Select one or more available data types to review.</p>'}
+    <div class="run-row"><div><strong>Selected findings from all included data types</strong><span>Save a complete table with modality names, feature families, original q-values, and effects.</span></div><button id="integrative-export-csv" class="secondary-button" type="button" ${totals.selectedTests ? '' : 'disabled'}>Save combined evidence CSV</button></div>
+    <p class="integrative-message">These are results from separate adjusted analyses, not one joint statistical model. BH q-values are corrected within their original test families. Effect sizes use different scales and must not be compared directly across data types.</p>
+    <p class="integrative-message"><strong>Joint sample-level integration is not available in this version.</strong> It needs sample alignment, missing-data checks, and validated combined-distance or latent-factor calculations.</p>
+  </section>`
 }
 
 function renderAdjustedOmicsReview() {
   const cfg = state.hitConfig
   const raw = Number(cfg.omicsMinAdjustedEffect ?? 0)
   const minEffect = Number.isFinite(raw) && raw >= 0 ? raw : 0
-  const groups = collectAdjustedTests(state.compareResult)
+  const groups = collectAdjustedTests(state.compareResult).filter(group => cfg.integrativeModalities?.[group.key] !== false)
   const available = groups.filter(group => group.available).length
   const selectedRows = []
   const sections = groups.map(group => {
@@ -2300,14 +2320,14 @@ function renderAdjustedOmicsReview() {
       const cells = row => [row.family, row.feature, row.secondary_id, row.adjusted_effect, row.q_value, row.p_value]
       const rowHtml = row => `<tr><td>${escapeHtml(row.family)}</td><td><strong>${escapeHtml(row.feature)}</strong></td><td>${escapeHtml(row.secondary_id)}</td><td>${formatNumber(row.adjusted_effect)}</td><td>${formatNumber(row.q_value)}</td><td>${formatNumber(row.p_value)}</td></tr>`
       dynamicTableSources.set(tableId, { rows: selected, cells, rowHtml })
-      detail = `<details class="details-block result-details"><summary>View ${selected.length} selected features</summary><div class="table-scroll differential-table" data-dynamic-table="${tableId}"><table><thead><tr><th>Feature family</th><th>Feature</th><th>Secondary ID</th><th>Adjusted group effect</th><th>BH q-value</th><th>p-value</th></tr></thead><tbody></tbody></table></div><p class="table-note">Search and sort apply to all selected features. CSV export includes the full selection.</p></details>`
+      detail = `<details class="details-block result-details"><summary>View ${selected.length} selected features</summary><div class="table-scroll differential-table h0-hits-scroll" data-dynamic-table="${tableId}"><table><thead><tr><th>Feature family</th><th>Feature</th><th>Secondary ID</th><th>Adjusted group effect</th><th>BH q-value</th><th>p-value</th></tr></thead><tbody></tbody></table></div><p class="table-note">Search and sort apply to all selected features. CSV export includes the full selection.</p></details>`
     }
-    return `<div class="config-block stacked ${group.available ? '' : 'muted-block'}"><div class="config-heading"><strong>${escapeHtml(group.label)}</strong><span class="tag ${group.available ? 'neutral' : 'warning'}">${escapeHtml(tag)}</span></div>${!group.available ? '<small>No corrected result is available for this data type.</small>' : !group.rows.length ? '<small>The corrected model did not produce adjusted feature tests for this data type.</small>' : !selected.length ? '<small>No adjusted features pass the current FDR and adjusted-effect thresholds.</small>' : ''}${detail}</div>`
+    return `<div class="config-block h0-modality-card ${group.available ? '' : 'muted-block'}"><div class="config-heading"><strong>${escapeHtml(group.label)}</strong><span class="tag ${group.available ? 'neutral' : 'warning'}">${escapeHtml(tag)}</span></div>${!group.available ? '<small>No corrected result is available for this data type.</small>' : !group.rows.length ? '<small>The corrected model did not produce adjusted feature tests for this data type.</small>' : !selected.length ? '<small>No adjusted features pass the current FDR and adjusted-effect thresholds.</small>' : ''}${detail}</div>`
   }).join('')
-  return `<section class="card"><div class="card-heading"><div><h3>4. Corrected hits in receptor and immune data</h3><p>Review adjusted tests already calculated in Compare Groups. This table does not run a second model.</p></div><span class="tag neutral">${available}/5 completed</span></div>
+  return `<section class="card"><div class="card-heading"><div><h3>4. Receptor and immune adjusted findings</h3><p>Review adjusted tests already calculated in Compare Groups. This table does not run a second model.</p></div><span class="tag neutral">${available}/5 completed</span></div>
     <div class="form-grid hit-settings-grid"><label><span>Minimum |adjusted effect| for receptor, isotype and immune tests</span><input id="hit-omics-min-effect" type="number" min="0" step="0.1" value="${minEffect}"/></label><div><strong>FDR threshold</strong><p class="method-note">The global BH q-value limit is ${formatNumber(state.globalThresholds.fdr)}. These adjusted effects are not all log2 fold changes.</p></div></div>
     <p class="method-note">Full selected-hit PCA and clustering for these modalities are not yet available. Do not interpret the global ordination from Compare Groups as a selected-hit analysis.</p>
-    <div class="config-grid expression-source-grid">${sections}</div>
+    <div class="h0-modality-grid">${sections}</div>
     <div class="run-row"><div><strong>${selectedRows.length} selected adjusted tests across ${available} completed data types</strong><span>Selection uses finite BH q-values and adjusted group effects, without a new model fit.</span></div><button id="export-omics-adjusted-hits" class="secondary-button" type="button" ${selectedRows.length ? '' : 'disabled'}>Save selected hits CSV</button></div>
   </section>`
 }
@@ -2321,20 +2341,22 @@ function significantHitsView() {
   const runnable = Boolean(compare && state.wasmReady && !state.busy && selectedFile(state.qcConfig.metadataId) && enabledCount > 0)
 
   if (!compare) {
-    return `<section class="page-heading"><div><span class="eyebrow">Significant Hits · W5</span><h2>Inspect the structure of differential hits</h2><p>This workflow starts from a completed Compare Groups analysis so the cohort definition, exclusions, covariates, and Case/Control labels cannot drift between feature selection and visualization.</p></div></section>
+    return `<section class="page-heading"><div><span class="eyebrow">Integrative Analysis · I0</span><h2>Review multi-omics evidence and sample patterns</h2><p>This workflow starts from a completed Compare Groups analysis so the cohort definition, exclusions, covariates, and Case/Control labels cannot drift between feature selection and visualization.</p></div></section>
       ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
-      <section class="card migration-card"><span class="tag warning">Comparison required</span><h3>Run Compare Groups first.</h3><p>Significant-hit PCA, clustering, and heatmaps are post-selection views of the same corrected comparison. Complete the group comparison before opening this workflow.</p><div class="button-row"><button id="hits-open-compare" class="primary-button">Go to Compare Groups</button></div></section>`
+      <section class="card migration-card"><span class="tag warning">Comparison required</span><h3>Run Compare Groups first.</h3><p>Start with the corrected comparison to review evidence from all seven data types. Complete the group comparison before opening this workflow.</p><div class="button-row"><button id="hits-open-compare" class="primary-button">Go to Compare Groups</button></div></section>`
   }
 
   const comparisonName = compare.comparisonName || 'Current corrected comparison'
-  return `<section class="page-heading"><div><span class="eyebrow">Significant Hits · W5</span><h2>Post-selection PCA, clustering, and heatmaps</h2><p>Use the FDR-supported features from <strong>${escapeHtml(comparisonName)}</strong> to ask whether the discovered signal is coherent across samples.</p></div><div class="local-card"><strong>Descriptive, not validation</strong><span>The same Case/Control labels select the features and appear in these plots.</span></div></section>
+  const frozen = [compare.gene, compare.transcript, compare.bcr, compare.tcrAlpha, compare.tcrBeta, compare.isotype, compare.immune].find(entry => entry?.comparison)?.comparison || {}
+  return `<section class="page-heading"><div><span class="eyebrow">Integrative Analysis · I0</span><h2>Review evidence and selected-hit structure across data types</h2><p>Explore adjusted findings from <strong>${escapeHtml(comparisonName)}</strong> across the available data types. Expression-only selected-hit clustering remains available below.</p></div><div class="local-card"><strong>Exploratory evidence</strong><span>Results come from the existing corrected comparison. No joint model is fitted.</span></div></section>
   ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
-  <div class="notice-banner" role="note"><strong>Post-selection interpretation:</strong><span>Clean Case/Control separation here is expected to some degree because these features were selected using the same labels. Use these plots to inspect consistency, outliers, and multivariate structure—not as held-out predictive performance.</span></div>
-  <section class="card"><div class="card-heading"><div><h3>1. Frozen comparison</h3><p>W5 reuses the current W3 metadata roles, groups, covariates, exclusions, and merged tables. Change them in Compare Groups, then rerun that workflow if needed.</p></div><span class="tag success">${escapeHtml(comparisonName)}</span></div><div class="summary-grid compact-grid">${summaryCard('Case', compare.gene?.comparison?.case_label || compare.transcript?.comparison?.case_label || 'Case', `${state.compareConfig.caseValues.length} selected metadata value${state.compareConfig.caseValues.length === 1 ? '' : 's'}`)}${summaryCard('Control', compare.gene?.comparison?.control_label || compare.transcript?.comparison?.control_label || 'Control', `${state.compareConfig.controlValues.length} selected metadata value${state.compareConfig.controlValues.length === 1 ? '' : 's'}`)}${summaryCard('Subject / patient', state.compareConfig.subjectColumn || 'Not selected', state.compareConfig.subjectColumn ? 'Used for repeated-measure robust inference' : 'Samples treated as independent subjects')}${summaryCard('Covariates', state.compareConfig.covariates.length, state.compareConfig.covariates.length ? state.compareConfig.covariates.join(', ') : 'No adjustment covariates')}</div></section>
+  <div class="notice-banner" role="note"><strong>Interpretation:</strong><span>A significant result in one data type does not prove agreement between data types. Selected-hit PCA uses the same labels for feature selection and display; it is not held-out predictive performance.</span></div>
+  <section class="card"><div class="card-heading"><div><h3>1. Comparison and sample definition</h3><p>This view reuses the current Compare Groups metadata roles, groups, covariates, exclusions, and merged tables. Change them in Compare Groups, then rerun that workflow if needed.</p></div><span class="tag success">${escapeHtml(comparisonName)}</span></div><div class="summary-grid compact-grid">${summaryCard('Case', frozen.case_label || 'Case', `${state.compareConfig.caseValues.length} selected metadata value${state.compareConfig.caseValues.length === 1 ? '' : 's'}`)}${summaryCard('Control', frozen.control_label || 'Control', `${state.compareConfig.controlValues.length} selected metadata value${state.compareConfig.controlValues.length === 1 ? '' : 's'}`)}${summaryCard('Subject / patient', state.compareConfig.subjectColumn || 'Not selected', state.compareConfig.subjectColumn ? 'Used for repeated-measure robust inference' : 'Samples treated as independent subjects')}${summaryCard('Covariates', state.compareConfig.covariates.length, state.compareConfig.covariates.length ? state.compareConfig.covariates.join(', ') : 'No adjustment covariates')}</div></section>
   ${globalThresholdControls()}
-  <section class="card"><div class="card-heading"><div><h3>2. Post-selection display limits</h3><p>The global FDR/log2FC thresholds define the hit set. These limits only cap how many selected features are drawn in dense views.</p></div></div><div class="form-grid hit-settings-grid"><label><span>Maximum PCA/clustering features</span><input id="hit-max-analysis" type="number" min="2" step="1" value="${cfg.maxAnalysisFeatures}"/></label><label><span>Maximum heatmap features</span><input id="hit-max-heatmap" type="number" min="1" step="1" value="${cfg.maxHeatmapFeatures}"/></label></div></section>
-  <section class="card"><div class="card-heading"><div><h3>3. Expression clustering</h3><p>Gene and transcript options run selected-hit PCA and clustering. The five additional data types have a corrected-hit review below.</p></div></div><div class="config-grid expression-source-grid"><div class="config-block stacked ${geneAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-gene-enabled" type="checkbox" ${cfg.geneEnabled && geneAvailable ? 'checked' : ''} ${geneAvailable ? '' : 'disabled'}/><span><strong>Gene expression</strong><small>Selected corrected gene hits</small></span></label><span class="tag ${geneAvailable ? 'success' : 'neutral'}">${geneAvailable ? 'Available' : 'Run W3 first'}</span></div></div><div class="config-block stacked ${transcriptAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-transcript-enabled" type="checkbox" ${cfg.transcriptEnabled && transcriptAvailable ? 'checked' : ''} ${transcriptAvailable ? '' : 'disabled'}/><span><strong>Transcript / isoform expression</strong><small>Selected corrected transcript hits</small></span></label><span class="tag ${transcriptAvailable ? 'success' : 'neutral'}">${transcriptAvailable ? 'Available' : 'Run W3 first'}</span></div></div></div>
-  <div class="run-row"><div><strong>${enabledCount} expression data type${enabledCount === 1 ? '' : 's'} enabled</strong><span>The corrected W3 model is rerun locally with the frozen settings, then only the selected-hit structure is retained.</span></div><button id="run-significant-hits" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run significant-hit structure'}</button></div></section>
+  ${renderIntegrativeEvidenceOverview()}
+  <section class="card"><div class="card-heading"><div><h3>3. Expression-only selected-hit structure: display limits</h3><p>The global FDR/log2FC thresholds define the expression hit set. These limits only cap how many selected features are drawn in dense views.</p></div></div><div class="form-grid hit-settings-grid"><label><span>Maximum PCA/clustering features</span><input id="hit-max-analysis" type="number" min="2" step="1" value="${cfg.maxAnalysisFeatures}"/></label><label><span>Maximum heatmap features</span><input id="hit-max-heatmap" type="number" min="1" step="1" value="${cfg.maxHeatmapFeatures}"/></label></div></section>
+  <section class="card"><div class="card-heading"><div><h3>3a. Expression-only selected-hit structure</h3><p>This existing analysis runs gene and transcript selected-hit PCA and clustering only. It does not combine all seven modalities into one PCA.</p></div></div><div class="config-grid expression-source-grid"><div class="config-block stacked ${geneAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-gene-enabled" type="checkbox" ${cfg.geneEnabled && geneAvailable ? 'checked' : ''} ${geneAvailable ? '' : 'disabled'}/><span><strong>Gene expression</strong><small>Selected corrected gene hits</small></span></label><span class="tag ${geneAvailable ? 'success' : 'neutral'}">${geneAvailable ? 'Available' : 'Run W3 first'}</span></div></div><div class="config-block stacked ${transcriptAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-transcript-enabled" type="checkbox" ${cfg.transcriptEnabled && transcriptAvailable ? 'checked' : ''} ${transcriptAvailable ? '' : 'disabled'}/><span><strong>Transcript / isoform expression</strong><small>Selected corrected transcript hits</small></span></label><span class="tag ${transcriptAvailable ? 'success' : 'neutral'}">${transcriptAvailable ? 'Available' : 'Run W3 first'}</span></div></div></div>
+  <div class="run-row"><div><strong>${enabledCount} expression data type${enabledCount === 1 ? '' : 's'} enabled for this separate analysis</strong><span>The corrected W3 model is rerun locally with the frozen settings, then only the selected-hit structure is retained.</span></div><button id="run-significant-hits" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run expression hit clustering'}</button></div></section>
   ${renderAdjustedOmicsReview()}
   ${state.hitProgress ? `<div class="progress-card" role="status"><div class="progress-copy"><strong>${escapeHtml(state.hitProgress.message)}</strong><span>${state.hitProgress.completed} of ${state.hitProgress.total} modality steps complete</span></div><progress max="${Math.max(1, state.hitProgress.total)}" value="${state.hitProgress.completed}"></progress></div>` : ''}
   ${state.hitResult ? `<div class="result-heading"><div><span class="eyebrow">Post-selection result</span><h3>${escapeHtml(state.hitResult.comparisonName)}</h3><p>Generated entirely on this device from the same corrected comparison settings.</p></div><button id="export-significant-hits" class="secondary-button">Save significant-hit JSON</button></div>${significantCoherenceSummary(state.hitResult)}${significantPanelSection('Gene expression', state.hitResult.gene)}${significantPanelSection('Transcript / isoform expression', state.hitResult.transcript)}` : ''}`
@@ -2394,6 +2416,20 @@ async function runSignificantHits() {
 
 function bindSignificantHitEvents() {
   const cfg = state.hitConfig
+  document.querySelectorAll('[data-integrative-modality]').forEach(input => {
+    input.addEventListener('change', event => {
+      if (!cfg.integrativeModalities || typeof cfg.integrativeModalities !== 'object') cfg.integrativeModalities = {}
+      cfg.integrativeModalities[event.currentTarget.dataset.integrativeModality] = event.currentTarget.checked
+      render()
+    })
+  })
+  document.querySelector('#integrative-export-csv')?.addEventListener('click', () => {
+    const rows = collectIntegrativeSelectedRows(state.compareResult, {
+      ...state.globalThresholds, omicsMinAdjustedEffect: cfg.omicsMinAdjustedEffect ?? 0,
+    }, cfg.integrativeModalities || {})
+    void saveTextFile('4c-insight-integrative-selected-evidence.csv', adjustedTestsCsv(rows))
+      .catch(error => { state.error = error instanceof Error ? error.message : String(error); render() })
+  })
   document.querySelector('#hits-open-compare')?.addEventListener('click', () => { state.tab = 'compare'; render() })
   bindGlobalThresholdEvents()
   document.querySelector('#hit-max-analysis')?.addEventListener('change', (event) => { cfg.maxAnalysisFeatures = Math.max(2, Math.trunc(Number(event.currentTarget.value) || 500)); state.hitResult = null })
@@ -2410,6 +2446,7 @@ function bindSignificantHitEvents() {
   document.querySelector('#export-omics-adjusted-hits')?.addEventListener('click', () => {
     const minimum = Number(state.hitConfig.omicsMinAdjustedEffect ?? 0)
     const rows = collectAdjustedTests(state.compareResult)
+      .filter(group => state.hitConfig.integrativeModalities?.[group.key] !== false)
       .flatMap(group => selectAdjustedTests(group.rows, state.globalThresholds.fdr, minimum))
     void saveTextFile('4c-insight-adjusted-omics-hits.csv', adjustedTestsCsv(rows))
       .catch(error => { state.error = error instanceof Error ? error.message : String(error); render() })
