@@ -2,8 +2,9 @@ import { classifyInputFilename } from './file-classifier.js'
 import { validateLocalInputFile } from './resource-controls.js'
 import { measureWasmAllocation } from './wasm-memory.js'
 import { runPortableMerge } from './merge-worker.js'
-import { analyzeJointStructure } from './joint-structure.js?v=0.22.3'
-import { runPatientStabilityAsync } from './joint-stability.js?v=0.22.3'
+import { rankExpressionFeatures } from './biological-feature-ranking.js?v=0.22.4'
+import { analyzeJointStructure } from './joint-structure.js?v=0.22.4'
+import { runPatientStabilityAsync } from './joint-stability.js?v=0.22.4'
 
 let wasmModulePromise = null
 let wasmMemory = null
@@ -496,6 +497,14 @@ self.addEventListener('message', async (event) => {
       }
       postWasmMemory(request.requestId, true)
       self.postMessage({ type: 'i2b-source-distance-result', requestId: request.requestId, view })
+      return
+    }
+    if (request.type === 'run-biological-feature-ranking') {
+      const result = await rankExpressionFeatures(request.file, {
+        modality: request.modality, samples: request.samples, clusterByObservation: request.clusters || {},
+        onProgress: (completed,total,message) => postProgress(request.requestId,completed,total,message),
+      })
+      self.postMessage({type:'biological-feature-result', requestId:request.requestId, result})
       return
     }
     if (request.type === 'run-joint-stability') {
