@@ -1,9 +1,10 @@
-import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.21.0-i1-observation-alignment'
-import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.21.0-i1-observation-alignment'
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.21.0-i1-observation-alignment'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-i1-observation-alignment'
-import { renderResultsOverview } from './results-overview.js?v=0.21.0-i1-observation-alignment'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-i1-observation-alignment'
+import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.21.0-i2-distance-fusion'
+import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.21.0-i2-distance-fusion'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.21.0-i2-distance-fusion'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.21.0-i2-distance-fusion'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-i2-distance-fusion'
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-i2-distance-fusion'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-i2-distance-fusion'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -13,8 +14,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-i1-observation-alignment'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-i1-observation-alignment'
+import { methodDocs } from './docs-content.js?v=0.21.0-i2-distance-fusion'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-i2-distance-fusion'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -28,7 +29,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-i1-observation-alignment'
+const APP_VERSION = '0.21.0-i2-distance-fusion'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -108,6 +109,11 @@ const state = {
   alignmentPreview: null,
   alignmentBusy: false,
   alignmentError: '',
+  i2ImportedViews: [],
+  i2Result: null,
+  i2Busy: false,
+  i2Error: '',
+  i2MinViews: 2,
   historyEntries: [],
   historyLoaded: false,
   historyBusy: false,
@@ -387,6 +393,8 @@ function resetQcStateAfterInputsChange() {
   state.longitudinalProgress = null
   state.hitResult = null
   state.alignmentPreview = null
+  state.i2Result = null
+  state.i2ImportedViews = []
   state.alignmentError = ''
   state.hitProgress = null
 
@@ -571,6 +579,8 @@ function clearProject() {
   state.longitudinalProgress = null
   state.hitResult = null
   state.alignmentPreview = null
+  state.i2Result = null
+  state.i2ImportedViews = []
   state.alignmentError = ''
   state.hitProgress = null
   state.qcConfig.metadataId = ''
@@ -2147,6 +2157,7 @@ async function runLongitudinalAnalysis() {
       render()
     })
     state.longitudinalResult = response.result
+    state.i2Result = null
     await recordHistory('longitudinal-patient-signature-expression', 'Longitudinal patient signature')
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
@@ -2310,7 +2321,7 @@ function renderIntegrativeEvidenceOverview() {
     ${totals.included ? `<div class="table-scroll"><table class="integrative-evidence-table"><thead><tr><th>Data type</th><th>Result</th><th>Samples</th><th>Adjusted tests</th><th>Selected findings</th><th>Effect interpretation</th></tr></thead><tbody>${body}</tbody></table></div>` : '<p class="integrative-message">Select one or more available data types to review.</p>'}
     <div class="run-row"><div><strong>Selected findings from all included data types</strong><span>Save a complete table with modality names, feature families, original q-values, and effects.</span></div><button id="integrative-export-csv" class="secondary-button" type="button" ${totals.selectedTests ? '' : 'disabled'}>Save combined evidence CSV</button></div>
     <p class="integrative-message">These are results from separate adjusted analyses, not one joint statistical model. BH q-values are corrected within their original test families. Effect sizes use different scales and must not be compared directly across data types.</p>
-    <p class="integrative-message"><strong>Joint sample-level integration is not available in this version. The I1 sample alignment below checks identity and source availability only; it does not fit a combined model.</strong> It needs sample alignment, missing-data checks, and validated combined-distance or latent-factor calculations.</p>
+    <p class="integrative-message"><strong>Joint sample-level distance fusion is available below after I1 alignment when full unsupervised distance results are supplied. Direct full-distance generation from all seven raw data types and latent-factor analysis remain future work. The I1 sample alignment below checks identity and source availability only; it does not fit a combined model.</strong> It needs sample alignment, missing-data checks, and validated combined-distance or latent-factor calculations.</p>
   </section>`
 }
 
@@ -2397,10 +2408,10 @@ function i1AlignmentPanel() {
     <div class="run-row"><div><strong>Build an observation-level alignment manifest</strong><span>Reads metadata and only the header of each selected merged expression table; raw sample workbooks are not opened.</span></div><button id="i1-run-alignment" class="primary-button" type="button" ${state.alignmentBusy || state.busy || state.mergeBusy || (state.alignmentSource !== 'draft' && !activeFile) ? 'disabled' : ''}>${state.alignmentBusy ? 'Checking sources…' : 'Check sample alignment'}</button></div>
     ${state.alignmentError ? `<div class="analysis-warnings" role="alert">${escapeHtml(state.alignmentError)}</div>` : ''}
     ${results}
-    <p class="integrative-message"><strong>Scientific limit:</strong> I1 checks identities and source availability only. It does not read quantitative feature matrices, normalize joint distances, impute missing modalities or fit a multi-omics model. I2 requires full per-data-type sample distances and native/browser parity.</p>
+    <p class="integrative-message"><strong>Scientific limit:</strong> I1 checks identities and source availability only. It does not read quantitative feature matrices, normalize joint distances, impute missing modalities or fit a multi-omics model. The I2A panel below can combine full unsupervised sample distances; native/browser parity and source-level validation are required.</p>
   </section>`
 }
-function i1ResetPreview() { state.alignmentPreview = null; state.alignmentError = '' }
+function i1ResetPreview() { state.alignmentPreview = null; state.alignmentError = ''; state.i2Result = null }
 async function i1RunAlignment() {
   if (state.alignmentBusy || state.busy || state.mergeBusy) return
   const draft = state.alignmentSource === 'draft'
@@ -2487,6 +2498,127 @@ function bindI1AlignmentEvents() {
 }
 
 
+// I2A uses full, unsupervised W4 sample distances. I1 maps exact observation IDs.
+function i2AvailableViews() {
+  const local = state.longitudinalResult ? extractFullDistanceViews(state.longitudinalResult) : []
+  const merged = new Map(local.map(view => [view.modality, view]))
+  for (const view of state.i2ImportedViews) merged.set(view.modality, view)
+  return [...merged.values()]
+}
+function i2HeatmapSvg(result) {
+  const observations = result.observations.slice(0, 28)
+  if (observations.length < 2) return '<p>No eligible samples for a heatmap.</p>'
+  const pos = new Map(observations.map((id, i) => [id, i]))
+  const points = new Map()
+  let max = 0
+  for (const pair of result.pairs) {
+    if (!pos.has(pair.a) || !pos.has(pair.b)) continue
+    const k = `${pos.get(pair.a)}:${pos.get(pair.b)}`
+    points.set(k, pair.distance)
+    points.set(`${pos.get(pair.b)}:${pos.get(pair.a)}`, pair.distance)
+    max = Math.max(max, pair.distance)
+  }
+  const cell = 13, left = 136, top = 118, length = observations.length * cell
+  const width = left + length + 18, height = top + length + 25
+  const labels = observations.map((id, i) => `<text x="${left - 7}" y="${top + i * cell + 9}" text-anchor="end" font-size="9">${escapeHtml(id.slice(0, 24))}</text><text transform="translate(${left + i*cell + 8},${top - 6}) rotate(-65)" text-anchor="start" font-size="9">${escapeHtml(id.slice(0, 24))}</text>`).join('')
+  const rectangles = []
+  for (let i = 0; i < observations.length; i++) for (let j = 0; j < observations.length; j++) {
+    const d = i === j ? 0 : points.get(`${i}:${j}`)
+    const exists = Number.isFinite(d)
+    const t = exists && max ? Math.min(1, Math.max(0, d / max)) : 0
+    const shade = Math.round(252 - 180 * t)
+    const color = !exists ? '#eceff3' : i === j ? '#ffffff' : `rgb(${shade},${shade},252)`
+    rectangles.push(`<rect x="${left+i*cell}" y="${top+j*cell}" width="${cell}" height="${cell}" fill="${color}" stroke="#d8dde7" stroke-width=".5"><title>${escapeHtml(observations[i])} / ${escapeHtml(observations[j])}: ${exists ? formatNumber(d, 4) : 'Unavailable'}</title></rect>`)
+  }
+  return `<div class="plot-scroll i2-heatmap-scroll"><svg class="science-plot i2-fusion-heatmap" viewBox="0 0 ${width} ${height}" role="img" aria-label="Fused distance heatmap, first ${observations.length} aligned observations">${rectangles.join('')}${labels}</svg></div><p class="method-note">First ${observations.length} aligned observations only, in metadata order. Grey = insufficient measured view coverage. The complete fused distance list is in the export.</p>`
+}
+function i2DistancePanel() {
+  const result = state.i2Result
+  const alignment = state.alignmentPreview
+  let viewNames = []
+  try { viewNames = i2AvailableViews().map(view => I1_MODALITIES.find(m => m.key === view.modality)?.label || view.modality) }
+  catch (error) { viewNames = [`Invalid distance source: ${error.message}`] }
+  let content = ''
+  if (result) {
+    const ablationRows = result.ablation.map(row => `<tr><td>${escapeHtml(row.omitted)}</td><td>${row.overlapping_pairs.toLocaleString()}</td><td>${row.pearson_distance_r === null ? 'Unavailable' : formatNumber(row.pearson_distance_r, 4)}</td></tr>`).join('')
+    dynamicTableSources.set('i2-nearest-neighbors', {
+      rows: result.nearest_neighbors,
+      cells: row => [row.observation, row.neighbor || '', row.distance, row.contributing_views],
+      rowHtml: row => `<tr><td>${escapeHtml(row.observation)}</td><td>${escapeHtml(row.neighbor || 'Not available')}</td><td>${row.distance === null ? '—' : formatNumber(row.distance, 5)}</td><td>${row.contributing_views}</td></tr>`,
+    })
+    content = `<div class="summary-grid compact-grid">
+      ${summaryCard('Aligned observations', result.observations.length.toLocaleString(), 'No group labels used')}
+      ${summaryCard('Distance views', result.views.length, 'Equal median-scaled contributions')}
+      ${summaryCard('Fused sample pairs', result.fused_pairs.toLocaleString(), `${result.min_views} or more matched views`)}
+      ${summaryCard('Unavailable pairs', result.unavailable_pairs.toLocaleString(), 'Not imputed')}
+    </div><div class="i2-result-grid"><article class="plot-card"><div class="plot-heading"><strong>Joint sample-distance heatmap</strong><span>Median-scaled distances, not a PCA or supervised prediction.</span></div>${i2HeatmapSvg(result)}</article><div><h4>Leave-one-modality-out sensitivity</h4><p class="method-note">Correlation with complete-fusion distances on shared measured sample pairs. A low value means the omitted view changes distances.</p><div class="table-scroll"><table><thead><tr><th>Removed data type</th><th>Shared pairs</th><th>Distance correlation</th></tr></thead><tbody>${ablationRows}</tbody></table></div></div></div>
+    <h4>Nearest neighbors in the fused distances</h4><div class="table-scroll i2-neighbors" data-dynamic-table="i2-nearest-neighbors"><table><thead><tr><th>Observation</th><th>Nearest observation</th><th>Distance</th><th>Measured views</th></tr></thead><tbody></tbody></table></div>
+    <div class="button-row"><button type="button" id="i2-export-json" class="secondary-button">Save full joint result JSON</button><button type="button" id="i2-export-tsv" class="secondary-button">Save all fused pairs TSV</button></div>
+    ${result.warnings.length ? `<div class="analysis-warnings">${result.warnings.map(item => `<div>${escapeHtml(item)}</div>`).join('')}</div>` : ''}
+    <p class="method-note">A nearest neighbor is a descriptive relationship between samples. No group model, adjusted-hit selection, outcome prediction or joint significance test was fitted.</p>`
+  }
+  return `<section class="card i2-distance-fusion" id="i2-distance-fusion"><div class="card-heading"><div><h3>Joint sample similarity</h3><p>Combine full, unsupervised distances from at least two data types after exact I1 sample alignment. Each view receives a scale adjustment. Missing pairs stay missing.</p></div><span class="tag neutral">I2A · Joint distance fusion</span></div>
+    <p class="method-note">Input: full sample distances from the Longitudinal analysis. Gene and transcript results from the current browser session are used when available. To include BCR, TCR alpha/beta, isotypes and immune infiltration now, select compatible local Longitudinal result JSON files produced by the native analysis. Corrected Compare Groups results and 2D plots are not valid inputs.</p>
+    <div class="form-grid"><label><span>Local full-distance JSON files (optional, multiple allowed)</span><input id="i2-distance-files" type="file" accept=".json,application/json" multiple/></label><label><span>Minimum measured data types per pair</span><input id="i2-min-views" type="number" min="2" max="7" step="1" value="${state.i2MinViews}"/></label></div>
+    <p class="method-note">Loaded views: ${viewNames.length ? escapeHtml(viewNames.join(' · ')) : 'None'}. Imported files stay in this browser session only. A local import replaces the same data type from the current session.</p>
+    <div class="run-row"><div><strong>Fit a joint unsupervised distance model</strong><span>${alignment ? `${alignment.summary.eligible} observations passed metadata exclusions` : 'Run I1 sample alignment first'}. Source IDs must match exact I1 aliases.</span></div><button id="i2-run-fusion" class="primary-button" type="button" ${!alignment || state.i2Busy || state.busy || state.alignmentBusy || viewNames.length < 2 ? 'disabled' : ''}>${state.i2Busy ? 'Combining measured distances…' : 'Run joint distance fusion'}</button></div>
+    ${state.i2Error ? `<div class="analysis-warnings" role="alert">${escapeHtml(state.i2Error)}</div>` : ''}
+    ${content}
+    <p class="integrative-message"><strong>Scientific limits:</strong> This is a real multi-view sample-distance analysis, but it does not fit latent factors, a joint ordination, or a predictive model. It uses full W4 distances; it does not calculate distances directly from the five additional raw workbook types in this browser release. Distance correlation is sensitivity analysis, not independent biological validation.</p>
+  </section>`
+}
+async function i2ReadLocalFiles(fileList) {
+  state.i2Busy = true
+  state.i2Error = ''
+  state.i2Result = null
+  render()
+  try {
+    const merged = new Map(state.i2ImportedViews.map(v => [v.modality, v]))
+    for (const file of fileList) {
+      const json = JSON.parse(await file.text())
+      for (const view of extractFullDistanceViews(json)) merged.set(view.modality, view)
+    }
+    state.i2ImportedViews = [...merged.values()]
+  } catch (error) {
+    state.i2Error = `Local distance import: ${error.message}`
+  } finally { state.i2Busy = false; render() }
+}
+async function i2RunFusion() {
+  state.i2Error = ''
+  state.i2Result = null
+  if (!state.alignmentPreview) { state.i2Error = 'Run I1 sample alignment first'; render(); return }
+  state.i2Busy = true
+  render()
+  try {
+    const prepared = prepareJointDistanceInput(state.alignmentPreview, i2AvailableViews(), { minViews: state.i2MinViews })
+    const response = await workerRequest('run-integrative-distance', { input: prepared.input })
+    state.i2Result = response.result
+    const dropped = prepared.diagnostics.filter(item => item.excludedOrUnmatchedPairs)
+    if (dropped.length) state.i2Error = `Not used: ${dropped.map(item => `${item.modality} ${item.excludedOrUnmatchedPairs} unaligned/excluded source pairs`).join('; ')}. Review the I1 manifest.`
+  } catch (error) { state.i2Error = error instanceof Error ? error.message : String(error) }
+  finally { state.i2Busy = false; render() }
+}
+function bindI2DistanceEvents() {
+  document.querySelector('#i2-distance-files')?.addEventListener('change', event => {
+    const files = [...event.currentTarget.files || []]
+    if (files.length) void i2ReadLocalFiles(files)
+  })
+  document.querySelector('#i2-min-views')?.addEventListener('change', event => {
+    const n = Number(event.currentTarget.value)
+    state.i2MinViews = Number.isInteger(n) && n >= 2 && n <= 7 ? n : 2
+    state.i2Result = null; render()
+  })
+  document.querySelector('#i2-run-fusion')?.addEventListener('click', () => void i2RunFusion())
+  document.querySelector('#i2-export-json')?.addEventListener('click', () => {
+    if (state.i2Result) void saveTextFile('4c-insight-joint-distance-fusion.json', JSON.stringify(state.i2Result, null, 2) + '\n')
+      .catch(error => { state.i2Error = error.message; render() })
+  })
+  document.querySelector('#i2-export-tsv')?.addEventListener('click', () => {
+    if (state.i2Result) void saveTextFile('4c-insight-joint-distances.tsv', jointDistancesTsv(state.i2Result))
+      .catch(error => { state.i2Error = error.message; render() })
+  })
+}
+
 function significantHitsView() {
   const cfg = state.hitConfig
   const compare = state.compareResult
@@ -2498,7 +2630,7 @@ function significantHitsView() {
   if (!compare) {
     return `<section class="page-heading"><div><span class="eyebrow">Integrative Analysis · I0</span><h2>Review multi-omics evidence and sample patterns</h2><p>This workflow starts from a completed Compare Groups analysis so the cohort definition, exclusions, covariates, and Case/Control labels cannot drift between feature selection and visualization.</p></div></section>
       ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
-      ${i1AlignmentPanel()}<section class="card migration-card"><span class="tag warning">Comparison required</span><h3>Run Compare Groups first.</h3><p>Start with the corrected comparison to review evidence from all seven data types. Complete the group comparison before opening this workflow.</p><div class="button-row"><button id="hits-open-compare" class="primary-button">Go to Compare Groups</button></div></section>`
+      ${i1AlignmentPanel()}${i2DistancePanel()}<section class="card migration-card"><span class="tag warning">Comparison required</span><h3>Run Compare Groups first.</h3><p>Start with the corrected comparison to review evidence from all seven data types. Complete the group comparison before opening this workflow.</p><div class="button-row"><button id="hits-open-compare" class="primary-button">Go to Compare Groups</button></div></section>`
   }
 
   const comparisonName = compare.comparisonName || 'Current corrected comparison'
@@ -2510,6 +2642,7 @@ function significantHitsView() {
   ${globalThresholdControls()}
   ${renderIntegrativeEvidenceOverview()}
   ${i1AlignmentPanel()}
+  ${i2DistancePanel()}
   <section class="card"><div class="card-heading"><div><h3>3. Expression-only selected-hit structure: display limits</h3><p>The global FDR/log2FC thresholds define the expression hit set. These limits only cap how many selected features are drawn in dense views.</p></div></div><div class="form-grid hit-settings-grid"><label><span>Maximum PCA/clustering features</span><input id="hit-max-analysis" type="number" min="2" step="1" value="${cfg.maxAnalysisFeatures}"/></label><label><span>Maximum heatmap features</span><input id="hit-max-heatmap" type="number" min="1" step="1" value="${cfg.maxHeatmapFeatures}"/></label></div></section>
   <section class="card"><div class="card-heading"><div><h3>3a. Expression-only selected-hit structure</h3><p>This existing analysis runs gene and transcript selected-hit PCA and clustering only. It does not combine all seven modalities into one PCA.</p></div></div><div class="config-grid expression-source-grid"><div class="config-block stacked ${geneAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-gene-enabled" type="checkbox" ${cfg.geneEnabled && geneAvailable ? 'checked' : ''} ${geneAvailable ? '' : 'disabled'}/><span><strong>Gene expression</strong><small>Selected corrected gene hits</small></span></label><span class="tag ${geneAvailable ? 'success' : 'neutral'}">${geneAvailable ? 'Available' : 'Run W3 first'}</span></div></div><div class="config-block stacked ${transcriptAvailable ? '' : 'muted-block'}"><div class="config-heading"><label class="check-label"><input id="hit-transcript-enabled" type="checkbox" ${cfg.transcriptEnabled && transcriptAvailable ? 'checked' : ''} ${transcriptAvailable ? '' : 'disabled'}/><span><strong>Transcript / isoform expression</strong><small>Selected corrected transcript hits</small></span></label><span class="tag ${transcriptAvailable ? 'success' : 'neutral'}">${transcriptAvailable ? 'Available' : 'Run W3 first'}</span></div></div></div>
   <div class="run-row"><div><strong>${enabledCount} expression data type${enabledCount === 1 ? '' : 's'} enabled for this separate analysis</strong><span>The corrected W3 model is rerun locally with the frozen settings, then only the selected-hit structure is retained.</span></div><button id="run-significant-hits" class="primary-button" ${runnable ? '' : 'disabled'}>${state.busy ? 'Running…' : 'Run expression hit clustering'}</button></div></section>
@@ -2573,6 +2706,7 @@ async function runSignificantHits() {
 function bindSignificantHitEvents() {
   const cfg = state.hitConfig
   bindI1AlignmentEvents()
+  bindI2DistanceEvents()
   document.querySelectorAll('[data-integrative-modality]').forEach(input => {
     input.addEventListener('change', event => {
       if (!cfg.integrativeModalities || typeof cfg.integrativeModalities !== 'object') cfg.integrativeModalities = {}

@@ -3,7 +3,7 @@
  * This combines labels and previously fitted evidence, NOT sample-level data.
  * The BH q-values remain those produced by each source analysis.
  */
-import { collectAdjustedTests } from './extended-hit-review.js?v=0.21.0-i1-observation-alignment'
+import { collectAdjustedTests } from './extended-hit-review.js?v=0.21.0-i2-distance-fusion'
 
 export const INTEGRATIVE_MODALITIES = Object.freeze([
   ['gene', 'Gene expression'],

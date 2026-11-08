@@ -8,6 +8,7 @@ pub mod gmt_catalog;
 pub mod hit_structure;
 pub mod hit_structure_core;
 pub mod input_conventions;
+pub mod integrative_distance;
 pub mod longitudinal;
 pub mod metadata;
 pub mod outliers;

@@ -16,6 +16,8 @@ on:
       - 'src/hit_structure_core.rs'
       - 'src/hit_structure.rs'
       - 'src/longitudinal.rs'
+      - 'src/integrative_distance.rs'
+      - 'src/lib.rs'
       - 'src/corrected.rs'
       - 'src/cohort.rs'
       - 'src/metadata.rs'
@@ -60,6 +62,7 @@ jobs:
           node --check app/persistence.js
           node --check app/resource-controls.js
           node --check app/sample-metadata.js
+          node --check app/integrative-distance-input.js
           node --check app/merge-helpers.js
           node --check app/merge-worker.js
           node --check app/docs-content.js

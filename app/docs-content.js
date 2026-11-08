@@ -1,4 +1,4 @@
-import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-i1-observation-alignment'
+import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-i2-distance-fusion'
 export const methodDocs = [
   {
     id: 'local-first',

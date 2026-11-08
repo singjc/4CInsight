@@ -747,3 +747,13 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .i1-status-ambiguous { color: #ad3232; }
 .i1-status-not-selected { color: #667085; }
 @media (max-width: 720px) { .i1-alignment-scroll { max-height: 420px; } }
+
+/* I2A full distance-fusion review */
+.i2-distance-fusion .form-grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.i2-result-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(230px, 1fr); gap: 16px; margin: 16px 0; }
+.i2-result-grid > * { min-width: 0; }
+.i2-heatmap-scroll { max-height: 620px; overflow: auto; }
+.i2-fusion-heatmap { min-width: 420px; }
+.i2-neighbors { max-height: 440px; overflow: auto; }
+.i2-neighbors th { position: sticky; top: 0; z-index: 2; }
+@media (max-width: 830px) { .i2-result-grid { grid-template-columns: minmax(0, 1fr); } }

@@ -459,6 +459,15 @@ self.addEventListener('message', async (event) => {
       await handleLongitudinalExpression(request)
       return
     }
+    if (request.type === 'run-integrative-distance') {
+      const wasm = await loadWasm()
+      if (!wasm?.fuse_integrative_distances_json) throw new Error('Build the I2A Rust/WASM distance engine before running this analysis')
+      postProgress(request.requestId, 0, 1, 'Combining aligned full-distance views')
+      const result = JSON.parse(wasm.fuse_integrative_distances_json(JSON.stringify(request.input)))
+      postWasmMemory(request.requestId, true)
+      self.postMessage({ type: 'integrative-distance-result', requestId: request.requestId, result })
+      return
+    }
     if (request.type === 'run-significant-hits') {
       await handleSignificantHits(request)
     }

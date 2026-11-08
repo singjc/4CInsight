@@ -33,6 +33,8 @@ mod hit_structure_core;
 #[path = "../../src/input_conventions.rs"]
 mod input_conventions;
 #[allow(dead_code)]
+#[path = "../../src/integrative_distance.rs"]
+mod integrative_distance;
 #[path = "../../src/longitudinal.rs"]
 mod longitudinal;
 #[allow(dead_code)]
@@ -91,6 +93,12 @@ fn kind_slug(kind: FilenameInputKind) -> &'static str {
         FilenameInputKind::MergedTranscriptExpression => "merged-transcript-expression",
         FilenameInputKind::MetadataCandidate => "metadata-candidate",
     }
+}
+
+/// I2A: deterministic, label-free multi-view distance fusion.
+#[wasm_bindgen]
+pub fn fuse_integrative_distances_json(input_json: &str) -> Result<String, JsValue> {
+    integrative_distance::fuse_distances_json(input_json).map_err(js_error)
 }
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {

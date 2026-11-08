@@ -22,7 +22,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
+          components: rustfmt
           targets: wasm32-unknown-unknown
+      - run: cargo fmt --manifest-path wasm/Cargo.toml --all -- --check
       - run: cargo test --manifest-path wasm/Cargo.toml --locked
       - run: cargo check --manifest-path wasm/Cargo.toml --locked --target wasm32-unknown-unknown
       - uses: actions/setup-node@v6
@@ -37,7 +39,7 @@ jobs:
             --out-dir ../app/wasm \
             --out-name four_c_insight_wasm \
             --release
-          CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/ux9-wasm-memory.test.mjs app/tests/m1-wasm-integration.test.mjs app/tests/md1-sample-metadata.test.mjs app/tests/m2-multiomics.test.mjs app/tests/m2r6c-repertoire-clock.test.mjs
+          CFS_REQUIRE_WASM_ARTIFACTS=1 node --test app/tests/ux9-wasm-memory.test.mjs app/tests/m1-wasm-integration.test.mjs app/tests/md1-sample-metadata.test.mjs app/tests/m2-multiomics.test.mjs app/tests/m2r6c-repertoire-clock.test.mjs app/tests/i2-distance-source.test.mjs
 
   web-static:
     runs-on: ubuntu-latest
@@ -53,6 +55,7 @@ jobs:
           node --check app/file-classifier.js
           node --check app/save.js
           node --check app/sample-metadata.js
+          node --check app/integrative-distance-input.js
           node --check app/merge-helpers.js
           node --check app/merge-worker.js
           node --check app/coi-serviceworker.js

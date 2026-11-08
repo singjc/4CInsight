@@ -18,11 +18,11 @@ test('I1 loads a pure alignment module and exposes an explicit local preview', (
   assert.match(main, /'active'\s*,?\s*\/\//m.test(main) ? /alignmentSource/ : /alignmentSource/)
 })
 
-test('I1 does not claim a fused or supervised scientific analysis and does not upload source data', () => {
+test('I1 identity audit remains independent of I2A scientific fusion and does not upload data', () => {
   const main = read('main.js')
   const align = read('multiomics-alignment.js')
   assert.match(main, /I1 checks identities and source availability only/)
-  assert.match(main, /I2 requires full per-data-type sample distances/)
+  assert.match(main, /The I2A panel below can combine full unsupervised sample distances/)
   assert.doesNotMatch(align, /\bfetch\s*\(|XMLHttpRequest|\/api\/|localhost/i)
   assert.doesNotMatch(align, /Math\.random|new\s+WebSocket/)
 })
@@ -30,8 +30,8 @@ test('I1 does not claim a fused or supervised scientific analysis and does not u
 test('I1 assets and documentation remain cache-coherent and local-only', () => {
   const main = read('main.js'), html = read('index.html'), css = read('styles.css')
   const version = main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(version, '0.21.0-i1-observation-alignment')
-  assert.match(main, /multiomics-alignment\.js\?v=0\.21\.0-i1-observation-alignment/)
+  assert.equal(version, '0.21.0-i2-distance-fusion')
+  assert.match(main, /multiomics-alignment\.js\?v=0\.21\.0-i2-distance-fusion/)
   assert.ok(html.includes(`main.js?v=${version}`))
   assert.ok(html.includes(`styles.css?v=${version}`))
   assert.match(css, /\.i1-alignment-scroll/)

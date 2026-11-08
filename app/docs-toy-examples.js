@@ -1,9 +1,9 @@
-import { multiomicsToyExamples } from './docs-new-modalities.js?v=0.21.0-i1-observation-alignment'
+import { multiomicsToyExamples } from './docs-new-modalities.js?v=0.21.0-i2-distance-fusion'
 // Explanatory examples for the 4C Insight Docs page.
 // Numbers are illustrative. They are not fitted results or scientific fixtures.
 // Keep these examples separate from real cohort results.
-import { renderToyVisual, visualCaption } from './docs-toy-visuals.js?v=0.21.0-i1-observation-alignment'
-export { bindToyVisualControls } from './docs-toy-visuals.js?v=0.21.0-i1-observation-alignment'
+import { renderToyVisual, visualCaption } from './docs-toy-visuals.js?v=0.21.0-i2-distance-fusion'
+export { bindToyVisualControls } from './docs-toy-visuals.js?v=0.21.0-i2-distance-fusion'
 export const methodToyExamples = {
   ...multiomicsToyExamples,
   'local-first': [
