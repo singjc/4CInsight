@@ -31,7 +31,7 @@ test('I2A UI consumes only W4 full distances and retains I1 alignment', async ()
   assert.doesNotMatch(bridge,/q_value|beta_group|pca\.coordinates/)
   assert.match(main,/sample alignment/)
   const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
-  assert.equal(version,'0.22.0')
+  assert.equal(version,'0.22.1')
   assert.match(index,new RegExp(`main.js\\?v=${version.replaceAll('.','\\.')}`))
 })
 

@@ -2,7 +2,7 @@ import { classifyInputFilename } from './file-classifier.js'
 import { validateLocalInputFile } from './resource-controls.js'
 import { measureWasmAllocation } from './wasm-memory.js'
 import { runPortableMerge } from './merge-worker.js'
-import { analyzeJointStructure } from './joint-structure.js?v=0.22.0'
+import { analyzeJointStructure } from './joint-structure.js?v=0.22.1'
 
 let wasmModulePromise = null
 let wasmMemory = null

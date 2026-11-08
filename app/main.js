@@ -1,12 +1,13 @@
-import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.0'
-import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.0'
-import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.0'
-import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.0'
-import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.0'
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.0'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.0'
-import { renderResultsOverview } from './results-overview.js?v=0.22.0'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.0'
+import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.1'
+import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.1'
+import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.1'
+import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.1'
+import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.1'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.1'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.1'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.1'
+import { renderResultsOverview } from './results-overview.js?v=0.22.1'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.1'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -16,8 +17,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.22.0'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.0'
+import { methodDocs } from './docs-content.js?v=0.22.1'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.1'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -31,7 +32,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.22.0'
+const APP_VERSION = '0.22.1'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -2752,21 +2753,6 @@ function jointStructurePointSvg(result) {
       <text class="plot-label" x="16" y="${height/2}" transform="rotate(-90 16 ${height/2})" text-anchor="middle">${yLabel}</text>
     </svg></div></div>`
 }
-function jointDendrogramSvg(result, cell) {
-  const {leaf_order:order,merges}=result.clustering
-  const n=order.length,width=n*cell,height=142,bottom=134,top=9
-  const maxHeight=Math.max(...merges.map(m=>m.height),1e-12)
-  const nodes=new Map(order.map((leaf,i)=>[leaf,{x:(i+.5)*cell,y:bottom}]))
-  const paths=[]
-  for(const merge of merges){
-    const left=nodes.get(merge.left),right=nodes.get(merge.right)
-    const y=bottom-(merge.height/maxHeight)*(bottom-top)
-    const x=(left.x*merge.size/2+right.x*merge.size/2)/merge.size // midpoint, not weighted identity
-    paths.push(`<path d="M ${left.x.toFixed(2)},${left.y.toFixed(2)} V ${y.toFixed(2)} H ${right.x.toFixed(2)} V ${right.y.toFixed(2)}"/>`)
-    nodes.set(merge.id,{x,y})
-  }
-  return `<svg class="joint-dendrogram" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Average-linkage dendrogram of complete-distance observations"><g>${paths.join('')}</g></svg>`
-}
 function jointStructurePanel() {
   const result=state.i2StructureResult
   let views=[]
@@ -2778,8 +2764,6 @@ function jointStructurePanel() {
     const report=result.coverage
     const coveragePercent=(report.pair_coverage*100).toFixed(1)
     const n=result.observations.length
-    const cell=n>180?5:n>90?7:10
-    const w=n*cell
     content=`<div class="summary-grid compact-grid">
       ${summaryCard('Samples in joint structure',n.toLocaleString(),`${report.removed_for_missing_pairs} removed for incomplete pairs`)}
       ${summaryCard('Fixed-view pair coverage',`${coveragePercent}%`,`${report.available_fixed_view_pairs} of ${report.eligible_pairs} pairs`)}
@@ -2787,10 +2771,10 @@ function jointStructurePanel() {
       ${summaryCard('Negative inertia',`${(100*result.pcoa.negative_inertia_ratio).toFixed(1)}%`,'Non-Euclidean distance diagnostic')}
     </div>
     <div class="plot-grid joint-structure-plots"><article class="plot-card"><div class="plot-heading"><strong>Joint sample ordination</strong><span>Principal coordinates from the same complete, fixed-view sample matrix. Hover to identify observations. Group labels were not used for fitting.</span></div>${jointStructurePointSvg(result)}</article></div>
-    <article class="plot-card"><div class="plot-heading"><strong>Hierarchical clustering and full joint heatmap</strong><span>Average linkage, all ${n} retained observations in clustered order. The heatmap scrolls horizontally; no samples are hidden.</span></div>
-      <div class="joint-cluster-scroll" role="region" tabindex="0" aria-label="All clustered joint sample distances">
-        ${jointDendrogramSvg(result,cell)}<canvas id="joint-structure-heatmap" width="${w}" height="${w}" style="width:${w}px;height:${w}px" aria-label="Complete clustered distance matrix for ${n} observations" role="img"></canvas>
-      </div><p id="joint-heatmap-caption" class="method-note">Move the pointer across the matrix to inspect a pair.</p></article>
+    <article class="plot-card joint-heatmap-card"><div class="plot-heading"><strong>Hierarchical clustering and full joint heatmap</strong><span>All ${n} retained observations in their original cluster order. Drag a rectangle to zoom, or expand the view. Cropping does not re-fit the hierarchy.</span></div>
+      ${heatmapViewerMarkup()}
+      ${jointDistanceReviewMarkup(result)}
+    </article>
     <h4>Leave-one-data-type-out sensitivity on the same observations</h4>
     ${result.fixed_ablation?.length?`<div class="table-scroll"><table><thead><tr><th>Removed data type</th><th>Pairwise correlation</th><th>Nearest-neighbor agreement</th><th>Status</th></tr></thead><tbody>${result.fixed_ablation.map(row=>`<tr><td>${escapeHtml(I1_MODALITIES.find(m=>m.key===row.omitted)?.label||row.omitted)}</td><td>${row.available&&row.distance_correlation!==null?formatNumber(row.distance_correlation,4):'—'}</td><td>${row.available?`${(100*row.nearest_neighbor_retention).toFixed(1)}%`:'—'}</td><td>${row.available?'Same complete cohort':escapeHtml(row.reason||'Unavailable')}</td></tr>`).join('')}</tbody></table></div>`:'<p class="method-note">At least three data types are required for a leave-one-out comparison with two remaining views.</p>'}
     <div class="button-row"><button class="secondary-button" id="joint-structure-json" type="button">Save full joint structure JSON</button><button class="secondary-button" id="joint-structure-coordinates" type="button">Save PCoA coordinates TSV</button></div>
@@ -2805,32 +2789,6 @@ function jointStructurePanel() {
     ${state.i2StructureError?`<div class="analysis-warnings" role="alert">${escapeHtml(state.i2StructureError)}</div>`:''}
     ${content}
   </section>`
-}
-function jointDrawHeatmap() {
-  const result=state.i2StructureResult
-  const canvas=document.querySelector('#joint-structure-heatmap')
-  if(!result||!canvas)return
-  const ctx=canvas.getContext('2d')
-  if(!ctx)return
-  const order=result.clustering.leaf_order,n=order.length,cell=canvas.width/n
-  const distances=result.distances
-  let maximum=0
-  for(const d of distances)if(Number.isFinite(d))maximum=Math.max(maximum,d)
-  for(let y=0;y<n;y++)for(let x=0;x<n;x++){
-    const d=distances[order[y]*n+order[x]]
-    const t=maximum?Math.max(0,Math.min(1,d/maximum)):0
-    const shade=Math.round(253-181*t)
-    ctx.fillStyle=x===y?'#ffffff':`rgb(${shade},${shade},252)`
-    ctx.fillRect(x*cell,y*cell,Math.ceil(cell),Math.ceil(cell))
-  }
-  const caption=document.querySelector('#joint-heatmap-caption')
-  canvas.addEventListener('pointermove',event=>{
-    const rect=canvas.getBoundingClientRect()
-    const x=Math.floor((event.clientX-rect.left)*n/rect.width),y=Math.floor((event.clientY-rect.top)*n/rect.height)
-    if(x<0||x>=n||y<0||y>=n)return
-    const a=result.observations[order[x]],b=result.observations[order[y]],d=distances[order[y]*n+order[x]]
-    caption.textContent=`${a} / ${b}: ${formatNumber(d,5)} joint distance`
-  })
 }
 async function runJointStructure() {
   if(state.i2StructureBusy||state.busy||state.i2Busy||!state.alignmentPreview)return
@@ -2892,7 +2850,7 @@ function bindJointStructureEvents() {
     void saveTextFile('4c-insight-joint-pcoa-coordinates.tsv',lines.join('\n')+'\n')
       .catch(error=>{state.i2StructureError=error.message;render()})
   })
-  jointDrawHeatmap()
+  mountJointHeatmapViewer(state.i2StructureResult)
 }
 
 function significantHitsView() {
