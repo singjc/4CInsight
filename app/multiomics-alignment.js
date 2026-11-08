@@ -156,7 +156,8 @@ export function alignObservations({ table, records = [], merged = {}, observatio
   const obsIdx = requiredColumn(table.columns, observationColumn, 'Observation ID')
   const subjectIdx = validColumnChoice(table.columns, subjectColumn, 'Patient / subject')
   const timeIdx = validColumnChoice(table.columns, timeColumn, 'Timepoint')
-  if (subjectIdx >= 0 && subjectIdx === obsIdx) throw new Error('Patient ID and observation ID must use different columns')
+  // A unique sample ID can also be its patient ID when each patient has one sample.
+  // Keep the unique observation-ID check below; never merge repeated rows.
   if (timeIdx >= 0 && (timeIdx === obsIdx || timeIdx === subjectIdx)) throw new Error('Timepoint must use a separate metadata column')
   const exclusionConfigs = exclusionConfiguration(table, exclusions)
   const seenObs = new Set()

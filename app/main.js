@@ -1916,12 +1916,12 @@ function compareView() {
   ${metadata && (!metadataReady) ? `<div class="notice-banner"><strong>Resolve metadata IDs first.</strong><span>The selected ID column has ${metadata.blank_id_rows} blank row(s) and ${metadata.duplicate_id_values.length} duplicate value(s).</span></div>` : ''}
   ${overlap ? '<div class="notice-banner"><strong>Case and control selections overlap.</strong><span>Remove the same value from one group before running the comparison.</span></div>' : ''}
   ${incompleteExclusion ? `<div class="notice-banner"><strong>Finish or disable the optional exclusion.</strong><span>${escapeHtml(incompleteExclusion)}</span></div>` : ''}
-  <section class="card"><div class="card-heading"><div><h3>1. Metadata and groups</h3><p>The sample-ID column maps expression columns. The patient/subject column is independent and optional.</p></div><span class="tag neutral">W3</span></div>
+  <section class="card"><div class="card-heading"><div><h3>1. Metadata and groups</h3><p>The sample-ID column maps expression data. The optional patient ID can use the same column when each patient has one sample.</p></div><span class="tag neutral">W3</span></div>
     <div class="config-grid compare-grid">
       <div class="config-block stacked"><div class="config-heading"><div><strong>Metadata roles</strong><span>Choose columns by meaning, not by hardcoded names.</span></div><span class="tag success">Flexible</span></div>
         <label><span>Metadata file</span><select id="compare-metadata-file">${metadataRecords.map((record) => `<option value="${escapeHtml(record.id)}" ${state.qcConfig.metadataId === record.id ? 'selected' : ''}>${escapeHtml(record.name)}</option>`).join('')}</select></label>
         <label><span>Expression/sample ID column</span><select id="compare-id-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns, state.qcConfig.metadataIdColumn) : '<option>Read metadata first</option>'}</select></label>
-        <label><span>Patient/subject column for repeated measures</span><select id="compare-subject-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns.filter((column) => column !== state.qcConfig.metadataIdColumn), cfg.subjectColumn, true) : '<option>Read metadata first</option>'}</select></label>
+        <label><span>Patient/subject column for repeated measures</span><select id="compare-subject-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns, cfg.subjectColumn, true) : '<option>Read metadata first</option>'}</select></label>
       </div>
       <div class="config-block stacked"><div class="config-heading"><div><strong>Case group</strong><span>Select one or more observed values.</span></div><span class="tag neutral">Outcome</span></div>
         <label><span>Grouping column</span><select id="compare-group-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns.filter((column) => column !== state.qcConfig.metadataIdColumn), cfg.groupColumn) : '<option>Read metadata first</option>'}</select></label>
@@ -2010,11 +2010,10 @@ function ensureLongitudinalDefaults() {
       ? state.qcConfig.metadataIdColumn
       : (metadata.id_column || columns[0] || '')
   }
-  if (!cfg.patientIdColumn || !columns.includes(cfg.patientIdColumn) || cfg.patientIdColumn === cfg.observationIdColumn) {
+  if (!cfg.patientIdColumn || !columns.includes(cfg.patientIdColumn)) {
     cfg.patientIdColumn = ['patient_id', 'sample_id', 'subject_id', 'participant_id']
       .find((column) => column !== cfg.observationIdColumn && columns.includes(column))
-      || columns.find((column) => column !== cfg.observationIdColumn)
-      || ''
+      || cfg.observationIdColumn
   }
   if (cfg.timeColumn && (!columns.includes(cfg.timeColumn) || cfg.timeColumn === cfg.observationIdColumn || cfg.timeColumn === cfg.patientIdColumn)) cfg.timeColumn = ''
   if (!cfg.timeColumn) {
@@ -2117,7 +2116,7 @@ function longitudinalView() {
   const columns = metadata?.columns || []
   const cfg = state.longitudinalConfig
   const exclusionValues = cachedMetadataValues(cfg.exclusionColumn)
-  const rolesReady = Boolean(metadata && cfg.observationIdColumn && cfg.patientIdColumn && cfg.observationIdColumn !== cfg.patientIdColumn)
+  const rolesReady = Boolean(metadata && cfg.observationIdColumn && cfg.patientIdColumn)
   const modalityReady = (cfg.geneEnabled && cfg.geneMergedId) || (cfg.transcriptEnabled && cfg.transcriptMergedId)
   const exclusionReady = !cfg.exclusionEnabled || (Boolean(cfg.exclusionColumn) && cfg.exclusionValues.length > 0)
   const runnable = state.wasmReady && !state.busy && rolesReady && modalityReady && exclusionReady
@@ -2130,11 +2129,11 @@ function longitudinalView() {
   return `<section class="page-heading"><div><span class="eyebrow">Longitudinal · W4</span><h2>Which data type preserves patient identity over time?</h2><p>Map the observation and patient identifiers explicitly. 4C Insight then clusters all eligible observations without using Case/Control labels and measures whether repeated samples from the same patient remain closer than the rest of the cohort.</p></div><div class="local-card"><strong>Unsupervised and local</strong><span>Patient identity is used only to score the finished distance matrix, not to construct it.</span></div></section>
   ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
   ${!metadataRecords.length ? '<div class="notice-banner"><strong>Metadata required.</strong><span>Select the cohort files/folder in Project first.</span></div>' : ''}
-  ${cfg.observationIdColumn && cfg.observationIdColumn === cfg.patientIdColumn ? '<div class="notice-banner"><strong>Choose two different identifier roles.</strong><span>The observation/sample ID identifies each longitudinal specimen. The patient/person ID must be the stable identifier shared across visits.</span></div>' : ''}
+  ${cfg.observationIdColumn && cfg.observationIdColumn === cfg.patientIdColumn ? '<p class="method-note">One column identifies both the sample and the patient. This is valid for one observation per patient. Repeated-patient identity scores need two or more distinct observations per patient.</p>' : ''}
   ${incompleteExclusion ? `<div class="notice-banner"><strong>Finish or disable the optional exclusion.</strong><span>${escapeHtml(incompleteExclusion)}</span></div>` : ''}
   <section class="card"><div class="card-heading"><div><h3>1. Map longitudinal metadata roles</h3><p>Column names are not assumed. This supports sheets where, for example, subject_id is the longitudinal sample and sample_id is the patient.</p></div><span class="tag neutral">W4</span></div><div class="config-grid longitudinal-role-grid">
     <div class="config-block stacked"><label><span>Metadata file</span><select id="longitudinal-metadata-file">${metadataRecords.map((record) => `<option value="${escapeHtml(record.id)}" ${state.qcConfig.metadataId === record.id ? 'selected' : ''}>${escapeHtml(record.name)}</option>`).join('')}</select></label><label><span>Observation / longitudinal sample ID</span><select id="longitudinal-observation-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns, cfg.observationIdColumn) : '<option>Read metadata first</option>'}</select></label></div>
-    <div class="config-block stacked"><label><span>Patient / person ID</span><select id="longitudinal-patient-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns.filter((column) => column !== cfg.observationIdColumn), cfg.patientIdColumn) : '<option>Read metadata first</option>'}</select></label><label><span>Collection date / timepoint / visit</span><select id="longitudinal-time-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns.filter((column) => column !== cfg.observationIdColumn && column !== cfg.patientIdColumn), cfg.timeColumn, true) : '<option>Read metadata first</option>'}</select></label></div>
+    <div class="config-block stacked"><label><span>Patient / person ID</span><select id="longitudinal-patient-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns, cfg.patientIdColumn) : '<option>Read metadata first</option>'}</select></label><label><span>Collection date / timepoint / visit</span><select id="longitudinal-time-column" ${metadata ? '' : 'disabled'}>${metadata ? columnOptions(columns.filter((column) => column !== cfg.observationIdColumn && column !== cfg.patientIdColumn), cfg.timeColumn, true) : '<option>Read metadata first</option>'}</select></label></div>
   </div></section>
   <section class="card"><div class="card-heading"><div><h3>2. Optional metadata exclusion</h3><p>Use any metadata column/value rule, for example qc_review_status = Failed. Exclusion occurs before clustering.</p></div></div><div class="config-grid exclusion-grid"><div class="config-block stacked"><div class="config-heading"><label class="check-label"><input id="longitudinal-exclusion-enabled" type="checkbox" ${cfg.exclusionEnabled ? 'checked' : ''}/><span><strong>Exclude metadata rows</strong><small>Independent of automatic outlier analysis.</small></span></label><span class="tag ${cfg.exclusionEnabled ? 'warning' : 'neutral'}">${cfg.exclusionEnabled ? (exclusionReady ? 'Active' : 'Needs input') : 'Optional'}</span></div><label><span>Metadata column</span><select id="longitudinal-exclusion-column" ${cfg.exclusionEnabled ? '' : 'disabled'}>${columnOptions(columns, cfg.exclusionColumn, true)}</select></label><label><span>Exclude these values</span><select id="longitudinal-exclusion-values" class="multi-select" multiple size="5" ${cfg.exclusionEnabled && cfg.exclusionColumn ? '' : 'disabled'}>${exclusionValues.length ? metadataValueOptions(exclusionValues, cfg.exclusionValues) : '<option disabled>Choose a column to load values</option>'}</select></label></div></div></section>
   <section class="card"><div class="card-heading"><div><h3>3. Expression data types</h3><p>W4 uses the same merged count tables and normalization geometry already validated in W3.</p></div></div><div class="config-grid expression-source-grid">
@@ -2212,7 +2211,6 @@ function bindLongitudinalEvents() {
   })
   document.querySelector('#longitudinal-observation-column')?.addEventListener('change', (event) => {
     cfg.observationIdColumn = event.currentTarget.value
-    if (cfg.patientIdColumn === cfg.observationIdColumn) cfg.patientIdColumn = ''
     state.longitudinalResult = null
     rerender()
   })
@@ -2429,6 +2427,7 @@ function i1AlignmentPanel() {
     <div class="form-grid i1-role-grid"><label><span>Metadata source</span><select id="i1-source"><option value="active" ${state.alignmentSource !== 'draft' ? 'selected' : ''}>Active analysis metadata</option>${hasDraft ? `<option value="draft" ${state.alignmentSource === 'draft' ? 'selected' : ''}>Open metadata draft (not necessarily used by comparison)</option>` : ''}</select></label>${i1SourceOptions()}</div>
     ${!activeFile && state.alignmentSource !== 'draft' ? `<p class="notice-banner">Select an analysis metadata file in Project before alignment.</p>` : ''}
     <div class="integrative-selector" role="group" aria-label="Data types for alignment">${selectors}</div>
+    <p class="method-note">One column may identify both the observation and patient when sample IDs are unique. For repeated visits, select unique observation IDs and a shared patient ID column. A timepoint must use a separate column.</p>
     <p class="method-note">Uses the two current Compare Groups exclusion rules, when enabled. Matches are case-sensitive and exact after trimming surrounding spaces. An explicit alias is never replaced by a guessed ID. A source conflict is not resolved automatically.</p>
     <div class="run-row"><div><strong>Build an observation-level alignment manifest</strong><span>Reads metadata and only the header of each selected merged expression table; raw sample workbooks are not opened.</span></div><button id="i1-run-alignment" class="primary-button" type="button" ${state.alignmentBusy || state.busy || state.mergeBusy || (state.alignmentSource !== 'draft' && !activeFile) ? 'disabled' : ''}>${state.alignmentBusy ? 'Checking sources…' : 'Check sample alignment'}</button></div>
     ${state.alignmentError ? `<div class="analysis-warnings" role="alert">${escapeHtml(state.alignmentError)}</div>` : ''}

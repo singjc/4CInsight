@@ -245,9 +245,8 @@ pub(crate) fn build_metadata_index(
                 config.patient_id_column
             )
         })?;
-    if observation_idx == patient_idx {
-        bail!("Observation/sample ID and patient/person ID must use different metadata columns");
-    }
+    // Both roles may use one metadata column for one observation per patient.
+    // Repeated-patient metrics remain undefined when no patient has two observations.
     let time_idx = config
         .time_column
         .as_ref()
@@ -1103,5 +1102,31 @@ mod tests {
         assert_eq!(index.qc_excluded_rows, 1);
         assert!(index.eligible_ids.contains(&normalize_sample_id("OBS1")));
         assert!(!index.eligible_ids.contains(&normalize_sample_id("OBS2")));
+    }
+
+    #[test]
+    fn same_column_patient_and_sample_ids_are_supported() {
+        let metadata = MetadataTable {
+            path: "one-to-one-metadata.tsv".into(),
+            columns: vec!["4C ID".into(), "visit".into()],
+            rows: vec![
+                vec!["P001".into(), "T0".into()],
+                vec!["P002".into(), "T1".into()],
+            ],
+            id_column: "4C ID".into(),
+        };
+        let config = LongitudinalClusteringConfig {
+            observation_id_column: "4C ID".into(),
+            patient_id_column: "4C ID".into(),
+            time_column: Some("visit".into()),
+            qc_status_column: None,
+            excluded_qc_values: BTreeSet::new(),
+        };
+        let index = build_metadata_index(&metadata, &config).unwrap();
+        assert_eq!(index.eligible_rows, 2);
+        assert_eq!(index.ambiguous_keys, 0);
+        assert_eq!(index.eligible_ids.len(), 2);
+        let first = index.by_key.get(&normalize_sample_id("P001")).unwrap();
+        assert_eq!(first.patient_id, "P001");
     }
 }

@@ -78,9 +78,8 @@ where
     if patient_column.is_empty() {
         bail!("Select the metadata column containing stable patient/person IDs");
     }
-    if observation_column == patient_column {
-        bail!("Observation/sample ID and patient/person ID must use different metadata columns");
-    }
+    // The same column is valid for one observation per patient.
+    // The shared native index still checks sample IDs and source ambiguity.
 
     let portable = parse_metadata_bytes(metadata_file_name, metadata_bytes)?;
     for column in [observation_column, patient_column] {
