@@ -101,6 +101,280 @@ pub fn fuse_integrative_distances_json(input_json: &str) -> Result<String, JsVal
     integrative_distance::fuse_distances_json(input_json).map_err(js_error)
 }
 
+// I2B: a separate unsupervised byte session for each modality. It reuses the
+// native W4 kernels and does not access case/control labels or adjusted tests.
+struct I2bSession {
+    modality: cohort::CohortModality,
+    spec: corrected::CorrectedModelSpec,
+    repertoire: Option<corrected::PortableRepertoireAccumulator>,
+    maps: Vec<(String, HashMap<String, f64>)>,
+    source_ids: HashSet<String>,
+}
+thread_local! {
+    static I2B_SESSION: RefCell<Option<I2bSession>> = const { RefCell::new(None) };
+}
+fn i2b_kind_name(modality: cohort::CohortModality) -> &'static str {
+    match modality {
+        cohort::CohortModality::Bcr => "bcr",
+        cohort::CohortModality::TcrAlpha => "tcrAlpha",
+        cohort::CohortModality::TcrBeta => "tcrBeta",
+        cohort::CohortModality::BcrIsotype => "isotype",
+        cohort::CohortModality::ImmuneInfiltrate => "immune",
+        _ => "unknown",
+    }
+}
+fn i2b_output(
+    modality: &str,
+    raw: corrected::UnsupervisedDistanceMatrix,
+) -> Result<String, JsValue> {
+    if raw.sample_ids.len() < 3
+        || raw.distances.len() != raw.sample_ids.len()
+        || raw
+            .distances
+            .iter()
+            .any(|r| r.len() != raw.sample_ids.len())
+    {
+        return Err(js_error(
+            "I2B needs at least three samples and a square distance matrix",
+        ));
+    }
+    let mut pairs = Vec::new();
+    for i in 0..raw.sample_ids.len() {
+        for j in (i + 1)..raw.sample_ids.len() {
+            let distance = raw.distances[i][j];
+            if !distance.is_finite() || distance < 0.0 {
+                return Err(js_error("I2B produced an invalid unsupervised distance"));
+            }
+            pairs.push(serde_json::json!({"a":raw.sample_ids[i],"b":raw.sample_ids[j],"distance":distance}));
+        }
+    }
+    serde_json::to_string(&serde_json::json!({
+        "modality":modality,"distance_label":raw.distance_label,
+        "pairs":pairs,"samples":raw.sample_ids.len(),"warnings":raw.warnings,
+        "source":"direct-local-workbooks", "model":"unsupervised-native-w4-distance-kernel",
+    }))
+    .map_err(js_error)
+}
+
+/// Begin one I2B modality. Settings match the native W4 distance methods.
+#[wasm_bindgen]
+pub fn i2b_begin_json(modality: &str, options: &str) -> Result<String, JsValue> {
+    install_m2_repertoire_panic_hook();
+    let kind = match modality {
+        "bcr" => cohort::CohortModality::Bcr,
+        "tcrAlpha" => cohort::CohortModality::TcrAlpha,
+        "tcrBeta" => cohort::CohortModality::TcrBeta,
+        "isotype" => cohort::CohortModality::BcrIsotype,
+        "immune" => cohort::CohortModality::ImmuneInfiltrate,
+        _ => {
+            return Err(js_error(
+                "I2B supports BCR, TCR alpha, TCR beta, isotypes and immune",
+            ));
+        }
+    };
+    let options: serde_json::Value = serde_json::from_str(options).map_err(js_error)?;
+    let mut spec = corrected::CorrectedModelSpec::default();
+    if let Some(v) = options.get("ambiguousPolicy").and_then(|v| v.as_str()) {
+        spec.ambiguous_policy = match v {
+            "exclude" => corrected::AmbiguousCallPolicy::Exclude,
+            "split" => corrected::AmbiguousCallPolicy::Split,
+            "first" => corrected::AmbiguousCallPolicy::First,
+            "family" => corrected::AmbiguousCallPolicy::Family,
+            _ => return Err(js_error("Unknown ambiguity policy")),
+        };
+    }
+    if let Some(v) = options.get("determinedOnly") {
+        spec.exclude_undetermined_isotype = v
+            .as_bool()
+            .ok_or_else(|| js_error("determinedOnly must be a boolean"))?;
+    }
+    if let Some(v) = options.get("clrPseudocount") {
+        spec.clr_pseudocount = v
+            .as_f64()
+            .filter(|x| x.is_finite() && *x > 0.0)
+            .ok_or_else(|| js_error("Invalid clrPseudocount"))?;
+    }
+    if let Some(v) = options.get("compositionMinMean") {
+        spec.composition_min_mean = v
+            .as_f64()
+            .filter(|x| x.is_finite() && *x >= 0.0)
+            .ok_or_else(|| js_error("Invalid compositionMinMean"))?;
+    }
+    if let Some(v) = options.get("compositionMinPrevalence") {
+        spec.composition_min_prevalence = v
+            .as_f64()
+            .filter(|x| x.is_finite() && (0.0..=1.0).contains(x))
+            .ok_or_else(|| js_error("Invalid compositionMinPrevalence"))?;
+    }
+    let repertoire = if matches!(
+        kind,
+        cohort::CohortModality::Bcr
+            | cohort::CohortModality::TcrAlpha
+            | cohort::CohortModality::TcrBeta
+    ) {
+        Some(
+            corrected::PortableRepertoireAccumulator::new(kind, spec.ambiguous_policy)
+                .map_err(js_error)?,
+        )
+    } else {
+        None
+    };
+    I2B_SESSION.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_some() {
+            return Err(js_error("I2B session already active"));
+        }
+        *slot = Some(I2bSession {
+            modality: kind,
+            spec,
+            repertoire,
+            maps: Vec::new(),
+            source_ids: HashSet::new(),
+        });
+        Ok("{\"status\":\"ready\"}".to_string())
+    })
+}
+
+/// Decode only one local sample workbook. The RefCell is not borrowed while
+/// the XLSX parser runs, so a recoverable parsing error cannot poison the session.
+#[wasm_bindgen]
+pub fn i2b_add_sample_json(
+    file_name: &str,
+    sample_id: &str,
+    bytes: &[u8],
+) -> Result<String, JsValue> {
+    let mut session = I2B_SESSION
+        .with(|cell| cell.borrow_mut().take())
+        .ok_or_else(|| js_error("No I2B session is active"))?;
+    let outcome = (|| -> Result<String, JsValue> {
+        if sample_id.is_empty()
+            || sample_id.trim() != sample_id
+            || bytes.is_empty()
+            || file_name.is_empty()
+        {
+            return Err(js_error(
+                "I2B needs a nonempty exact sample ID and one local source file",
+            ));
+        }
+        if session.source_ids.contains(sample_id) {
+            return Err(js_error(format!("Duplicate I2B source ID: {sample_id}")));
+        }
+        if let Some(repertoire) = session.repertoire.as_mut() {
+            repertoire
+                .add_bytes(file_name, bytes, sample_id, "Eligible")
+                .map_err(js_error)?;
+        } else if session.modality == cohort::CohortModality::BcrIsotype {
+            let map =
+                corrected::parse_isotype_bytes(bytes, session.spec.exclude_undetermined_isotype)
+                    .map_err(js_error)?;
+            session.maps.push((sample_id.to_string(), map));
+        } else {
+            let map = corrected::parse_immune_bytes(bytes).map_err(js_error)?;
+            session.maps.push((sample_id.to_string(), map));
+        }
+        session.source_ids.insert(sample_id.to_string());
+        serde_json::to_string(
+            &serde_json::json!({"status":"added","samples":session.source_ids.len()}),
+        )
+        .map_err(js_error)
+    })();
+    I2B_SESSION.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        debug_assert!(slot.is_none());
+        *slot = Some(session);
+    });
+    outcome
+}
+
+#[wasm_bindgen]
+pub fn i2b_finish_json() -> Result<String, JsValue> {
+    let session = I2B_SESSION
+        .with(|cell| cell.borrow_mut().take())
+        .ok_or_else(|| js_error("No I2B session is active"))?;
+    let raw = match session.modality {
+        cohort::CohortModality::Bcr
+        | cohort::CohortModality::TcrAlpha
+        | cohort::CohortModality::TcrBeta => session
+            .repertoire
+            .ok_or_else(|| js_error("I2B repertoire collector is missing"))?
+            .finish_unsupervised()
+            .map_err(js_error)?,
+        cohort::CohortModality::BcrIsotype => corrected::unsupervised_isotype_distance_from_maps(
+            session.maps,
+            &session.spec,
+            Vec::new(),
+        )
+        .map_err(js_error)?,
+        cohort::CohortModality::ImmuneInfiltrate => {
+            corrected::unsupervised_immune_distance_from_maps(session.maps, Vec::new())
+                .map_err(js_error)?
+        }
+        _ => return Err(js_error("Unsupported I2B modality")),
+    };
+    i2b_output(i2b_kind_name(session.modality), raw)
+}
+#[wasm_bindgen]
+pub fn i2b_abort() {
+    I2B_SESSION.with(|cell| *cell.borrow_mut() = None);
+}
+
+/// Gene/transcript distance uses the same two-pass native W4 reader kernel.
+/// The browser receives an explicit I1-eligible ID set, never group labels.
+#[wasm_bindgen]
+pub fn i2b_expression_distance_json(
+    modality: &str,
+    merged_bytes: &[u8],
+    sample_ids_json: &str,
+    options_json: &str,
+) -> Result<String, JsValue> {
+    let ids: Vec<String> = serde_json::from_str(sample_ids_json).map_err(js_error)?;
+    let eligible: HashSet<String> = ids
+        .iter()
+        .map(|id| cohort::normalize_sample_id(id))
+        .collect();
+    if eligible.len() != ids.len()
+        || eligible.len() < 3
+        || ids.iter().any(|id| id.is_empty() || id.trim() != id)
+    {
+        return Err(js_error(
+            "I2B requires three distinct, exact, aligned sample IDs",
+        ));
+    }
+    let options: serde_json::Value = serde_json::from_str(options_json).map_err(js_error)?;
+    let mut spec = corrected::CorrectedModelSpec::default();
+    if let Some(x) = options.get("minCount") {
+        spec.min_count = x
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .ok_or_else(|| js_error("Invalid minimum count"))?;
+    }
+    if let Some(x) = options.get("minFractionSamples") {
+        spec.min_fraction_samples = x
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0 && *n <= 1.0)
+            .ok_or_else(|| js_error("Invalid minimum prevalence"))?;
+    }
+    let (source_metric, feature_label) = match modality {
+        "gene" => ("Raw Count", "Gene"),
+        "transcript" => ("Total Reads", "Transcript"),
+        _ => {
+            return Err(js_error(
+                "I2B expression distance supports gene and transcript only",
+            ));
+        }
+    };
+    let raw = corrected::run_unsupervised_expression_distance_bytes(
+        merged_bytes,
+        &eligible,
+        source_metric,
+        feature_label,
+        &spec,
+        |_, _, _| {},
+    )
+    .map_err(js_error)?;
+    i2b_output(modality, raw)
+}
+
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }

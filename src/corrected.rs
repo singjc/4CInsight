@@ -3118,6 +3118,16 @@ impl PortableRepertoireAccumulator {
         Ok(self.parsed.len())
     }
 
+    /// I2B: use the same unsupervised clonotype-distance kernel as native W4.
+    /// File bytes were released after each add_bytes call. No group fit is run.
+    pub(crate) fn finish_unsupervised(self) -> Result<UnsupervisedDistanceMatrix> {
+        let Self {
+            parsed, scratch, ..
+        } = self;
+        drop(scratch);
+        unsupervised_repertoire_from_parsed(parsed, Vec::new())
+    }
+
     pub(crate) fn finish<F>(
         self,
         metadata: &MetadataTable,
@@ -3729,31 +3739,35 @@ where
         }
     }
     drop(scratch);
-    if parsed.len() < 2 {
-        bail!("Fewer than two usable QC-eligible {label} repertoires remained after parsing");
-    }
     progress(
         total,
         total.saturating_add(2),
-        &format!("{label}: assigning exact clonotype identities"),
+        &format!("{label}: assigning exact clonotype identities and calculating distances"),
     );
-    let exact_clonotypes = assign_exact_clonotype_ids(&mut parsed)?;
+    let result = unsupervised_repertoire_from_parsed(parsed, warnings);
     progress(
-        total.saturating_add(1),
         total.saturating_add(2),
-        &format!("{label}: building Morisita-Horn distances"),
+        total.saturating_add(2),
+        &format!("{label}: Morisita-Horn distances complete"),
     );
+    result
+}
+
+/// Shared native and byte-based I2B repertoire distance calculation.
+fn unsupervised_repertoire_from_parsed(
+    mut parsed: Vec<ParsedRepertoire>,
+    warnings: Vec<String>,
+) -> Result<UnsupervisedDistanceMatrix> {
+    if parsed.len() < 2 {
+        bail!("Fewer than two usable QC-eligible repertoires remained after parsing");
+    }
+    let exact_clonotypes = assign_exact_clonotype_ids(&mut parsed)?;
     let (distances, _) = repertoire_distance_matrices(&parsed, exact_clonotypes);
     let sample_ids = parsed
         .iter()
         .map(|sample| sample.sample_id.clone())
         .collect::<Vec<_>>();
     release_repertoire_working_set(parsed);
-    progress(
-        total.saturating_add(2),
-        total.saturating_add(2),
-        &format!("{label}: longitudinal Morisita-Horn distance complete"),
-    );
     Ok(UnsupervisedDistanceMatrix {
         sample_ids,
         distances,
@@ -3807,6 +3821,18 @@ where
     }
     if maps.len() < 2 {
         bail!("Fewer than two usable QC-eligible BCR-isotype samples were detected");
+    }
+    unsupervised_isotype_distance_from_maps(maps, spec, warnings)
+}
+
+/// Shared isotype CLR/Aitchison kernel used by native W4 and I2B byte session.
+pub(crate) fn unsupervised_isotype_distance_from_maps(
+    maps: Vec<(String, HashMap<String, f64>)>,
+    spec: &CorrectedModelSpec,
+    warnings: Vec<String>,
+) -> Result<UnsupervisedDistanceMatrix> {
+    if maps.len() < 2 {
+        bail!("Fewer than two usable BCR-isotype samples");
     }
     let all_features = maps
         .iter()
@@ -3890,6 +3916,17 @@ where
     }
     if maps.len() < 2 {
         bail!("Fewer than two usable QC-eligible immune-infiltrate samples were detected");
+    }
+    unsupervised_immune_distance_from_maps(maps, warnings)
+}
+
+/// Shared standardized immune-score distance kernel; no group label is used.
+pub(crate) fn unsupervised_immune_distance_from_maps(
+    maps: Vec<(String, HashMap<String, f64>)>,
+    warnings: Vec<String>,
+) -> Result<UnsupervisedDistanceMatrix> {
+    if maps.len() < 2 {
+        bail!("Fewer than two usable immune-infiltration samples");
     }
     let features = maps
         .iter()
@@ -7038,6 +7075,113 @@ mod m2_portable_multiomics_parity {
                 .finish(&metadata, &compare, &spec, |_, _, _| {})
                 .unwrap();
             assert_scientific_parity(&native, &portable, &format!("{modality:?}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod i2b_unsupervised_parity {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn fixture(sample: usize, suffix: &str) -> PathBuf {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = if base.join("tests/fixtures").is_dir() {
+            base
+        } else {
+            base.join("..")
+        };
+        root.join("tests/fixtures/m2_multiomics")
+            .join(format!("S{sample}_{suffix}.xlsx"))
+    }
+    fn equal_matrices(left: &UnsupervisedDistanceMatrix, right: &UnsupervisedDistanceMatrix) {
+        assert_eq!(left.sample_ids, right.sample_ids);
+        assert_eq!(left.distance_label, right.distance_label);
+        assert_eq!(left.distances.len(), right.distances.len());
+        for (a, b) in left.distances.iter().zip(&right.distances) {
+            for (&x, &y) in a.iter().zip(b) {
+                assert!(
+                    (x - y).abs() <= 1e-12 + 1e-10 * x.abs().max(y.abs()),
+                    "{x} vs {y}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn i2b_isotype_and_immune_file_byte_parity() {
+        let spec = CorrectedModelSpec::default();
+        for (suffix, kind) in [
+            ("bcr_isotype_composition", "isotype"),
+            ("immune_infiltrate", "immune"),
+        ] {
+            let mut path_maps = Vec::new();
+            let mut byte_maps = Vec::new();
+            for n in 1..=8 {
+                let file = fixture(n, suffix);
+                let bytes = fs::read(&file).unwrap();
+                let src = if kind == "isotype" {
+                    parse_isotype_file(&file, spec.exclude_undetermined_isotype).unwrap()
+                } else {
+                    parse_immune_file(&file).unwrap()
+                };
+                let port = if kind == "isotype" {
+                    parse_isotype_bytes(&bytes, spec.exclude_undetermined_isotype).unwrap()
+                } else {
+                    parse_immune_bytes(&bytes).unwrap()
+                };
+                path_maps.push((format!("S{n}"), src));
+                byte_maps.push((format!("S{n}"), port));
+            }
+            let (native, portable) = if kind == "isotype" {
+                (
+                    unsupervised_isotype_distance_from_maps(path_maps, &spec, vec![]).unwrap(),
+                    unsupervised_isotype_distance_from_maps(byte_maps, &spec, vec![]).unwrap(),
+                )
+            } else {
+                (
+                    unsupervised_immune_distance_from_maps(path_maps, vec![]).unwrap(),
+                    unsupervised_immune_distance_from_maps(byte_maps, vec![]).unwrap(),
+                )
+            };
+            equal_matrices(&native, &portable);
+        }
+    }
+    #[test]
+    fn i2b_repertoire_file_byte_morisita_parity_all_three_chains() {
+        for (modality, suffix) in [
+            (CohortModality::Bcr, "bcr_heavy_chain_report"),
+            (CohortModality::TcrAlpha, "tcr_alpha_clone_report"),
+            (CohortModality::TcrBeta, "tcr_beta_clone_report"),
+        ] {
+            let mut accumulator =
+                PortableRepertoireAccumulator::new(modality, AmbiguousCallPolicy::Exclude).unwrap();
+            let mut native_parsed = Vec::new();
+            let mut scratch = ParsedClonotypeScratch::default();
+            for n in 1..=8 {
+                let filename = fixture(n, suffix);
+                let id = format!("S{n}");
+                let bytes = fs::read(&filename).unwrap();
+                accumulator
+                    .add_bytes(filename.to_str().unwrap(), &bytes, &id, "Eligible")
+                    .unwrap();
+                native_parsed.push(
+                    parse_repertoire_file_with_audit(
+                        &filename,
+                        &id,
+                        "Eligible",
+                        modality,
+                        AmbiguousCallPolicy::Exclude,
+                        &mut scratch,
+                        |_| {},
+                    )
+                    .unwrap(),
+                );
+            }
+            drop(scratch);
+            let native = unsupervised_repertoire_from_parsed(native_parsed, vec![]).unwrap();
+            let portable = accumulator.finish_unsupervised().unwrap();
+            equal_matrices(&native, &portable);
         }
     }
 }

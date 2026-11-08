@@ -1,10 +1,11 @@
-import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.21.0-i2-distance-fusion'
-import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.21.0-i2-distance-fusion'
-import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.21.0-i2-distance-fusion'
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.21.0-i2-distance-fusion'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-i2-distance-fusion'
-import { renderResultsOverview } from './results-overview.js?v=0.21.0-i2-distance-fusion'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-i2-distance-fusion'
+import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.21.0-i2b-source-distances'
+import { prepareI2BRequests } from './i2b-source-selection.js?v=0.21.0-i2b-source-distances'
+import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.21.0-i2b-source-distances'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.21.0-i2b-source-distances'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.21.0-i2b-source-distances'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.21.0-i2b-source-distances'
+import { renderResultsOverview } from './results-overview.js?v=0.21.0-i2b-source-distances'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.21.0-i2b-source-distances'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -14,8 +15,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.21.0-i2-distance-fusion'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-i2-distance-fusion'
+import { methodDocs } from './docs-content.js?v=0.21.0-i2b-source-distances'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.21.0-i2b-source-distances'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -29,7 +30,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.21.0-i2-distance-fusion'
+const APP_VERSION = '0.21.0-i2b-source-distances'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -110,6 +111,10 @@ const state = {
   alignmentBusy: false,
   alignmentError: '',
   i2ImportedViews: [],
+  i2bDirectViews: [],
+  i2bBusy: false,
+  i2bErrors: [],
+  i2bProgress: '',
   i2Result: null,
   i2Busy: false,
   i2Error: '',
@@ -190,6 +195,7 @@ const state = {
 
 const pending = new Map()
 let activeCompareController = null
+let activeI2bController = null
 let worker = null
 function attachScienceWorker() {
   const current = new Worker(new URL(`./analysis-worker.js?v=${APP_VERSION}`, import.meta.url), { type: 'module' })
@@ -238,6 +244,7 @@ function replaceScienceWorker() {
   if (state.wasmMemorySample) state.wasmMemorySample = { ...state.wasmMemorySample, active: false }
 }
 function stopScienceWork() {
+  if (activeI2bController) { activeI2bController.abort(); state.i2bProgress = 'Direct distance calculation stopped. Completed modality distances were kept.'; return }
   if (activeCompareController) {
     activeCompareController.abort()
     state.projectMessage = 'Comparison stopped. Completed modality results are retained.'
@@ -395,6 +402,8 @@ function resetQcStateAfterInputsChange() {
   state.alignmentPreview = null
   state.i2Result = null
   state.i2ImportedViews = []
+  state.i2bDirectViews = []
+  state.i2bErrors = []
   state.alignmentError = ''
   state.hitProgress = null
 
@@ -581,6 +590,8 @@ function clearProject() {
   state.alignmentPreview = null
   state.i2Result = null
   state.i2ImportedViews = []
+  state.i2bDirectViews = []
+  state.i2bErrors = []
   state.alignmentError = ''
   state.hitProgress = null
   state.qcConfig.metadataId = ''
@@ -1024,7 +1035,7 @@ function renderNav() {
 
   document.querySelector('#sidebar-status').innerHTML = `
     <span class="status-dot ${state.wasmReady ? 'ok' : ''}"></span>
-    <div><strong>${escapeHtml(state.engine)}</strong><span>Ready for analysis</span>${(pending.size || activeCompareController) ? '<button id="stop-science-work" class="danger-text-button">Stop operation</button>' : ''}</div>`
+    <div><strong>${escapeHtml(state.engine)}</strong><span>Ready for analysis</span>${(pending.size || activeCompareController || activeI2bController) ? '<button id="stop-science-work" class="danger-text-button">Stop operation</button>' : ''}</div>`
 }
 
 function summaryCard(label, value, detail) {
@@ -2321,7 +2332,7 @@ function renderIntegrativeEvidenceOverview() {
     ${totals.included ? `<div class="table-scroll"><table class="integrative-evidence-table"><thead><tr><th>Data type</th><th>Result</th><th>Samples</th><th>Adjusted tests</th><th>Selected findings</th><th>Effect interpretation</th></tr></thead><tbody>${body}</tbody></table></div>` : '<p class="integrative-message">Select one or more available data types to review.</p>'}
     <div class="run-row"><div><strong>Selected findings from all included data types</strong><span>Save a complete table with modality names, feature families, original q-values, and effects.</span></div><button id="integrative-export-csv" class="secondary-button" type="button" ${totals.selectedTests ? '' : 'disabled'}>Save combined evidence CSV</button></div>
     <p class="integrative-message">These are results from separate adjusted analyses, not one joint statistical model. BH q-values are corrected within their original test families. Effect sizes use different scales and must not be compared directly across data types.</p>
-    <p class="integrative-message"><strong>Joint sample-level distance fusion is available below after I1 alignment when full unsupervised distance results are supplied. Direct full-distance generation from all seven raw data types and latent-factor analysis remain future work. The I1 sample alignment below checks identity and source availability only; it does not fit a combined model.</strong> It needs sample alignment, missing-data checks, and validated combined-distance or latent-factor calculations.</p>
+    <p class="integrative-message"><strong>Joint sample-level distance fusion is available below after I1 alignment when full unsupervised distance results are supplied. Direct source-distance calculation for all seven available types is provided below in I2B. Joint latent-factor modeling remains future work. The I1 sample alignment below checks identity and source availability only; it does not fit a combined model.</strong> It needs sample alignment, missing-data checks, and validated combined-distance or latent-factor calculations.</p>
   </section>`
 }
 
@@ -2411,7 +2422,7 @@ function i1AlignmentPanel() {
     <p class="integrative-message"><strong>Scientific limit:</strong> I1 checks identities and source availability only. It does not read quantitative feature matrices, normalize joint distances, impute missing modalities or fit a multi-omics model. The I2A panel below can combine full unsupervised sample distances; native/browser parity and source-level validation are required.</p>
   </section>`
 }
-function i1ResetPreview() { state.alignmentPreview = null; state.alignmentError = ''; state.i2Result = null }
+function i1ResetPreview() { state.alignmentPreview = null; state.alignmentError = ''; state.i2Result = null; state.i2bDirectViews = []; state.i2bErrors = [] }
 async function i1RunAlignment() {
   if (state.alignmentBusy || state.busy || state.mergeBusy) return
   const draft = state.alignmentSource === 'draft'
@@ -2503,6 +2514,7 @@ function i2AvailableViews() {
   const local = state.longitudinalResult ? extractFullDistanceViews(state.longitudinalResult) : []
   const merged = new Map(local.map(view => [view.modality, view]))
   for (const view of state.i2ImportedViews) merged.set(view.modality, view)
+  for (const view of state.i2bDirectViews) merged.set(view.modality, view)
   return [...merged.values()]
 }
 function i2HeatmapSvg(result) {
@@ -2558,15 +2570,90 @@ function i2DistancePanel() {
     <p class="method-note">A nearest neighbor is a descriptive relationship between samples. No group model, adjusted-hit selection, outcome prediction or joint significance test was fitted.</p>`
   }
   return `<section class="card i2-distance-fusion" id="i2-distance-fusion"><div class="card-heading"><div><h3>Joint sample similarity</h3><p>Combine full, unsupervised distances from at least two data types after exact I1 sample alignment. Each view receives a scale adjustment. Missing pairs stay missing.</p></div><span class="tag neutral">I2A · Joint distance fusion</span></div>
-    <p class="method-note">Input: full sample distances from the Longitudinal analysis. Gene and transcript results from the current browser session are used when available. To include BCR, TCR alpha/beta, isotypes and immune infiltration now, select compatible local Longitudinal result JSON files produced by the native analysis. Corrected Compare Groups results and 2D plots are not valid inputs.</p>
+    <p class="method-note">Input: full sample distances from the Longitudinal analysis. Gene and transcript results from the current browser session are used when available. Use Calculate local source distances to process the five other data types, or select native Longitudinal distance JSON files as an alternative. Corrected Compare Groups results and 2D plots are not valid inputs.</p>
+    <div class="run-row i2b-source-actions"><div><strong>Calculate distances directly from the aligned local data</strong><span>Uses all selected and available data types. One source workbook is read at a time. BCR/TCR use Morisita–Horn; isotypes use Aitchison; immune data uses standardized ssGSEA distances; expression uses the existing W4 distance method. No group labels or adjusted hits are used.</span></div><button type="button" id="i2b-run-direct" class="primary-button" ${!alignment || !state.wasmReady || state.i2bBusy || state.i2Busy || state.busy || state.alignmentBusy ? 'disabled' : ''}>${state.i2bBusy ? 'Calculating direct distances…' : 'Calculate local source distances'}</button></div>
+    ${state.i2bProgress ? `<p id="i2b-progress" class="method-note" role="status">${escapeHtml(state.i2bProgress)}</p>` : ''}
+    ${state.i2bDirectViews.length ? `<div class="run-row"><p class="method-note">Direct distances ready: ${escapeHtml(state.i2bDirectViews.map(v=>v.modality).join(', '))}. These take priority over imported distances for the same data type.</p><button type="button" class="secondary-button" id="i2b-export-sources">Save full source-distance JSON</button></div>` : ''}
+    ${state.i2bErrors.length ? `<details class="details-block" open><summary>${state.i2bErrors.length} data type(s) need review</summary><div class="analysis-warnings">${state.i2bErrors.map(e=>`<div>${escapeHtml(e.modality)}: ${escapeHtml(e.message)}</div>`).join('')}</div></details>` : ''}
+    <p class="method-note">After direct distances are ready, run Joint distance fusion below. Missing or failed views are not imputed. Large source tables can still exceed browser memory.</p>
     <div class="form-grid"><label><span>Local full-distance JSON files (optional, multiple allowed)</span><input id="i2-distance-files" type="file" accept=".json,application/json" multiple/></label><label><span>Minimum measured data types per pair</span><input id="i2-min-views" type="number" min="2" max="7" step="1" value="${state.i2MinViews}"/></label></div>
     <p class="method-note">Loaded views: ${viewNames.length ? escapeHtml(viewNames.join(' · ')) : 'None'}. Imported files stay in this browser session only. A local import replaces the same data type from the current session.</p>
     <div class="run-row"><div><strong>Fit a joint unsupervised distance model</strong><span>${alignment ? `${alignment.summary.eligible} observations passed metadata exclusions` : 'Run I1 sample alignment first'}. Source IDs must match exact I1 aliases.</span></div><button id="i2-run-fusion" class="primary-button" type="button" ${!alignment || state.i2Busy || state.busy || state.alignmentBusy || viewNames.length < 2 ? 'disabled' : ''}>${state.i2Busy ? 'Combining measured distances…' : 'Run joint distance fusion'}</button></div>
     ${state.i2Error ? `<div class="analysis-warnings" role="alert">${escapeHtml(state.i2Error)}</div>` : ''}
     ${content}
-    <p class="integrative-message"><strong>Scientific limits:</strong> This is a real multi-view sample-distance analysis, but it does not fit latent factors, a joint ordination, or a predictive model. It uses full W4 distances; it does not calculate distances directly from the five additional raw workbook types in this browser release. Distance correlation is sensitivity analysis, not independent biological validation.</p>
+    <p class="integrative-message"><strong>Scientific limits:</strong> This is a real multi-view sample-distance analysis, but it does not fit latent factors, a joint ordination, or a predictive model. It uses full W4 distances; I2B now supports direct local source-distance calculation for all seven available types, subject to native/WASM parity and real-cohort validation. Distance correlation is sensitivity analysis, not independent biological validation.</p>
   </section>`
 }
+// I2B runs each source modality in a separate short-lived worker. One failed
+// parser cannot remove complete, previously calculated views.
+async function i2bRunDirect() {
+  if (state.i2bBusy || state.busy || state.i2Busy || state.alignmentBusy || !state.alignmentPreview) return
+  const controller = new AbortController()
+  activeI2bController = controller
+  state.i2bBusy = true
+  state.busy = true
+  state.i2bErrors = []
+  state.i2bDirectViews = []
+  state.i2Result = null
+  const selectedMerged = {gene: state.compareConfig.geneMergedId, transcript: state.compareConfig.transcriptMergedId}
+  try {
+    const {requests, errors} = prepareI2BRequests(state.alignmentPreview, state.records, selectedFile,
+      selectedMerged, state.hitConfig.integrativeModalities || {})
+    state.i2bErrors = errors
+    render()
+    for (let i = 0; i < requests.length; i++) {
+      if (controller.signal.aborted) break
+      const entry = requests[i]
+      state.i2bProgress = `${entry.modality}: ${i + 1} of ${requests.length} data types`
+      render()
+      try {
+        const response = await isolatedScienceRequest({
+          createWorker: () => new Worker(new URL(`./analysis-worker.js?v=${APP_VERSION}`, import.meta.url), {type: 'module'}),
+          type: 'run-i2b-source-distance',
+          payload: {modality:entry.modality, files:entry.files, sampleIds:entry.sampleIds,
+            options: {ambiguousPolicy: state.compareConfig.ambiguousPolicy,
+              determinedOnly: state.compareConfig.excludeUndeterminedIsotype,
+              minCount: state.longitudinalConfig.minCount,
+              minFractionSamples: state.longitudinalConfig.minFractionSamples}},
+          resourceSettings: state.resources,
+          signal: controller.signal,
+          onProgress: progress => {
+            state.i2bProgress = progress.message
+            const status = document.querySelector('#i2b-progress')
+            if (status) status.textContent = state.i2bProgress
+          },
+          onMemory: report => { const memory = validateWasmMemoryReport(report); if (memory) {state.wasmMemorySample={...memory, active:true};renderSystemInfo()} },
+        })
+        if (response.type !== 'i2b-source-distance-result' || response.view?.modality !== entry.modality) {
+          throw new Error('I2B worker returned the wrong source-distance result')
+        }
+        state.i2bDirectViews.push({
+          ...response.view,
+          input_files: entry.files.map(item => ({name: item.name, sample_id: item.sampleId || null})),
+          input_options: {ambiguousPolicy: state.compareConfig.ambiguousPolicy,
+            determinedOnly: state.compareConfig.excludeUndeterminedIsotype,
+            minCount: state.longitudinalConfig.minCount,
+            minFractionSamples: state.longitudinalConfig.minFractionSamples},
+        })
+      } catch(error) {
+        state.i2bErrors.push({modality: entry.modality, message: error instanceof Error ? error.message : String(error)})
+        if (controller.signal.aborted) break
+      }
+      render()
+    }
+  } catch (error) {
+    state.i2bErrors.push({modality: 'alignment', message: error instanceof Error ? error.message : String(error)})
+  } finally {
+    activeI2bController = null
+    state.busy = false
+    state.i2bBusy = false
+    state.i2bProgress = controller.signal.aborted ? 'Stopped; completed data types remain available.' : 'Local distance preparation complete.'
+    if (state.wasmMemorySample) state.wasmMemorySample = {...state.wasmMemorySample,active:false}
+    render()
+  }
+}
+
+
 async function i2ReadLocalFiles(fileList) {
   state.i2Busy = true
   state.i2Error = ''
@@ -2599,6 +2686,13 @@ async function i2RunFusion() {
   finally { state.i2Busy = false; render() }
 }
 function bindI2DistanceEvents() {
+  document.querySelector('#i2b-run-direct')?.addEventListener('click', () => void i2bRunDirect())
+  document.querySelector('#i2b-export-sources')?.addEventListener('click', () => {
+    if (state.i2bDirectViews.length) void saveTextFile('4c-insight-i2b-source-distances.json',
+      JSON.stringify({schema:'4c-insight-i2b-source-distances-v1', views:state.i2bDirectViews,
+        alignment_roles:state.alignmentPreview?.roles, alignment_exclusions:state.alignmentPreview?.exclusions},null,2)+'\n')
+      .catch(error=>{state.i2bErrors.push({modality:'export',message:error.message});render()})
+  })
   document.querySelector('#i2-distance-files')?.addEventListener('change', event => {
     const files = [...event.currentTarget.files || []]
     if (files.length) void i2ReadLocalFiles(files)

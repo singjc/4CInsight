@@ -1,4 +1,4 @@
-import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-i2-distance-fusion'
+import { multiomicsDocs } from './docs-new-modalities.js?v=0.21.0-i2b-source-distances'
 export const methodDocs = [
   {
     id: 'local-first',

@@ -459,6 +459,43 @@ self.addEventListener('message', async (event) => {
       await handleLongitudinalExpression(request)
       return
     }
+    if (request.type === 'run-i2b-source-distance') {
+      const wasm = await loadWasm()
+      if (!wasm?.i2b_begin_json || !wasm?.i2b_add_sample_json || !wasm?.i2b_finish_json ||
+          !wasm?.i2b_abort || !wasm?.i2b_expression_distance_json) {
+        throw new Error('Build the I2B WASM source-distance engine before running direct integration')
+      }
+      const kind = request.modality
+      const files = request.files || []
+      if (!files.length) throw new Error(`${kind}: no exactly aligned source files`)
+      let view
+      if (kind === 'gene' || kind === 'transcript') {
+        if (files.length !== 1 || !Array.isArray(request.sampleIds)) throw new Error('Select one merged expression table')
+        postProgress(request.requestId, 0, 1, `${kind}: reading local merged expression table`)
+        const bytes = await wasmBytes(files[0].file)
+        view = JSON.parse(wasm.i2b_expression_distance_json(kind, bytes,
+          JSON.stringify(request.sampleIds), JSON.stringify(request.options || {})))
+      } else {
+        wasm.i2b_begin_json(kind, JSON.stringify(request.options || {}))
+        let active = true
+        try {
+          for (let i = 0; i < files.length; i++) {
+            const item = files[i]
+            postProgress(request.requestId, i, files.length + 1,
+              `${kind}: parsing ${i + 1}/${files.length}: ${item.name}`)
+            const bytes = await wasmBytes(item.file)
+            wasm.i2b_add_sample_json(item.name, item.sampleId, bytes)
+          }
+          postProgress(request.requestId, files.length, files.length + 1,
+            `${kind}: calculating shared native unsupervised sample distances`)
+          view = JSON.parse(wasm.i2b_finish_json())
+          active = false
+        } finally { if (active) wasm.i2b_abort() }
+      }
+      postWasmMemory(request.requestId, true)
+      self.postMessage({ type: 'i2b-source-distance-result', requestId: request.requestId, view })
+      return
+    }
     if (request.type === 'run-integrative-distance') {
       const wasm = await loadWasm()
       if (!wasm?.fuse_integrative_distances_json) throw new Error('Build the I2A Rust/WASM distance engine before running this analysis')
