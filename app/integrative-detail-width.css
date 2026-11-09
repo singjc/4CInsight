@@ -1,0 +1,53 @@
+/* Keep the detailed multi-omics workflow inside the available workspace width.
+   Large source tables and heatmaps retain their own horizontal scroll areas.
+   No canvas, table, plot coordinate, or scientific result is resized here. */
+#integrative-details-panel.integrative-detail-layout {
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+#integrative-details-panel.integrative-detail-layout > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+#integrative-details-panel :is(
+  .card,
+  .details-block,
+  .plot-card,
+  .plot-shell,
+  .i2-result-grid,
+  .bio-dashboard-top,
+  .bio-feature-section,
+  .bio-native-section,
+  .bio-feature-column,
+  .bio-native-grid
+) {
+  min-width: 0;
+  max-width: 100%;
+}
+
+#integrative-details-panel :is(
+  .table-scroll,
+  .i1-alignment-scroll,
+  .i2-heatmap-scroll,
+  .joint-cluster-scroll,
+  .joint-heatmap-scroll,
+  .significant-heatmap-scroll,
+  .plot-scroll
+) {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+#integrative-details-panel :is(
+  .card-heading,
+  .plot-heading,
+  .run-row
+) > * {
+  min-width: 0;
+}
