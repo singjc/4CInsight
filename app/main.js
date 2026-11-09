@@ -1,19 +1,19 @@
-import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workflow.js?v=0.22.7'
-import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.7'
-import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.7'
-import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.7'
-import { selectFeatureSamples, expressionAssociationsTsv } from './biological-feature-ranking.js?v=0.22.7'
-import { runBoundedSourceTasks, sourceProgressSummary, validParallelWorkers } from './source-distance-queue.js?v=0.22.7'
-import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.7'
-import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.7'
-import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.7'
-import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.7'
-import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.7'
-import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.7'
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.7'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.7'
-import { renderResultsOverview } from './results-overview.js?v=0.22.7'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.7'
+import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workflow.js?v=0.22.8'
+import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.8'
+import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.8'
+import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.8'
+import { selectFeatureSamples, expressionAssociationsTsv } from './biological-feature-ranking.js?v=0.22.8'
+import { runBoundedSourceTasks, sourceProgressSummary, validParallelWorkers } from './source-distance-queue.js?v=0.22.8'
+import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.8'
+import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.8'
+import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.8'
+import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.8'
+import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.8'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.8'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.8'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.8'
+import { renderResultsOverview } from './results-overview.js?v=0.22.8'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.8'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -23,8 +23,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.22.7'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.7'
+import { methodDocs } from './docs-content.js?v=0.22.8'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.8'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -38,7 +38,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.22.7'
+const APP_VERSION = '0.22.8'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -3343,6 +3343,27 @@ function bindSourceBiologicalEvents(){
 // their formulas. Required failures stop later stages; unsupported optional
 // interpretation stages remain visible as warnings rather than false passes.
 let activeIntegrativeRunController = null
+// The original alignment and file identities are pinned for this run. Do not
+// restore it if any source, selected role, exclusion, or input file changed.
+function integrativeInputFingerprint() {
+  const records=(state.records||[]).map(r=>[r.id,r.name,r.relativePath,r.kind]).sort((a,b)=>String(a[0]).localeCompare(String(b[0])))
+  const files=[...state.files.entries()].map(([id,f])=>[id,f?.name,f?.size,f?.lastModified]).sort((a,b)=>String(a[0]).localeCompare(String(b[0])))
+  return JSON.stringify({records,files,metadata:state.qcConfig.metadataId,
+    gene:state.compareConfig.geneMergedId,transcript:state.compareConfig.transcriptMergedId,
+    source:state.alignmentSource,roles:state.alignmentRoles,
+    exclusions:i1ExclusionRules(),modalities:state.hitConfig.integrativeModalities||{}})
+}
+function integrativeRestoreCheckedAlignment(pinned) {
+  if(state.alignmentPreview && state.alignmentTable)return {recovered:false}
+  if(!pinned?.preview || !pinned.table || pinned.fingerprint!==integrativeInputFingerprint()) {
+    throw new Error('Sample alignment became unavailable after processing sources. Input files or alignment settings changed. Recheck sample alignment before continuing; saved distances were not treated as aligned.')
+  }
+  if(pinned.preview.schema!=='4c-insight-observation-alignment-v1')
+    throw new Error('The previous alignment had an unexpected schema; recheck sample alignment')
+  state.alignmentPreview=pinned.preview
+  state.alignmentTable=pinned.table
+  return {recovered:true}
+}
 function ensureBiologicalFindings() {
   const structure=state.i2StructureResult
   if(structure && state.alignmentPreview && state.alignmentTable && !state.bioResult && !state.bioError) {
@@ -3357,6 +3378,7 @@ function ensureBiologicalFindings() {
 function integrativeOverviewPanel() {
   const structure=state.i2StructureResult
   if(!structure) return `<section class="card integrative-overview" role="tabpanel" id="integrative-overview-panel" aria-labelledby="integrative-overview-tab">
+    ${state.integrativeRunError?`<div class="analysis-warnings" role="alert"><strong>Analysis stopped:</strong> ${escapeHtml(state.integrativeRunError)} <button id="integrative-review-error" type="button" class="secondary-button">Review error details</button></div>`:''}
     <h3>Your results at a glance</h3><p class="method-note">Select <strong>Run complete analysis</strong>. The application will align samples, calculate source distances, fit the joint sample structure, and prepare available biological findings. Results will appear here automatically. Review methods and exports in Details.</p>
     <p class="method-note">The analysis uses local files. It does not require Compare Groups or disease labels.</p>
   </section>`
@@ -3403,6 +3425,7 @@ function integrativeOverviewPanel() {
 }
 function integrativeDetailsPanel() {
   return `<section role="tabpanel" id="integrative-details-panel" aria-labelledby="integrative-details-tab" class="integrative-detail-layout">
+    ${integrativeRunDiagnostics()}
     ${state.compareResult?`<details class="details-block"><summary>Previously calculated corrected evidence (optional)</summary>${renderIntegrativeEvidenceOverview()}</details>`:''}
     ${i1AlignmentPanel()}
     ${i2DistancePanel()}
@@ -3428,12 +3451,14 @@ async function runCompleteIntegrativeAnalysis() {
   state.bioFeatureResult=null
   state.bioError=''
   state.bioFeatureError=''
+  let pinnedAlignment=null
   const stages=[
     {id:'alignment',label:'Match sample and patient IDs',run:async()=>{
-      if(!state.alignmentPreview || !state.alignmentTable) await i1RunAlignment()
-      else return {status:'skipped',message:`Reused ${state.alignmentPreview.summary.eligible} aligned observations`}
+      const reused=Boolean(state.alignmentPreview && state.alignmentTable)
+      if(!reused)await i1RunAlignment()
       if(!state.alignmentPreview||!state.alignmentTable)throw new Error(state.alignmentError||'Sample alignment was not available')
-      return {message:`${state.alignmentPreview.summary.eligible} eligible observations`}
+      pinnedAlignment={preview:state.alignmentPreview,table:state.alignmentTable,fingerprint:integrativeInputFingerprint()}
+      return {status:reused?'skipped':'complete',message:`${reused?'Reused ':''}${state.alignmentPreview.summary.eligible} eligible observations`}
     }},
     {id:'sources',label:'Calculate measured source distances',run:async()=>{
       const chosen=I1_MODALITIES.filter(x=>state.hitConfig.integrativeModalities?.[x.key]!==false).map(x=>x.key)
@@ -3443,9 +3468,12 @@ async function runCompleteIntegrativeAnalysis() {
       if(state.wasmReady)await i2bRunDirect()
       const views=i2AvailableViews()
       if(views.length<2)throw new Error('Fewer than two usable distance data types. Review local files and source errors in Details.')
-      return {status:state.i2bErrors.length?'warning':'complete',message:`${views.length} distance data types ready${state.i2bErrors.length?`; ${state.i2bErrors.length} source warning(s)`:''}`}
+      const restored=integrativeRestoreCheckedAlignment(pinnedAlignment)
+      const warnings=state.i2bErrors.length+(restored.recovered?1:0)
+      return {status:warnings?'warning':'complete',message:`${views.length} distance data types ready${state.i2bErrors.length?`; ${state.i2bErrors.length} source warning(s)`:''}${restored.recovered?'; verified alignment restored after processing':''}`}
     }},
     {id:'fusion',label:'Combine measured distances',run:async()=>{
+      integrativeRestoreCheckedAlignment(pinnedAlignment)
       await i2RunFusion()
       if(!state.i2Result)throw new Error(state.i2Error||'No fused distances were produced')
       return{message:`${state.i2Result.fused_pairs} measured sample pairs`}
@@ -3480,12 +3508,86 @@ async function runCompleteIntegrativeAnalysis() {
   }catch(error){state.integrativeRunError=error instanceof Error?error.message:String(error)}
   finally{state.integrativeRunBusy=false;activeIntegrativeRunController=null;render()}
 }
+// Main controls are visible without opening the detailed scientific panels.
+// All options reuse the same validated state and source calculations.
+function integrativeMainSettings() {
+  const busy=state.integrativeRunBusy||state.busy||state.i2bBusy||state.alignmentBusy
+  const locked=busy?'disabled':''
+  const cols=state.alignmentColumns?.length?state.alignmentColumns:
+    (state.alignmentTable?.columns||state.metadataEditor.table?.columns||[])
+  const candidates=recordsOfKind('metadata-candidate')
+  const choices=(selected,includeEmpty=false)=>`${includeEmpty?'<option value="">Not selected</option>':''}${cols.map(c=>`<option value="${escapeHtml(c)}" ${selected===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}`
+  const chosen=state.hitConfig.integrativeModalities||{}
+  return `<section class="integrative-main-settings" aria-label="Main multi-omics settings">
+    <div class="integrative-settings-heading"><strong>Main analysis settings</strong><span>Full method controls remain in Details.</span></div>
+    <div class="integrative-settings-grid">
+      <label>Metadata source<select id="integrative-setting-source" ${locked}><option value="active" ${state.alignmentSource==='active'?'selected':''}>Selected metadata file</option><option value="draft" ${state.alignmentSource==='draft'?'selected':''}>Open metadata draft</option></select></label>
+      <label>Metadata file<select id="integrative-setting-metadata" ${locked} ${state.alignmentSource==='draft'?'disabled':''}>${candidates.map(r=>`<option value="${escapeHtml(r.id)}" ${r.id===state.qcConfig.metadataId?'selected':''}>${escapeHtml(r.name)}</option>`).join('')}</select></label>
+      <label>Observation ID<select id="integrative-setting-observation" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Read on initial alignment</option>':choices(state.alignmentRoles.observation)}</select></label>
+      <label>Patient ID<select id="integrative-setting-patient" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Read on initial alignment</option>':choices(state.alignmentRoles.subject,true)}</select></label>
+      <label>Visit / timepoint<select id="integrative-setting-visit" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Read on initial alignment</option>':choices(state.alignmentRoles.time,true)}</select></label>
+      <label>Parallel data types<select id="integrative-setting-workers" ${locked}>${[1,2,3].map(n=>`<option value="${n}" ${state.i2bParallelWorkers===n?'selected':''}>${n} ${n===1?'worker':'workers'}</option>`).join('')}</select></label>
+      <label>Minimum data types per pair<input id="integrative-setting-min-views" type="number" min="2" max="7" value="${state.i2MinViews}" ${locked}/></label>
+      <label>Descriptive clusters<input id="integrative-setting-clusters" type="number" min="2" max="12" value="${state.bioClusterCount}" ${locked}/></label>
+      <label>Patient stability repeats<input id="integrative-setting-repeats" type="number" min="10" max="500" value="${state.jointStabilityConfig.repeats}" ${locked}/></label>
+    </div>
+    <div class="integrative-settings-modalities" role="group" aria-label="Data types in complete analysis">${I1_MODALITIES.map(m=>`<label class="check-label"><input type="checkbox" data-integrative-main-modality="${m.key}" ${chosen[m.key]===false?'':'checked'} ${locked}/><span>${escapeHtml(m.label)}</span></label>`).join('')}</div>
+    <label class="check-label integrative-one-patient"><input type="checkbox" id="integrative-setting-one-patient" ${state.i2StructureOnePerPatient?'checked':''} ${locked}/><span>One observation per patient in the joint structure</span></label>
+    <p class="method-note">A single metadata column can identify both the observation and the patient when each patient has one sample. Changing source IDs or data types requires fresh alignment. No disease labels enter model fitting.</p>
+  </section>`
+}
+function integrativeRunDiagnostics() {
+  const stages=state.integrativeRunSteps||[]
+  const errors=[]
+  const add=(label,value)=>{if(value)errors.push({label,message:String(value)})}
+  add('Complete workflow',state.integrativeRunError)
+  add('Sample alignment',state.alignmentError)
+  for(const item of state.i2bErrors||[])add(`Source: ${item.modality}`,item.message)
+  add('Distance fusion',state.i2Error)
+  add('Joint structure',state.i2StructureError)
+  add('Patient-level stability',state.jointStabilityError)
+  add('Biological interpretation',state.bioError)
+  add('RNA feature ranking',state.bioFeatureError)
+  const failures=stages.filter(s=>s.status==='failed'||s.status==='stopped'||s.status==='warning')
+  return `<section id="integrative-run-diagnostics" class="card integrative-diagnostics" aria-label="Workflow errors and validation">
+    <div class="card-heading"><div><h3>Run diagnostics and source checks</h3><p>Problems are listed here, including errors that prevent later stages from starting.</p></div><span class="tag neutral">${errors.length||failures.length?'Review required':'No recorded errors'}</span></div>
+    ${errors.length?`<div class="analysis-warnings" role="alert">${errors.map(e=>`<p><strong>${escapeHtml(e.label)}:</strong> ${escapeHtml(e.message)}</p>`).join('')}</div>`:'<p class="method-note">There are no recorded workflow errors. If an analysis is missing, inspect the stage status below.</p>'}
+    ${stages.length?`<div class="table-scroll"><table><thead><tr><th>Stage</th><th>Status</th><th>Result or failure reason</th></tr></thead><tbody>${stages.map(s=>`<tr><td>${escapeHtml(s.label)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.message||'—')}</td></tr>`).join('')}</tbody></table></div>`:''}
+    <p class="method-note">Current state: ${state.alignmentPreview?.summary?.eligible??'no'} eligible aligned observations; ${state.i2bDirectViews.length} direct source views; ${state.i2Result?'joint distances ready':'joint distances not fitted'}; ${state.i2StructureResult?'joint structure ready':'joint structure not fitted'}.</p>
+    <p class="method-note">Source files remain on this device. Review diagnostic text before sharing it, because it may contain file or sample names.</p>
+  </section>`
+}
+function invalidateIntegrativeFit() {
+  state.i2Result=null;state.i2StructureResult=null;state.jointStabilityResult=null
+  state.bioResult=null;state.bioFeatureResult=null;state.integrativeRunSteps=[];state.integrativeRunError=''
+}
+function bindIntegrativePrimarySettings() {
+  const change=(id,fn)=>document.querySelector(`#${id}`)?.addEventListener('change',e=>{fn(e.currentTarget);render()})
+  change('integrative-setting-source',el=>{state.alignmentSource=el.value;state.alignmentColumns=[];i1ResetPreview();invalidateIntegrativeFit()})
+  change('integrative-setting-metadata',el=>{state.qcConfig.metadataId=el.value;state.alignmentColumns=[];i1ResetPreview();invalidateIntegrativeFit()})
+  for(const [id,role] of [['integrative-setting-observation','observation'],['integrative-setting-patient','subject'],['integrative-setting-visit','time']])
+    change(id,el=>{state.alignmentRoles[role]=el.value;i1ResetPreview();invalidateIntegrativeFit()})
+  change('integrative-setting-workers',el=>{state.i2bParallelWorkers=validParallelWorkers(el.value)})
+  change('integrative-setting-min-views',el=>{const n=Number(el.value);if(Number.isInteger(n)&&n>=2&&n<=7){state.i2MinViews=n;invalidateIntegrativeFit()}})
+  change('integrative-setting-clusters',el=>{const n=Number(el.value);if(Number.isInteger(n)&&n>=2&&n<=12){state.bioClusterCount=n;state.jointStabilityConfig.clusters=n;state.bioResult=null;state.bioFeatureResult=null;state.jointStabilityResult=null;state.integrativeRunSteps=[]}})
+  change('integrative-setting-repeats',el=>{const n=Number(el.value);if(Number.isInteger(n)&&n>=10&&n<=500){state.jointStabilityConfig.repeats=n;state.jointStabilityResult=null;state.integrativeRunSteps=[]}})
+  change('integrative-setting-one-patient',el=>{state.i2StructureOnePerPatient=el.checked;invalidateIntegrativeFit()})
+  document.querySelectorAll('[data-integrative-main-modality]').forEach(el=>el.addEventListener('change',event=>{
+    const m=event.currentTarget.dataset.integrativeMainModality
+    state.hitConfig.integrativeModalities||={}
+    state.hitConfig.integrativeModalities[m]=event.currentTarget.checked
+    state.i2StructureSelection[m]=event.currentTarget.checked
+    i1ResetPreview();invalidateIntegrativeFit();render()
+  }))
+}
 function bindIntegrativeRunControls(){
+  bindIntegrativePrimarySettings()
   document.querySelector('#integrative-run-complete')?.addEventListener('click',()=>void runCompleteIntegrativeAnalysis())
   document.querySelector('#integrative-stop-run')?.addEventListener('click',stopScienceWork)
   document.querySelector('#integrative-view-overview')?.addEventListener('click',()=>{state.integrativeView='overview';render()})
   document.querySelector('#integrative-view-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
   document.querySelector('#integrative-open-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
+  document.querySelector('#integrative-review-error')?.addEventListener('click',()=>{state.integrativeView='details';render()})
 }
 
 function significantHitsView() {
@@ -3502,10 +3604,11 @@ function significantHitsView() {
       <div class="integrative-run-description"><h3>Complete multi-omics analysis</h3><p class="method-note">Match samples, calculate available source distances, fit the joint structure, check cluster stability, and summarize measured biological signals. Existing valid source results may be reused. Source data remains on this device.</p></div>
       <div class="integrative-top-controls"><button id="integrative-run-complete" type="button" class="primary-button" ${disabled?'disabled':''}>${busy?'Analysis running…':'Run complete analysis'}</button>${busy?'<button id="integrative-stop-run" type="button" class="secondary-button">Stop analysis</button>':''}</div>
     </div>
+    ${integrativeMainSettings()}
     ${!ready?'<p class="notice-banner">Connect the local metadata file in Project or open a metadata draft before starting.</p>':''}
     ${steps.length?`<div class="integrative-run-steps" aria-label="Complete analysis progress" role="status" aria-live="polite">${stepMarkup}</div>`:''}
     ${busy && steps.some(x=>x.id==='sources'&&x.status==='running')?`<div class="integrative-live-progress"><strong>Processing local source files</strong><progress id="integrative-live-source-bar" max="${Math.max(1,sourceProgressSummary(state.i2bProgressRows).total)}" value="${sourceProgressSummary(state.i2bProgressRows).completed}" aria-label="Source file processing progress"></progress><p id="integrative-live-source-status" role="status">${escapeHtml(state.i2bProgress||'Starting source workers')}</p></div>`:''}
-    ${state.integrativeRunError?`<p class="analysis-warnings" role="alert">${escapeHtml(state.integrativeRunError)}. See Details for source errors and validation information.</p>`:''}
+    ${state.integrativeRunError?`<div class="analysis-warnings" role="alert"><strong>Analysis stopped:</strong> ${escapeHtml(state.integrativeRunError)}. Open Details to see the stage report and source errors.</div>`:''}
     <div class="integrative-tab-controls" role="tablist" aria-label="Integrative analysis results">
       <button id="integrative-view-overview" type="button" role="tab" aria-controls="integrative-overview-panel" aria-selected="${!detail}" ${!detail?'tabindex="0"':'tabindex="-1"'}>Overview</button>
       <button id="integrative-view-details" type="button" role="tab" aria-controls="integrative-details-panel" aria-selected="${detail}" ${detail?'tabindex="0"':'tabindex="-1"'}>Details</button>

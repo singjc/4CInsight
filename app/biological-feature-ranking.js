@@ -2,8 +2,8 @@
  * Post-selection correlation and cluster contrast. No p-values, FDR, validation or pathway claims.
  * Streams one text record at a time; results hold one score per feature, not the full input matrix.
  */
-import {parseTsvHeader} from './multiomics-alignment.js?v=0.22.7'
-import {spearman} from './biological-findings.js?v=0.22.7'
+import {parseTsvHeader} from './multiomics-alignment.js?v=0.22.8'
+import {spearman} from './biological-findings.js?v=0.22.8'
 
 const validNumber=x=>typeof x==='number'&&Number.isFinite(x)
 const exact=x=>String(x??'').trim()

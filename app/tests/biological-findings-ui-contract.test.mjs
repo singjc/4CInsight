@@ -17,7 +17,7 @@ test('Biological Findings is post-fit, visible, and independent of corrected gro
 test('version and privacy contract keeps local-only dependencies',()=>{
  const main=read('../main.js'),html=read('../index.html')
  const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
- assert.equal(version,'0.22.7')
+ assert.equal(version,'0.22.8')
  assert.ok(html.includes(`main.js?v=${version}`))
  assert.ok(main.includes(`biological-findings.js?v=${version}`))
  assert.ok(read('../analysis-worker.js').includes(`biological-feature-ranking.js?v=${version}`))
