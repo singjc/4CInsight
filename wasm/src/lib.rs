@@ -273,42 +273,59 @@ pub fn i2b_add_sample_json(
         if session.source_ids.contains(sample_id) {
             return Err(js_error(format!("Duplicate I2B source ID: {sample_id}")));
         }
-        let (features, complete_families): (Vec<serde_json::Value>, Vec<&str>) =
-            if let Some(repertoire) = session.repertoire.as_mut() {
-                repertoire
-                    .add_bytes(file_name, bytes, sample_id, "Eligible")
-                    .map_err(js_error)?;
-                let native = repertoire.last_sample_feature_values().map_err(js_error)?;
-                // Mark a composition family complete only if this source actually
-                // measured that family. Never turn a missing column into zeros.
-                let families = ["V gene fraction", "D gene fraction", "J gene fraction", "Isotype fraction"]
-                    .into_iter()
-                    .filter(|family| native.iter().any(|(label, _, _, _)| label.as_str() == *family))
-                    .collect::<Vec<_>>();
-                (native.into_iter().map(|(family, name, value, unit)|
+        let (features, complete_families): (Vec<serde_json::Value>, Vec<&str>) = if let Some(
+            repertoire,
+        ) =
+            session.repertoire.as_mut()
+        {
+            repertoire
+                .add_bytes(file_name, bytes, sample_id, "Eligible")
+                .map_err(js_error)?;
+            let native = repertoire.last_sample_feature_values().map_err(js_error)?;
+            // Mark a composition family complete only if this source actually
+            // measured that family. Never turn a missing column into zeros.
+            let families = [
+                "V gene fraction",
+                "D gene fraction",
+                "J gene fraction",
+                "Isotype fraction",
+            ]
+            .into_iter()
+            .filter(|family| {
+                native
+                    .iter()
+                    .any(|(label, _, _, _)| label.as_str() == *family)
+            })
+            .collect::<Vec<_>>();
+            (native.into_iter().map(|(family, name, value, unit)|
                     serde_json::json!({"family":family,"name":name,"value":value,"unit":unit})
                 ).collect(), families)
-            } else if session.modality == cohort::CohortModality::BcrIsotype {
-                let map = corrected::parse_isotype_bytes(bytes, session.spec.exclude_undetermined_isotype)
+        } else if session.modality == cohort::CohortModality::BcrIsotype {
+            let map =
+                corrected::parse_isotype_bytes(bytes, session.spec.exclude_undetermined_isotype)
                     .map_err(js_error)?;
-                let total: f64 = map.values().filter(|v| v.is_finite() && **v > 0.0).sum();
-                let values = if total > 0.0 { map.iter().filter_map(|(name, value)| {
+            let total: f64 = map.values().filter(|v| v.is_finite() && **v > 0.0).sum();
+            let values = if total > 0.0 {
+                map.iter().filter_map(|(name, value)| {
                     if value.is_finite() && *value >= 0.0 {
                         Some(serde_json::json!({"family":"Isotype fraction","name":name,"value":value / total,"unit":"fraction"}))
                     } else { None }
-                }).collect() } else { Vec::new() };
-                session.maps.push((sample_id.to_string(), map));
-                (values, vec!["Isotype fraction"])
+                }).collect()
             } else {
-                let map = corrected::parse_immune_bytes(bytes).map_err(js_error)?;
-                let values = map.iter().filter_map(|(name, value)| {
+                Vec::new()
+            };
+            session.maps.push((sample_id.to_string(), map));
+            (values, vec!["Isotype fraction"])
+        } else {
+            let map = corrected::parse_immune_bytes(bytes).map_err(js_error)?;
+            let values = map.iter().filter_map(|(name, value)| {
                     if value.is_finite() {
                         Some(serde_json::json!({"family":"Immune signature score","name":name,"value":value,"unit":"native score"}))
                     } else { None }
                 }).collect();
-                session.maps.push((sample_id.to_string(), map));
-                (values, Vec::new())
-            };
+            session.maps.push((sample_id.to_string(), map));
+            (values, Vec::new())
+        };
         session.feature_samples.push(serde_json::json!({
             "sample_id":sample_id,"features":features,"complete_families":complete_families,
             "source":"native-corrected-parser"
