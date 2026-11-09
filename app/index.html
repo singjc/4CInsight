@@ -7,6 +7,7 @@
   <meta name="description" content="4C Insight — local-first multi-omics cohort analysis" />
   <link rel="stylesheet" href="./styles.css?v=0.22.8" />
   <link rel="stylesheet" href="./integrative-detail-width.css?v=20261109-r1" />
+  <link rel="stylesheet" href="./local-session.css?v=20261109-r1" />
   <title>4C Insight</title>
 </head>
 <body>
@@ -22,9 +23,11 @@
       </div>
             <div id="global-state-actions" class="topbar-state-actions" role="group" aria-label="Project state">
         <button id="load-state" class="topbar-state-button" type="button" title="Load project settings and file references; local files may need reconnection">Load state</button>
-        <button id="save-state" class="topbar-state-button" type="button" title="Save project settings and file references. Analysis results are saved separately">Save state</button>
+        <button id="save-state" class="topbar-state-button" type="button" title="Save project settings and file references. Analysis results are saved separately in automatic browser-local session storage; portable JSON contains no raw files.">Save state</button>
+        <button id="clear-state" class="topbar-state-button" type="button" title="Clear the active saved session and browser-cached files. Original files and History stay intact.">Clear state</button>
         <input id="state-input" class="visually-hidden" type="file" accept=".json,.4cstate" aria-label="Select a saved 4C Insight state file" />
         <span id="global-state-status" class="visually-hidden" role="status" aria-live="polite"></span>
+        <span id="local-session-status" class="local-session-status" role="status" aria-live="polite" data-status="info">Local auto-save starting…</span>
       </div>
       <button id="system-chip" type="button" class="privacy-chip system-chip" title="Analysis runs locally. Device information is estimated by this browser.">
         <span class="privacy-dot"></span><span>Local system</span>

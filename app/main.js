@@ -1,4 +1,5 @@
 import { readIntegrativeMetadataColumns, validIntegrativeIdentityRoles } from './integrative-metadata-columns.js?v=0.22.8'
+import { readLocalSession, saveLocalSession, saveLocalResult, readLocalResults, readStoredSources, listStoredSourceIds, saveStoredSource, removeStoredSources, clearLocalSession, recoverSourceFile, validLocalSession } from './local-session.js?v=0.22.8'
 import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workflow.js?v=0.22.8'
 import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.8'
 import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.8'
@@ -516,6 +517,7 @@ async function refreshFiles(nextFiles, preserveConfig = false) {
     state.error = error instanceof Error ? error.message : String(error)
   } finally {
     state.busy = false
+    if (localSessionReady && !localSessionRestoring) queueLocalSourceCache()
     render()
   }
 }
@@ -667,6 +669,7 @@ function clearProject() {
   state.longitudinalConfig.exclusionValues = []
   state.longitudinalConfig.geneMergedId = ''
   state.longitudinalConfig.transcriptMergedId = ''
+  if (localSessionReady && !localSessionRestoring) queueLocalSourceCache()
   render()
 }
 
@@ -891,6 +894,214 @@ function applyPendingStateConfig() {
   if (!state.pendingStateConfig) return
   const pending = cloneJson(state.pendingStateConfig)
   applyConfigSnapshot(pending)
+}
+
+// Active browser-local session: distinct from portable JSON state and History.
+// Large scientific results are cached by identity instead of copied on every render.
+const ACTIVE_RESULT_FIELDS = [
+  'qcResult', 'compareResult', 'longitudinalResult', 'hitResult',
+  'alignmentPreview', 'alignmentTable', 'i2ImportedViews', 'i2bDirectViews',
+  'i2Result', 'i2StructureResult', 'jointStabilityResult',
+  'bioResult', 'bioFeatureResult', 'mergeReports', 'metadataInspection',
+]
+let localSessionReady = false
+let localSessionRestoring = false
+let localSessionDisabled = false
+let localSessionTimer = null
+let localSessionWrite = Promise.resolve()
+let localSourceWrite = Promise.resolve()
+let localSourceRevision = 0
+let localResultTokenNumber = 0
+let localSessionMutationVersion = 0
+const localResultReferences = new Map()
+const localResultTokens = new Map()
+const localResultFailures = new Map()
+let localStorageNotice = 'Starting local session…'
+let localStorageSeverity = 'info'
+
+function updateLocalSessionNotice(message, severity = 'info') {
+  localStorageNotice = String(message)
+  localStorageSeverity = severity
+  const display = document.querySelector('#local-session-status')
+  if (display) {
+    display.textContent = localStorageNotice
+    display.title = localStorageNotice
+    display.dataset.status = localStorageSeverity
+  }
+}
+function activeSessionWorkRunning() {
+  return state.busy || state.mergeBusy || state.alignmentBusy || state.i2bBusy ||
+    state.i2Busy || state.i2StructureBusy || state.jointStabilityBusy ||
+    state.bioFeatureBusy || state.integrativeRunBusy
+}
+function scheduleLocalSessionSave() {
+  if (!localSessionReady || localSessionRestoring || localSessionDisabled || activeSessionWorkRunning()) return
+  ++localSessionMutationVersion
+  clearTimeout(localSessionTimer)
+  localSessionTimer = setTimeout(() => {
+    localSessionWrite = localSessionWrite.catch(() => {}).then(() => saveCurrentLocalSession())
+  }, 1500)
+}
+function localSessionUiSnapshot() {
+  return {
+    tab: state.tab, integrativeView: state.integrativeView,
+    resultsMode: state.resultsMode, alignmentSource: state.alignmentSource,
+    alignmentRoles: { ...state.alignmentRoles }, alignmentColumns: [...state.alignmentColumns],
+    bioMetadataColumn: state.bioMetadataColumn, bioClusterCount: state.bioClusterCount,
+    bioFeatureAxis: state.bioFeatureAxis, bioSelectedProfile: state.bioSelectedProfile,
+    bioSelectedSourceFeature: state.bioSelectedSourceFeature,
+    bioInspectObservation: state.bioInspectObservation,
+    i2bParallelWorkers: state.i2bParallelWorkers, i2MinViews: state.i2MinViews,
+    i2StructureSelection: { ...state.i2StructureSelection },
+    i2StructureOnePerPatient: state.i2StructureOnePerPatient,
+    jointStabilityConfig: { ...state.jointStabilityConfig },
+    integrativeRunSteps: (state.integrativeRunSteps || []).filter(step => step.status !== 'running'),
+    metadataEditor: state.metadataEditor,
+  }
+}
+async function saveCurrentLocalSession() {
+  const writeRevision = localSessionMutationVersion
+  if (!localSessionReady || localSessionRestoring || localSessionDisabled || activeSessionWorkRunning()) return
+  let unavailable = 0
+  for (const key of ACTIVE_RESULT_FIELDS) {
+    const value = state[key] ?? null
+    if (value == null) { localResultReferences.delete(key); localResultTokens.delete(key); localResultFailures.delete(key); continue }
+    if (localResultReferences.get(key) === value) { if (localResultFailures.has(key)) unavailable++; continue }
+    const token = `${Date.now()}-${++localResultTokenNumber}`
+    try {
+      await saveLocalResult(key, token, value)
+      localResultReferences.set(key, value)
+      localResultTokens.set(key, token)
+      localResultFailures.delete(key)
+    } catch (error) {
+      localResultReferences.set(key, value)
+      localResultTokens.delete(key) // Never restore stale results after a failed write.
+      localResultFailures.set(key, String(error?.message || error))
+      unavailable++
+    }
+  }
+  if (writeRevision !== localSessionMutationVersion) { scheduleLocalSessionSave(); return }
+  try {
+    await saveLocalSession({
+      format: '4c-insight-active-workspace-v1',
+      payload: applicationStatePayload(),
+      ui: localSessionUiSnapshot(),
+      resultTokens: Object.fromEntries(localResultTokens),
+      savedAt: new Date().toISOString(),
+    })
+    if (unavailable) updateLocalSessionNotice(`Settings saved locally; ${unavailable} result group(s) exceed browser storage or cannot be saved`, 'warning')
+    else if (localStorageSeverity !== 'warning') updateLocalSessionNotice('Session saved on this device', 'ok')
+  } catch (error) { updateLocalSessionNotice(`Automatic session save failed: ${error?.message || error}`, 'warning') }
+}
+function queueLocalSourceCache() {
+  if (!localSessionReady || localSessionRestoring || localSessionDisabled) return
+  const revision = ++localSourceRevision
+  const files = new Map(state.files)
+  localSourceWrite = localSourceWrite.catch(() => {}).then(async () => {
+    if (localSessionDisabled || revision !== localSourceRevision) return
+    let existing
+    try { existing = new Set(await listStoredSourceIds()) }
+    catch (error) { updateLocalSessionNotice(`Cannot cache source files: ${error?.message || error}`, 'warning'); return }
+    const missing = [...files.entries()].filter(([id]) => !existing.has(id))
+    let cached = 0
+    let failed = null
+    for (const [id, file] of missing) {
+      if (localSessionDisabled || revision !== localSourceRevision) return
+      try {
+        await saveStoredSource(id, file, file.webkitRelativePath || file.name)
+        cached++
+        if (cached % 10 === 0 || cached === missing.length) updateLocalSessionNotice(`Saving local files ${cached}/${missing.length}; no upload`, 'info')
+      } catch (error) { failed = String(error?.message || error); break }
+    }
+    if (localSessionDisabled || revision !== localSourceRevision) return
+    const obsolete = [...existing].filter(id => !files.has(id))
+    try { await removeStoredSources(obsolete) }
+    catch (error) { failed = String(error?.message || error) }
+    if (failed) updateLocalSessionNotice(`Some files cannot be cached (${failed}). Results may restore, but source files may need reconnection.`, 'warning')
+    else if (missing.length && localStorageSeverity !== 'warning') updateLocalSessionNotice(`${files.size} local source files cached for refresh`, 'ok')
+  })
+}
+function applyLocalSessionUi(saved) {
+  if (!saved || typeof saved !== 'object') return
+  if (['project', 'metadata', 'qc', 'compare', 'results', 'longitudinal', 'hits', 'history', 'docs', 'settings'].includes(saved.tab)) state.tab = saved.tab
+  if (['overview', 'details'].includes(saved.integrativeView)) state.integrativeView = saved.integrativeView
+  if (['overview', 'details'].includes(saved.resultsMode)) state.resultsMode = saved.resultsMode
+  if (['active', 'draft'].includes(saved.alignmentSource)) state.alignmentSource = saved.alignmentSource
+  if (saved.alignmentRoles && typeof saved.alignmentRoles === 'object') {
+    for (const role of ['observation', 'subject', 'time']) if (typeof saved.alignmentRoles[role] === 'string') state.alignmentRoles[role] = saved.alignmentRoles[role]
+  }
+  if (Array.isArray(saved.alignmentColumns)) state.alignmentColumns = saved.alignmentColumns.filter(value => typeof value === 'string')
+  for (const key of ['bioMetadataColumn', 'bioFeatureAxis', 'bioSelectedProfile', 'bioSelectedSourceFeature', 'bioInspectObservation'])
+    if (typeof saved[key] === 'string') state[key] = saved[key]
+  const integer = (key, min, max) => { const n = Number(saved[key]); if (Number.isInteger(n) && n >= min && n <= max) state[key] = n }
+  integer('bioClusterCount', 2, 12); integer('i2MinViews', 2, 7); integer('i2bParallelWorkers', 1, 3)
+  if (saved.i2StructureSelection && typeof saved.i2StructureSelection === 'object') state.i2StructureSelection = { ...saved.i2StructureSelection }
+  if (typeof saved.i2StructureOnePerPatient === 'boolean') state.i2StructureOnePerPatient = saved.i2StructureOnePerPatient
+  if (saved.jointStabilityConfig && typeof saved.jointStabilityConfig === 'object') {
+    state.jointStabilityConfig = { ...state.jointStabilityConfig, ...saved.jointStabilityConfig }
+  }
+  if (Array.isArray(saved.integrativeRunSteps)) state.integrativeRunSteps = saved.integrativeRunSteps.map(step => ({ ...step, status: step.status === 'running' ? 'stopped' : step.status }))
+  if (saved.metadataEditor && typeof saved.metadataEditor === 'object') state.metadataEditor = { ...state.metadataEditor, ...saved.metadataEditor }
+}
+async function restoreActiveLocalSession() {
+  localSessionRestoring = true
+  try {
+    const saved = await readLocalSession()
+    if (!saved) { updateLocalSessionNotice('Local auto-save ready', 'info'); return }
+    if (!validLocalSession(saved)) throw new Error('Saved session has an unknown format; no data were changed')
+    const entries = await readStoredSources()
+    const manifest = saved.payload.project.files
+    const expected = new Set(manifest.map(row => JSON.stringify([row.relativePath || row.name, row.size, row.lastModified])))
+    const files = new Map()
+    for (const entry of entries) {
+      if (!expected.has(entry.id)) continue // Never attach a source from another project.
+      const recovered = recoverSourceFile(entry, fileKey)
+      if (recovered) files.set(...recovered)
+    }
+    state.loadedStateManifest = manifest
+    state.pendingStateConfig = cloneJson(saved.payload.configs || {})
+    if (files.size) await refreshFiles(files)
+    applyPendingStateConfig()
+    applyLocalSessionUi(saved.ui)
+    const compatible = saved.payload.appVersion === APP_VERSION
+    if (compatible) {
+      const results = await readLocalResults(saved.resultTokens)
+      for (const key of ACTIVE_RESULT_FIELDS) {
+        if (!Object.hasOwn(results, key)) continue
+        state[key] = results[key]
+        localResultReferences.set(key, state[key])
+        localResultTokens.set(key, saved.resultTokens[key])
+      }
+    }
+    const missing = manifest.length - files.size
+    state.projectMessage = !compatible
+      ? 'Restored saved settings and available source files. Results were produced by another application revision and must be recalculated.'
+      : missing > 0
+        ? `Restored local session and available results. ${files.size} of ${manifest.length} source files are cached; reconnect ${missing} missing file(s) to repeat the analysis.`
+        : `Restored local session and ${files.size} browser-cached source files.`
+    updateLocalSessionNotice(!compatible ? 'Previous settings restored; rerun the updated science engine' : missing > 0 ? `${missing} source file(s) need reconnection; saved results restored` : 'Previous local session restored', !compatible || missing > 0 ? 'warning' : 'ok')
+  } catch (error) {
+    updateLocalSessionNotice(`Session restore unavailable: ${error?.message || error}`, 'warning')
+  } finally {
+    localSessionRestoring = false
+    localSessionReady = true
+    render()
+  }
+}
+async function clearSavedActiveSession() {
+  if (!window.confirm('Clear the saved 4C Insight session, browser-cached source files and active results? Your original files and separate History entries will not be deleted.')) return
+  localSessionDisabled = true
+  ++localSourceRevision
+  clearTimeout(localSessionTimer)
+  updateLocalSessionNotice('Clearing saved session…', 'info')
+  try {
+    await Promise.allSettled([localSessionWrite, localSourceWrite])
+    await clearLocalSession()
+    window.location.reload()
+  } catch (error) {
+    localSessionDisabled = false
+    updateLocalSessionNotice(`Could not clear saved state: ${error?.message || error}`, 'warning')
+  }
 }
 
 async function saveApplicationState() {
@@ -4715,6 +4926,7 @@ function bindGlobalStateActions() {
         render()
       })
   })
+  document.querySelector('#clear-state')?.addEventListener('click', () => void clearSavedActiveSession())
   stateInput?.addEventListener('change', (event) => {
     const file = event.currentTarget.files?.[0]
     event.currentTarget.value = '' // Allow selecting the same state file again.
@@ -4848,6 +5060,7 @@ function render() {
   if (state.tab === 'settings') bindSettingsEvents()
   enhanceTables()
   renderSystemInfo()
+  scheduleLocalSessionSave()
   document.querySelector('#system-chip')?.addEventListener('click', () => { state.tab = 'settings'; render() })
   document.querySelector('#stop-science-work')?.addEventListener('click', stopScienceWork)
 }
@@ -4871,6 +5084,7 @@ async function registerIsolationServiceWorker() {
 void registerIsolationServiceWorker()
 bindGlobalStateActions()
 render()
+void restoreActiveLocalSession()
 // One automatic sample shortly after startup and a low-frequency refresh while visible.
 // Unavailable APIs return immediately; repeated checks cannot reveal physical RAM.
 setTimeout(() => { void refreshAutomaticAppMemory() }, 2500)
