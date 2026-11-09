@@ -1,3 +1,4 @@
+import { readIntegrativeMetadataColumns, validIntegrativeIdentityRoles } from './integrative-metadata-columns.js?v=0.22.8'
 import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workflow.js?v=0.22.8'
 import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.8'
 import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.8'
@@ -119,6 +120,8 @@ const state = {
   alignmentSource: 'active',
   alignmentRoles: { observation: '', subject: '', time: '' },
   alignmentColumns: [],
+  integrativeColumnBusy: false,
+  integrativeColumnError: '',
   alignmentPreview: null,
   alignmentTable: null,
   bioMetadataColumn: '',
@@ -2430,23 +2433,21 @@ function i1ExclusionRules() {
     { enabled: cfg.customExclusionEnabled, label: 'Custom metadata exclusion', column: cfg.customExclusionColumn, values: cfg.customExclusionValues || [] },
   ]
 }
-function i1SourceOptions() {
-  const columns = state.alignmentSource === 'draft'
-    ? state.metadataEditor.table?.columns || []
-    : state.metadataInspection?.columns || state.alignmentColumns || []
-  const choose = (value, blank) => `<option value="${escapeHtml(value)}" ${blank === value ? 'selected' : ''}>${escapeHtml(value || 'Not selected')}</option>`
-  const selection = (id, label, value, optional = false) => `<label><span>${label}</span><select id="${id}">${optional ? choose('', value) : ''}${columns.map(col => choose(col, value)).join('')}</select></label>`
-  const selectedObservation = state.alignmentRoles.observation || (columns.includes(state.qcConfig.metadataIdColumn) ? state.qcConfig.metadataIdColumn : columns.includes('sample_id') ? 'sample_id' : '')
-  return `${selection('i1-observation-column', 'Observation ID column', selectedObservation, true)}
-    ${selection('i1-subject-column', 'Patient / subject ID column', state.alignmentRoles.subject, true)}
-    ${selection('i1-time-column', 'Timepoint / visit column', state.alignmentRoles.time, true)}`
+function i1SelectionSummary() {
+  const roles=state.alignmentRoles
+  const metadataName=state.alignmentSource==='draft' ? 'Open local metadata draft' :
+    (selectedFile(state.qcConfig.metadataId)?.name || 'No metadata file connected')
+  const selected=I1_MODALITIES.filter(m=>state.hitConfig.integrativeModalities?.[m.key]!==false)
+  return `<div class="method-note i1-selection-summary" aria-label="Current sample alignment settings">
+    <strong>Alignment settings from Overview</strong>
+    <p>Metadata: ${escapeHtml(metadataName)} · Observation: ${escapeHtml(roles.observation||'Not selected')} · Patient: ${escapeHtml(roles.subject||'Not selected')} · Timepoint: ${escapeHtml(roles.time||'Not selected')}</p>
+    <p>${selected.length} data types selected. Change the identity columns or data types in Main analysis settings above.</p>
+  </div>`
 }
 function i1AlignmentPanel() {
   const preview = state.alignmentPreview
   const activeFile = selectedFile(state.qcConfig.metadataId)
   const hasDraft = Boolean(state.metadataEditor.table)
-  const chosen = state.hitConfig.integrativeModalities || {}
-  const selectors = I1_MODALITIES.map(m => `<label><input type="checkbox" data-i1-modality="${m.key}" ${chosen[m.key] !== false ? 'checked' : ''}/><span>${escapeHtml(m.label)}</span></label>`).join('')
   let results = ''
   if (preview) {
     const counts = preview.summary.counts.filter(c => c.selected)
@@ -2469,9 +2470,8 @@ function i1AlignmentPanel() {
     <p class="method-note">The JSON keeps exact source IDs for later joint modeling. The TSV protects spreadsheet cells that look like formulas. Source presence does not prove that a sample passed quality control or was used in a fitted model.</p>`
   }
   return `<section class="card i1-alignment" id="i1-observation-alignment"><div class="card-heading"><div><h3>Sample alignment across data types</h3><p>Match exact sample IDs, patient IDs, visits and source aliases. Review missing data and excluded observations before any joint analysis.</p></div><span class="tag neutral">Sample identity</span></div>
-    <div class="form-grid i1-role-grid"><label><span>Metadata source</span><select id="i1-source"><option value="active" ${state.alignmentSource !== 'draft' ? 'selected' : ''}>Active analysis metadata</option>${hasDraft ? `<option value="draft" ${state.alignmentSource === 'draft' ? 'selected' : ''}>Open metadata draft (not necessarily used by comparison)</option>` : ''}</select></label>${i1SourceOptions()}</div>
+    ${i1SelectionSummary()}
     ${!activeFile && state.alignmentSource !== 'draft' ? `<p class="notice-banner">Select an analysis metadata file in Project before alignment.</p>` : ''}
-    <div class="integrative-selector" role="group" aria-label="Data types for alignment">${selectors}</div>
     <p class="method-note">One column may identify both the observation and patient when sample IDs are unique. For repeated visits, select unique observation IDs and a shared patient ID column. A timepoint must use a separate column.</p>
     <p class="method-note">Uses the two current Compare Groups exclusion rules, when enabled. Matches are case-sensitive and exact after trimming surrounding spaces. An explicit alias is never replaced by a guessed ID. A source conflict is not resolved automatically.</p>
     <div class="run-row"><div><strong>Build an observation-level alignment manifest</strong><span>Reads metadata and only the header of each selected merged expression table; raw sample workbooks are not opened.</span></div><button id="i1-run-alignment" class="primary-button" type="button" ${state.alignmentBusy || state.busy || state.mergeBusy || (state.alignmentSource !== 'draft' && !activeFile) ? 'disabled' : ''}>${state.alignmentBusy ? 'Checking sources…' : 'Check sample alignment'}</button></div>
@@ -2545,15 +2545,6 @@ async function i1RunAlignment() {
   } finally { state.alignmentBusy = false; render() }
 }
 function bindI1AlignmentEvents() {
-  document.querySelector('#i1-source')?.addEventListener('change', event => { state.alignmentSource = event.currentTarget.value; state.alignmentColumns = []; i1ResetPreview(); render() })
-  for (const [id, role] of [['i1-observation-column', 'observation'], ['i1-subject-column', 'subject'], ['i1-time-column', 'time']]) {
-    document.querySelector(`#${id}`)?.addEventListener('change', event => { state.alignmentRoles[role] = event.currentTarget.value; i1ResetPreview(); render() })
-  }
-  document.querySelectorAll('[data-i1-modality]').forEach(input => input.addEventListener('change', event => {
-    if (!state.hitConfig.integrativeModalities) state.hitConfig.integrativeModalities = {}
-    state.hitConfig.integrativeModalities[event.currentTarget.dataset.i1Modality] = event.currentTarget.checked
-    i1ResetPreview(); render()
-  }))
   document.querySelector('#i1-run-alignment')?.addEventListener('click', () => void i1RunAlignment())
   document.querySelector('#i1-export-json')?.addEventListener('click', () => {
     if (!state.alignmentPreview) return
@@ -3510,22 +3501,77 @@ async function runCompleteIntegrativeAnalysis() {
 }
 // Main controls are visible without opening the detailed scientific panels.
 // All options reuse the same validated state and source calculations.
+// Read the selected local metadata header before the first analysis run.
+// Column names do not require a completed alignment or a second copy of source data.
+let integrativeMetadataFile=null
+let integrativeMetadataFailedFile=null
+let integrativeMetadataPendingFile=null
+let integrativeMetadataRequest=0
+function integrativeSettingColumns() {
+  return state.alignmentSource==='draft'
+    ? (state.metadataEditor.table?.columns||[])
+    : (state.alignmentColumns||[])
+}
+async function ensureIntegrativeMetadataColumns() {
+  if(state.tab!=='hits')return
+  if(state.alignmentSource==='draft') {
+    const cols=integrativeSettingColumns()
+    const changed=cols.join('\u0000')!==(state.alignmentColumns||[]).join('\u0000')
+    if(changed) {
+      state.alignmentColumns=[...cols]
+      state.alignmentRoles=validIntegrativeIdentityRoles(cols,state.alignmentRoles,state.qcConfig.metadataIdColumn)
+      state.integrativeColumnError=''
+      render()
+    }
+    return
+  }
+  const file=selectedFile(state.qcConfig.metadataId)
+  if(!file)return
+  if(integrativeMetadataFile===file && state.alignmentColumns.length)return
+  if(integrativeMetadataFailedFile===file)return
+  if(integrativeMetadataPendingFile===file)return
+  const request=++integrativeMetadataRequest
+  integrativeMetadataPendingFile=file
+  state.integrativeColumnBusy=true
+  state.integrativeColumnError=''
+  try {
+    const columns=/\.xlsx?$/i.test(file.name)
+      ? (await workerRequest('load-metadata-table',{file})).table?.columns
+      : await readIntegrativeMetadataColumns(file)
+    if(!Array.isArray(columns)||!columns.length)throw new Error('Metadata has no usable columns')
+    if(request!==integrativeMetadataRequest || state.alignmentSource!=='active' || selectedFile(state.qcConfig.metadataId)!==file)return
+    state.alignmentColumns=[...columns]
+    state.alignmentRoles=validIntegrativeIdentityRoles(columns,state.alignmentRoles,state.qcConfig.metadataIdColumn)
+    integrativeMetadataFile=file
+    integrativeMetadataFailedFile=null
+  }catch(error){
+    if(request===integrativeMetadataRequest && state.alignmentSource==='active' && selectedFile(state.qcConfig.metadataId)===file){
+      integrativeMetadataFailedFile=file
+      state.integrativeColumnError=`Metadata columns: ${error instanceof Error?error.message:String(error)}`
+    }
+  }finally{
+    if(integrativeMetadataPendingFile===file)integrativeMetadataPendingFile=null
+    if(request===integrativeMetadataRequest){
+      state.integrativeColumnBusy=false
+      if(state.tab==='hits')render()
+    }
+  }
+}
 function integrativeMainSettings() {
   const busy=state.integrativeRunBusy||state.busy||state.i2bBusy||state.alignmentBusy
   const locked=busy?'disabled':''
-  const cols=state.alignmentColumns?.length?state.alignmentColumns:
-    (state.alignmentTable?.columns||state.metadataEditor.table?.columns||[])
+  const cols=integrativeSettingColumns()
   const candidates=recordsOfKind('metadata-candidate')
   const choices=(selected,includeEmpty=false)=>`${includeEmpty?'<option value="">Not selected</option>':''}${cols.map(c=>`<option value="${escapeHtml(c)}" ${selected===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}`
   const chosen=state.hitConfig.integrativeModalities||{}
   return `<section class="integrative-main-settings" aria-label="Main multi-omics settings">
-    <div class="integrative-settings-heading"><strong>Main analysis settings</strong><span>Full method controls remain in Details.</span></div>
+    <div class="integrative-settings-heading"><strong>Main analysis settings</strong><span>Identity and modality settings are managed here. Advanced methods remain in Details.</span></div>
     <div class="integrative-settings-grid">
       <label>Metadata source<select id="integrative-setting-source" ${locked}><option value="active" ${state.alignmentSource==='active'?'selected':''}>Selected metadata file</option><option value="draft" ${state.alignmentSource==='draft'?'selected':''}>Open metadata draft</option></select></label>
       <label>Metadata file<select id="integrative-setting-metadata" ${locked} ${state.alignmentSource==='draft'?'disabled':''}>${candidates.map(r=>`<option value="${escapeHtml(r.id)}" ${r.id===state.qcConfig.metadataId?'selected':''}>${escapeHtml(r.name)}</option>`).join('')}</select></label>
-      <label>Observation ID<select id="integrative-setting-observation" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Read on initial alignment</option>':choices(state.alignmentRoles.observation)}</select></label>
-      <label>Patient ID<select id="integrative-setting-patient" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Read on initial alignment</option>':choices(state.alignmentRoles.subject,true)}</select></label>
-      <label>Visit / timepoint<select id="integrative-setting-visit" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Read on initial alignment</option>':choices(state.alignmentRoles.time,true)}</select></label>
+      <label>Observation ID<select id="integrative-setting-observation" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Reading metadata columns…</option>':choices(state.alignmentRoles.observation)}</select></label>
+      <label>Patient ID<select id="integrative-setting-patient" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Reading metadata columns…</option>':choices(state.alignmentRoles.subject,true)}</select></label>
+      <label>Visit / timepoint<select id="integrative-setting-visit" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Reading metadata columns…</option>':choices(state.alignmentRoles.time,true)}</select></label>
       <label>Parallel data types<select id="integrative-setting-workers" ${locked}>${[1,2,3].map(n=>`<option value="${n}" ${state.i2bParallelWorkers===n?'selected':''}>${n} ${n===1?'worker':'workers'}</option>`).join('')}</select></label>
       <label>Minimum data types per pair<input id="integrative-setting-min-views" type="number" min="2" max="7" value="${state.i2MinViews}" ${locked}/></label>
       <label>Descriptive clusters<input id="integrative-setting-clusters" type="number" min="2" max="12" value="${state.bioClusterCount}" ${locked}/></label>
@@ -3533,6 +3579,8 @@ function integrativeMainSettings() {
     </div>
     <div class="integrative-settings-modalities" role="group" aria-label="Data types in complete analysis">${I1_MODALITIES.map(m=>`<label class="check-label"><input type="checkbox" data-integrative-main-modality="${m.key}" ${chosen[m.key]===false?'':'checked'} ${locked}/><span>${escapeHtml(m.label)}</span></label>`).join('')}</div>
     <label class="check-label integrative-one-patient"><input type="checkbox" id="integrative-setting-one-patient" ${state.i2StructureOnePerPatient?'checked':''} ${locked}/><span>One observation per patient in the joint structure</span></label>
+    ${state.integrativeColumnError?`<p class="analysis-warnings" role="alert">${escapeHtml(state.integrativeColumnError)}</p>`:''}
+    ${!cols.length && !state.integrativeColumnError?`<p class="method-note" role="status">${state.alignmentSource==='draft'?'Open a local metadata draft in Sample Metadata before selecting its columns.':'Reading column names from the selected local metadata file. The analysis does not start until the columns are available.'}</p>`:''}
     <p class="method-note">A single metadata column can identify both the observation and the patient when each patient has one sample. Changing source IDs or data types requires fresh alignment. No disease labels enter model fitting.</p>
   </section>`
 }
@@ -3542,6 +3590,7 @@ function integrativeRunDiagnostics() {
   const add=(label,value)=>{if(value)errors.push({label,message:String(value)})}
   add('Complete workflow',state.integrativeRunError)
   add('Sample alignment',state.alignmentError)
+  add('Metadata column discovery',state.integrativeColumnError)
   for(const item of state.i2bErrors||[])add(`Source: ${item.modality}`,item.message)
   add('Distance fusion',state.i2Error)
   add('Joint structure',state.i2StructureError)
@@ -3563,8 +3612,8 @@ function invalidateIntegrativeFit() {
 }
 function bindIntegrativePrimarySettings() {
   const change=(id,fn)=>document.querySelector(`#${id}`)?.addEventListener('change',e=>{fn(e.currentTarget);render()})
-  change('integrative-setting-source',el=>{state.alignmentSource=el.value;state.alignmentColumns=[];i1ResetPreview();invalidateIntegrativeFit()})
-  change('integrative-setting-metadata',el=>{state.qcConfig.metadataId=el.value;state.alignmentColumns=[];i1ResetPreview();invalidateIntegrativeFit()})
+  change('integrative-setting-source',el=>{state.alignmentSource=el.value;state.alignmentColumns=[];state.alignmentRoles={observation:'',subject:'',time:''};state.integrativeColumnError='';integrativeMetadataFile=null;integrativeMetadataFailedFile=null;integrativeMetadataPendingFile=null;state.integrativeColumnBusy=false;integrativeMetadataRequest++;i1ResetPreview();invalidateIntegrativeFit()})
+  change('integrative-setting-metadata',el=>{state.qcConfig.metadataId=el.value;state.alignmentColumns=[];state.alignmentRoles={observation:'',subject:'',time:''};state.integrativeColumnError='';integrativeMetadataFile=null;integrativeMetadataFailedFile=null;integrativeMetadataPendingFile=null;state.integrativeColumnBusy=false;integrativeMetadataRequest++;i1ResetPreview();invalidateIntegrativeFit()})
   for(const [id,role] of [['integrative-setting-observation','observation'],['integrative-setting-patient','subject'],['integrative-setting-visit','time']])
     change(id,el=>{state.alignmentRoles[role]=el.value;i1ResetPreview();invalidateIntegrativeFit()})
   change('integrative-setting-workers',el=>{state.i2bParallelWorkers=validParallelWorkers(el.value)})
@@ -3595,7 +3644,7 @@ function significantHitsView() {
   const steps=state.integrativeRunSteps||[]
   const messages={queued:'○',running:'●',complete:'✓',warning:'!',failed:'×',skipped:'–',stopped:'■'}
   const ready=state.alignmentSource==='draft'?Boolean(state.metadataEditor.table):Boolean(selectedFile(state.qcConfig.metadataId))
-  const disabled=busy||state.busy||state.i2bBusy||state.i2Busy||state.alignmentBusy||state.mergeBusy||!ready
+  const disabled=busy||state.busy||state.i2bBusy||state.i2Busy||state.alignmentBusy||state.mergeBusy||!ready||!integrativeSettingColumns().length||state.integrativeColumnBusy||Boolean(state.integrativeColumnError)
   const stepMarkup=steps.map(row=>`<div class="integrative-step" data-status="${escapeHtml(row.status)}"><span class="integrative-step-marker" aria-hidden="true">${messages[row.status]||'○'}</span><p><strong>${escapeHtml(row.label)}</strong><small>${escapeHtml(row.message||row.status)}</small></p></div>`).join('')
   const detail=state.integrativeView==='details'
   return `<section class="page-heading"><div><span class="eyebrow">Integrative Analysis</span><h2>Explore shared biological patterns across data types</h2><p>Run the full local analysis once, review the main findings, or open the detailed scientific results.</p></div><div class="local-card"><strong>On-device multi-omics</strong><span>Seven available data types · Exact sample alignment · No source upload</span></div></section>
@@ -4789,7 +4838,7 @@ function render() {
   if (state.tab === 'compare') bindCompareEvents()
   if (state.tab === 'results') bindResultsEvents()
   if (state.tab === 'longitudinal') bindLongitudinalEvents()
-  if (state.tab === 'hits') bindSignificantHitEvents()
+  if (state.tab === 'hits') { bindSignificantHitEvents(); void ensureIntegrativeMetadataColumns() }
   document.querySelectorAll('[data-open-results]').forEach(button => button.addEventListener('click', () => { state.resultsMode = 'overview'; state.tab = 'results'; render() }))
   if (state.tab === 'history') {
     bindHistoryEvents()
