@@ -1,18 +1,19 @@
-import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.6'
-import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.6'
-import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.6'
-import { selectFeatureSamples, expressionAssociationsTsv } from './biological-feature-ranking.js?v=0.22.6'
-import { runBoundedSourceTasks, sourceProgressSummary, validParallelWorkers } from './source-distance-queue.js?v=0.22.6'
-import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.6'
-import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.6'
-import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.6'
-import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.6'
-import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.6'
-import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.6'
-import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.6'
-import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.6'
-import { renderResultsOverview } from './results-overview.js?v=0.22.6'
-import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.6'
+import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workflow.js?v=0.22.7'
+import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.7'
+import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.7'
+import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.7'
+import { selectFeatureSamples, expressionAssociationsTsv } from './biological-feature-ranking.js?v=0.22.7'
+import { runBoundedSourceTasks, sourceProgressSummary, validParallelWorkers } from './source-distance-queue.js?v=0.22.7'
+import { heatmapViewerMarkup, mountJointHeatmapViewer, jointDistanceReviewMarkup } from './joint-heatmap-viewer.js?v=0.22.7'
+import { compareFixedCohortAblation } from './joint-structure.js?v=0.22.7'
+import { extractFullDistanceViews, prepareJointDistanceInput, jointDistancesTsv } from './integrative-distance-input.js?v=0.22.7'
+import { prepareI2BRequests } from './i2b-source-selection.js?v=0.22.7'
+import { I1_MODALITIES, alignObservations, alignmentTsv, mergedSampleIds, readFirstTsvRecord } from './multiomics-alignment.js?v=0.22.7'
+import { summarizeIntegrativeEvidence, integrativeSummaryTotals, collectIntegrativeSelectedRows } from './integrative-evidence.js?v=0.22.7'
+import { collectAdjustedTests, selectAdjustedTests, adjustedTestsCsv } from './extended-hit-review.js?v=0.22.7'
+import { renderProjectInputGuide } from './project-input-guide.js?v=0.22.7'
+import { renderResultsOverview } from './results-overview.js?v=0.22.7'
+import { bindOverviewInteractions, bindDetailedResultsExports } from './results-interactions.js?v=0.22.7'
 import {
   CORE_COLUMNS, OPTIONAL_COLUMNS, MAPPING_KINDS, createBlankMetadata,
   draftFromSamples, validateMetadata, addColumn, renameColumn, removeColumn,
@@ -22,8 +23,8 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { methodDocs } from './docs-content.js?v=0.22.6'
-import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.6'
+import { methodDocs } from './docs-content.js?v=0.22.7'
+import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.7'
 import { validateWasmMemoryReport } from './wasm-memory.js'
 import { isolatedScienceRequest } from './isolated-science.js'
 import { tableWindow, tableRowRange, TABLE_ROW_HEIGHT } from './table-viewport.js'
@@ -37,7 +38,7 @@ import {
   storageEstimate,
 } from './persistence.js'
 
-const APP_VERSION = '0.22.6'
+const APP_VERSION = '0.22.7'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
 
@@ -111,6 +112,10 @@ const state = {
   longitudinalResult: null,
   hitProgress: null,
   hitResult: null,
+  integrativeView: 'overview',
+  integrativeRunBusy: false,
+  integrativeRunError: '',
+  integrativeRunSteps: [],
   alignmentSource: 'active',
   alignmentRoles: { observation: '', subject: '', time: '' },
   alignmentColumns: [],
@@ -279,6 +284,7 @@ function replaceScienceWorker() {
   if (state.wasmMemorySample) state.wasmMemorySample = { ...state.wasmMemorySample, active: false }
 }
 function stopScienceWork() {
+  if (activeIntegrativeRunController) activeIntegrativeRunController.abort()
   if (activeI2bController) { activeI2bController.abort(); state.i2bProgress = 'Stopping active source calculations; completed results will be kept.'; return }
   if (activeCompareController) {
     activeCompareController.abort()
@@ -2706,6 +2712,10 @@ async function i2bRunDirect() {
         state.i2bProgressRows=allRows
         state.i2bProgress=`${summary.finished} of ${summary.views} data types finished; ${summary.percent}% of reported processing steps`
         updateI2bProgressDom(row,summary)
+        const live=document.querySelector('#integrative-live-source-status')
+        if(live)live.textContent=`${summary.finished} of ${summary.views} data types finished · ${summary.percent}% of reported steps`
+        const bar=document.querySelector('#integrative-live-source-bar')
+        if(bar){bar.max=Math.max(1,summary.total);bar.value=summary.completed}
       },
     })
     for(const outcome of outcomes){
@@ -3087,12 +3097,8 @@ function biologicalFeatureScatterSvg(report,profile) {
     <div class="bio-feature-legend"><span>Low ${formatNumber(lo,2)}</span><i></i><span>High ${formatNumber(hi,2)}</span><span>Gray: missing</span></div></div>`
 }
 function biologicalFindingsPanel() {
+  ensureBiologicalFindings()
   const structure=state.i2StructureResult
-  if(structure && state.alignmentPreview && state.alignmentTable && !state.bioResult && !state.bioError) {
-    try { state.bioResult=buildBiologicalFindings(state.i2StructureResult,state.alignmentPreview,state.alignmentTable,i2AvailableViews(),{
-      column:state.bioMetadataColumn,clusters:Number(state.bioClusterCount)}) }
-    catch(error){ state.bioError=error instanceof Error?error.message:String(error) }
-  }
   const report=structure?state.bioResult:null
   const feature=structure?state.bioFeatureResult:null
   const cols=state.alignmentTable?.columns||[]
@@ -3333,15 +3339,178 @@ function bindSourceBiologicalEvents(){
   })
 }
 
-function significantHitsView() {
-  return `<section class="page-heading"><div><span class="eyebrow">Integrative Analysis</span><h2>Explore shared biological patterns across data types</h2><p>Align observations, calculate source distances, combine the available modalities, then examine the joint sample structure. The model does not use case/control labels, significance thresholds or selected features.</p></div><div class="local-card"><strong>On-device multi-omics</strong><span>Seven data types · Exact sample alignment · No source upload</span></div></section>
-    ${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>` : ''}
-    ${state.compareResult ? `<details class="details-block"><summary>Previously calculated corrected evidence (optional)</summary>${renderIntegrativeEvidenceOverview()}</details>` : ''}
+// The full analysis reuses the existing scientific functions. It does not change
+// their formulas. Required failures stop later stages; unsupported optional
+// interpretation stages remain visible as warnings rather than false passes.
+let activeIntegrativeRunController = null
+function ensureBiologicalFindings() {
+  const structure=state.i2StructureResult
+  if(structure && state.alignmentPreview && state.alignmentTable && !state.bioResult && !state.bioError) {
+    try {
+      state.bioResult = buildBiologicalFindings(state.i2StructureResult,state.alignmentPreview,state.alignmentTable,i2AvailableViews(),{
+        column:state.bioMetadataColumn,clusters:Number(state.bioClusterCount),
+      })
+    } catch(error) { state.bioError = error instanceof Error ? error.message : String(error) }
+  }
+  return state.bioResult
+}
+function integrativeOverviewPanel() {
+  const structure=state.i2StructureResult
+  if(!structure) return `<section class="card integrative-overview" role="tabpanel" id="integrative-overview-panel" aria-labelledby="integrative-overview-tab">
+    <h3>Your results at a glance</h3><p class="method-note">Select <strong>Run complete analysis</strong>. The application will align samples, calculate source distances, fit the joint sample structure, and prepare available biological findings. Results will appear here automatically. Review methods and exports in Details.</p>
+    <p class="method-note">The analysis uses local files. It does not require Compare Groups or disease labels.</p>
+  </section>`
+  const report=ensureBiologicalFindings()
+  let source=null,sourceError=''
+  try {
+    const clusters=Object.fromEntries((report?.points||[]).map(p=>[p.observation,p.cluster]))
+    source=cachedSourceBiological(structure,state.alignmentPreview,i2AvailableViews(),clusters,state.bioClusterCount)
+  }catch(error){sourceError=error instanceof Error?error.message:String(error)}
+  const m=integratedOverviewMetrics({alignment:state.alignmentPreview,structure,stability:state.jointStabilityResult,features:state.bioFeatureResult,sourceFeatures:source})
+  const counts=source?.byModality||{}
+  const nonRnaCards=I1_MODALITIES.filter(x=>!['gene','transcript'].includes(x.key)).map(x=>{
+    const record=counts[x.key]
+    const signal=record?.rows?.[0]
+    return `<article class="integrative-insight-card"><strong>${escapeHtml(x.label)}</strong><span>${record?`${record.features_ranked.toLocaleString()} ranked signals · ${record.sample_count} measured observations`:'No saved sample-level features'}</span>
+      ${signal?`<small>Leading association: ${escapeHtml(signal.feature)} (${signal.pcoa1_spearman===null?'—':formatNumber(signal.pcoa1_spearman,3)} with PCo1)</small>`:'<small>Review source coverage and feature provenance in Details.</small>'}</article>`
+  }).join('')
+  const kept=m.retained===null?'—':m.retained.toLocaleString()
+  const eligible=m.eligible===null?'—':m.eligible.toLocaleString()
+  return `<section class="card integrative-overview" role="tabpanel" id="integrative-overview-panel" aria-labelledby="integrative-overview-tab">
+    <div class="card-heading"><div><h3>Main findings</h3><p>Sample structure, measured coverage and candidate molecular signals in one view.</p></div><span class="tag neutral">Exploratory</span></div>
+    <div class="summary-grid compact-grid">
+      ${summaryCard('Aligned observations',eligible,'Passed metadata exclusions')}
+      ${summaryCard('Joint structure',kept,'Observations with complete fixed-view distances')}
+      ${summaryCard('Data types fitted',String(m.modalities),'Of seven possible')}
+      ${summaryCard('Cluster agreement',m.meanAri===null?'Not assessed':formatNumber(m.meanAri,3),'Mean patient-subset adjusted Rand index')}
+    </div>
+    ${m.excluded>0?`<p class="notice-banner">${m.excluded.toLocaleString()} eligible observations were not included in the complete-distance joint structure. Check coverage before interpreting the clusters.</p>`:''}
+    <div class="integrative-overview-grid">
+      ${report?`<article class="plot-card"><div class="plot-heading"><strong>Joint sample patterns</strong><span>Unsupervised PCoA; colors are post-fit annotations.</span></div>${biologicalScatterSvg(report)}</article>`:'<article class="plot-card"><h4>Joint sample patterns</h4><p class="method-note">The metadata interpretation is not available. See Details for the reason.</p></article>'}
+      ${report?`<article class="plot-card"><div class="plot-heading"><strong>How the data types compare</strong><span>Observed coverage, distance correlation and cluster distance ratio.</span></div>${modalityOverviewHtml(report)}</article>`:'<article class="plot-card"><p class="method-note">Modality interpretation needs a valid joint result.</p></article>'}
+    </div>
+    <div class="integrative-overview-section"><h4>Candidate molecular signals</h4>
+      ${state.bioFeatureResult?featureLollipopHtml(state.bioFeatureResult,'pcoa1_spearman',5):'<p class="method-note">Gene and transcript features have not been ranked. Check the workflow steps above, then inspect source availability in Details.</p>'}
+      <div class="integrative-insight-grid">${nonRnaCards}</div>
+      ${sourceError?`<p class="analysis-warnings">Source-feature review: ${escapeHtml(sourceError)}</p>`:''}
+      <p class="method-note">Feature rankings are post-fit associations, not independent differential-expression results. No p-values, FDR, pathway claims or clinical subgroup labels are inferred.</p>
+    </div>
+    <div class="integrative-overview-section"><h4>What to check before biological interpretation</h4>
+      <p class="method-note">Review unusual sample distances and QC metadata; examine which modalities influence the clusters; check missing observations and patient-level stability. Use Details for the full heatmap, sample inspector and exports.</p>
+      <button id="integrative-open-details" type="button" class="secondary-button">Open detailed results</button>
+    </div>
+  </section>`
+}
+function integrativeDetailsPanel() {
+  return `<section role="tabpanel" id="integrative-details-panel" aria-labelledby="integrative-details-tab" class="integrative-detail-layout">
+    ${state.compareResult?`<details class="details-block"><summary>Previously calculated corrected evidence (optional)</summary>${renderIntegrativeEvidenceOverview()}</details>`:''}
     ${i1AlignmentPanel()}
     ${i2DistancePanel()}
     ${jointStructurePanel()}
     ${jointStabilityPanel()}
-    ${biologicalFindingsPanel()}`
+    ${biologicalFindingsPanel()}
+  </section>`
+}
+async function runCompleteIntegrativeAnalysis() {
+  if(state.integrativeRunBusy||state.busy||state.i2bBusy||state.i2Busy||state.alignmentBusy||state.i2StructureBusy||state.jointStabilityBusy||state.bioFeatureBusy)return
+  const controller=new AbortController()
+  activeIntegrativeRunController=controller
+  state.integrativeRunBusy=true
+  state.integrativeRunError=''
+  state.integrativeView='overview'
+  state.integrativeRunSteps=[]
+  // Clear prior fitted results before a new analysis. Keep reusable aligned
+  // source distances but never show stale clusters after a failed new run.
+  state.i2Result=null
+  state.i2StructureResult=null
+  state.jointStabilityResult=null
+  state.bioResult=null
+  state.bioFeatureResult=null
+  state.bioError=''
+  state.bioFeatureError=''
+  const stages=[
+    {id:'alignment',label:'Match sample and patient IDs',run:async()=>{
+      if(!state.alignmentPreview || !state.alignmentTable) await i1RunAlignment()
+      else return {status:'skipped',message:`Reused ${state.alignmentPreview.summary.eligible} aligned observations`}
+      if(!state.alignmentPreview||!state.alignmentTable)throw new Error(state.alignmentError||'Sample alignment was not available')
+      return {message:`${state.alignmentPreview.summary.eligible} eligible observations`}
+    }},
+    {id:'sources',label:'Calculate measured source distances',run:async()=>{
+      const chosen=I1_MODALITIES.filter(x=>state.hitConfig.integrativeModalities?.[x.key]!==false).map(x=>x.key)
+      const ready=i2AvailableViews()
+      if(ready.length>=2 && chosen.every(k=>ready.some(v=>v.modality===k)))return{status:'skipped',message:`Reused ${ready.length} available data types`}
+      if(!state.wasmReady && ready.length<2)throw new Error('The local WASM engine is not ready')
+      if(state.wasmReady)await i2bRunDirect()
+      const views=i2AvailableViews()
+      if(views.length<2)throw new Error('Fewer than two usable distance data types. Review local files and source errors in Details.')
+      return {status:state.i2bErrors.length?'warning':'complete',message:`${views.length} distance data types ready${state.i2bErrors.length?`; ${state.i2bErrors.length} source warning(s)`:''}`}
+    }},
+    {id:'fusion',label:'Combine measured distances',run:async()=>{
+      await i2RunFusion()
+      if(!state.i2Result)throw new Error(state.i2Error||'No fused distances were produced')
+      return{message:`${state.i2Result.fused_pairs} measured sample pairs`}
+    }},
+    {id:'structure',label:'Fit joint ordination and clustering',run:async()=>{
+      await runJointStructure()
+      if(!state.i2StructureResult)throw new Error(state.i2StructureError||'No joint structure was produced')
+      return{message:`${state.i2StructureResult.observations.length} retained observations`}
+    }},
+    {id:'stability',label:'Check patient-level cluster stability',optional:true,run:async()=>{
+      const rows=state.alignmentPreview?.rows||[]
+      const linked=new Map(rows.filter(r=>!r.excluded).map(r=>[r.observation,r.subject||'']))
+      if(!state.i2StructureResult.observations.every(id=>linked.get(id)))return{status:'skipped',message:'Patient IDs are unavailable; stability was not calculated'}
+      await runJointStability()
+      if(!state.jointStabilityResult)throw new Error(state.jointStabilityError||'Stability was not calculated')
+      return{message:`${state.jointStabilityResult.repeats} patient-subset repeats`}
+    }},
+    {id:'interpretation',label:'Explain joint biological patterns',run:async()=>{
+      if(!ensureBiologicalFindings())throw new Error(state.bioError||'Metadata interpretation is unavailable')
+      return{message:'Metadata and seven-modality overview ready'}
+    }},
+    {id:'rna',label:'Rank available gene and transcript features',optional:true,run:async()=>{
+      if(!recordsOfKind('merged-gene-expression').length&&!recordsOfKind('merged-transcript-expression').length)
+        return{status:'skipped',message:'No merged expression table is connected'}
+      await runBiologicalFeatureRanking()
+      if(!state.bioFeatureResult)throw new Error(state.bioFeatureError||'RNA feature rankings were not produced')
+      return{status:state.bioFeatureResult.warnings?.length?'warning':'complete',message:'RNA feature rankings available'}
+    }},
+  ]
+  try {
+    await runWorkflowSteps(stages,{signal:controller.signal,onUpdate:rows=>{state.integrativeRunSteps=rows;render()}})
+  }catch(error){state.integrativeRunError=error instanceof Error?error.message:String(error)}
+  finally{state.integrativeRunBusy=false;activeIntegrativeRunController=null;render()}
+}
+function bindIntegrativeRunControls(){
+  document.querySelector('#integrative-run-complete')?.addEventListener('click',()=>void runCompleteIntegrativeAnalysis())
+  document.querySelector('#integrative-stop-run')?.addEventListener('click',stopScienceWork)
+  document.querySelector('#integrative-view-overview')?.addEventListener('click',()=>{state.integrativeView='overview';render()})
+  document.querySelector('#integrative-view-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
+  document.querySelector('#integrative-open-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
+}
+
+function significantHitsView() {
+  const busy=state.integrativeRunBusy
+  const steps=state.integrativeRunSteps||[]
+  const messages={queued:'○',running:'●',complete:'✓',warning:'!',failed:'×',skipped:'–',stopped:'■'}
+  const ready=state.alignmentSource==='draft'?Boolean(state.metadataEditor.table):Boolean(selectedFile(state.qcConfig.metadataId))
+  const disabled=busy||state.busy||state.i2bBusy||state.i2Busy||state.alignmentBusy||state.mergeBusy||!ready
+  const stepMarkup=steps.map(row=>`<div class="integrative-step" data-status="${escapeHtml(row.status)}"><span class="integrative-step-marker" aria-hidden="true">${messages[row.status]||'○'}</span><p><strong>${escapeHtml(row.label)}</strong><small>${escapeHtml(row.message||row.status)}</small></p></div>`).join('')
+  const detail=state.integrativeView==='details'
+  return `<section class="page-heading"><div><span class="eyebrow">Integrative Analysis</span><h2>Explore shared biological patterns across data types</h2><p>Run the full local analysis once, review the main findings, or open the detailed scientific results.</p></div><div class="local-card"><strong>On-device multi-omics</strong><span>Seven available data types · Exact sample alignment · No source upload</span></div></section>
+    ${state.error?`<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>`:''}
+    <section class="card integrative-entry"><div class="integrative-main-action">
+      <div class="integrative-run-description"><h3>Complete multi-omics analysis</h3><p class="method-note">Match samples, calculate available source distances, fit the joint structure, check cluster stability, and summarize measured biological signals. Existing valid source results may be reused. Source data remains on this device.</p></div>
+      <div class="integrative-top-controls"><button id="integrative-run-complete" type="button" class="primary-button" ${disabled?'disabled':''}>${busy?'Analysis running…':'Run complete analysis'}</button>${busy?'<button id="integrative-stop-run" type="button" class="secondary-button">Stop analysis</button>':''}</div>
+    </div>
+    ${!ready?'<p class="notice-banner">Connect the local metadata file in Project or open a metadata draft before starting.</p>':''}
+    ${steps.length?`<div class="integrative-run-steps" aria-label="Complete analysis progress" role="status" aria-live="polite">${stepMarkup}</div>`:''}
+    ${busy && steps.some(x=>x.id==='sources'&&x.status==='running')?`<div class="integrative-live-progress"><strong>Processing local source files</strong><progress id="integrative-live-source-bar" max="${Math.max(1,sourceProgressSummary(state.i2bProgressRows).total)}" value="${sourceProgressSummary(state.i2bProgressRows).completed}" aria-label="Source file processing progress"></progress><p id="integrative-live-source-status" role="status">${escapeHtml(state.i2bProgress||'Starting source workers')}</p></div>`:''}
+    ${state.integrativeRunError?`<p class="analysis-warnings" role="alert">${escapeHtml(state.integrativeRunError)}. See Details for source errors and validation information.</p>`:''}
+    <div class="integrative-tab-controls" role="tablist" aria-label="Integrative analysis results">
+      <button id="integrative-view-overview" type="button" role="tab" aria-controls="integrative-overview-panel" aria-selected="${!detail}" ${!detail?'tabindex="0"':'tabindex="-1"'}>Overview</button>
+      <button id="integrative-view-details" type="button" role="tab" aria-controls="integrative-details-panel" aria-selected="${detail}" ${detail?'tabindex="0"':'tabindex="-1"'}>Details</button>
+    </div></section>
+    ${detail?integrativeDetailsPanel():integrativeOverviewPanel()}`
 }
 
 async function runSignificantHits() {
@@ -3397,6 +3566,7 @@ async function runSignificantHits() {
 }
 
 function bindSignificantHitEvents() {
+  bindIntegrativeRunControls()
   const cfg = state.hitConfig
   bindJointStructureEvents()
   bindJointStabilityEvents()

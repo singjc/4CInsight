@@ -13,7 +13,7 @@ test('UX15/R1 keeps Project guide version checks without pinning the old release
   const testSource = read('tests/ux14-project-input-guide.test.mjs')
   const version = main.match(/const APP_VERSION = '([^']+)'/)?.[1]
   assert.ok(version, 'Missing application cache version')
-  assert.equal(version, '0.22.6')
+  assert.equal(version, '0.22.7')
   assert.match(testSource, /Application cache revision must be defined/)
   assert.doesNotMatch(testSource, /version\?\.includes\('ux14-input-guide'\)/)
   assert.ok(html.includes(`styles.css?v=${version}`))

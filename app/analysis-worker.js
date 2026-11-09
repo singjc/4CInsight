@@ -2,9 +2,9 @@ import { classifyInputFilename } from './file-classifier.js'
 import { validateLocalInputFile } from './resource-controls.js'
 import { measureWasmAllocation } from './wasm-memory.js'
 import { runPortableMerge } from './merge-worker.js'
-import { rankExpressionFeatures } from './biological-feature-ranking.js?v=0.22.6'
-import { analyzeJointStructure } from './joint-structure.js?v=0.22.6'
-import { runPatientStabilityAsync } from './joint-stability.js?v=0.22.6'
+import { rankExpressionFeatures } from './biological-feature-ranking.js?v=0.22.7'
+import { analyzeJointStructure } from './joint-structure.js?v=0.22.7'
+import { runPatientStabilityAsync } from './joint-stability.js?v=0.22.7'
 
 let wasmModulePromise = null
 let wasmMemory = null

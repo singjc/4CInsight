@@ -5,9 +5,11 @@ const read=path=>readFileSync(new URL(path,import.meta.url),'utf8')
 test('integrative page contains only align, fuse, joint structure and optional previous evidence',()=>{
   const main=read('../main.js')
   const page=main.split('function significantHitsView() {')[1].split('async function runSignificantHits() {')[0]
-  assert.match(page,/i1AlignmentPanel\(\)/)
-  assert.match(page,/i2DistancePanel\(\)/)
-  assert.match(page,/jointStructurePanel\(\)/)
+  assert.match(page,/integrativeOverviewPanel\(\)/)
+  assert.match(page,/integrativeDetailsPanel\(\)/)
+  const details=main.split('function integrativeDetailsPanel() {')[1].split('async function runCompleteIntegrativeAnalysis() {')[0]
+  for(const name of ['i1AlignmentPanel','i2DistancePanel','jointStructurePanel','jointStabilityPanel','biologicalFindingsPanel'])
+    assert.ok(details.includes('${'+name+'()}'), `${name} is retained in Details`)
   assert.doesNotMatch(page,/Expression-only selected-hit structure|Receptor and immune adjusted findings|run-significant-hits|Comparison required|I[012][ABC]?\s*·/)
   assert.doesNotMatch(page,/No joint model is fitted|Run Compare Groups first/)
   assert.match(main,/function runSignificantHits\(\)/,'Original expression hit engine retained for later Significant Findings view')

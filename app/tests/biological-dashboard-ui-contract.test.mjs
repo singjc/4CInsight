@@ -44,7 +44,7 @@ test('full searchable table and exports preserve all RNA rows',()=>{
 test('cache revision is coherent and feature worker stays local',()=>{
  const main=read('../main.js'),html=read('../index.html'),worker=read('../analysis-worker.js')
  const version=main.match(/const APP_VERSION = '([^']+)'/)?.[1]
- assert.equal(version,'0.22.6')
+ assert.equal(version,'0.22.7')
  assert.ok(html.includes(`main.js?v=${version}`))
  assert.ok(html.includes(`styles.css?v=${version}`))
  assert.ok(main.includes(`biological-dashboard.js?v=${version}`))

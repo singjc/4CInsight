@@ -5,7 +5,7 @@
  * observation per chosen patient. No distances are re-estimated or imputed.
  * This is SUBSAMPLING, not a bootstrap and not predictive validation.
  */
-import { hierarchicalAverageLinkage } from './joint-structure.js?v=0.22.6'
+import { hierarchicalAverageLinkage } from './joint-structure.js?v=0.22.7'
 
 const choose2 = n => n < 2 ? 0 : n * (n - 1) / 2
 const finite = n => typeof n === 'number' && Number.isFinite(n)

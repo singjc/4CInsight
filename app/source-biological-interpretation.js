@@ -2,7 +2,7 @@
  * used for direct source distances. No phenotype, adjusted-hit, or group label
  * enters the fitted distance model. This module reports descriptive associations.
  */
-import { spearman } from './biological-findings.js?v=0.22.6'
+import { spearman } from './biological-findings.js?v=0.22.7'
 
 export const DIRECT_FEATURE_MODALITIES = Object.freeze(['bcr','tcrAlpha','tcrBeta','isotype','immune'])
 const finite = x => typeof x === 'number' && Number.isFinite(x)
