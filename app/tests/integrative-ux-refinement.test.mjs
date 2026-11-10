@@ -50,7 +50,7 @@ test('all modality ratio tiles use shared data-derived scale, not old capped rat
  assert.match(html,/width:100.0%/)
 })
 test('main UI binds real controls, keeps science unchanged and does not save overlays in public Docs',()=>{
- for(const token of ['integrative-overview-annotation','integrativeInfluenceHtml(structure','bindIntegrativeScatter(document)',
+ for(const token of ['integrative-overview-annotation','integrativeInfluenceHtml(structure','bindIntegrativeScatter(document,showIntegrativeSampleMetadata)',
   'integrative-step-disclosure','integrative-advanced-settings','integrative-setting-one-patient',
   'The final joint ordination requires complete distances','Feature rankings are post-fit associations',
   'state.bioResult=null;state.bioError=\'\';render()'])assert.ok(main.includes(token),token)

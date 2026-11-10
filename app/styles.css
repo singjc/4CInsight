@@ -996,3 +996,32 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .integrative-distant-observations summary{cursor:pointer;color:#3159d9;font-size:.78rem;font-weight:600}
 .integrative-distant-observations table{font-size:.75rem}
 .integrative-distant-observations .secondary-button{padding:4px 7px;font-size:.74rem}
+
+/* Post-fit cohort inclusion and small-cluster quality review. */
+.integrative-overview-coverage{margin-top:14px}
+.integrative-cluster-caution{margin:12px 0;padding:11px 13px;border:1px solid #f3d3a0;border-left:3px solid #b77727;background:#fffaf1;border-radius:8px;font-size:.84rem;line-height:1.6;color:#634a2a}
+.integrative-cluster-caution button{margin:4px 0 0 9px;font-size:.78rem;white-space:normal}
+.integrative-coverage p.method-note{font-size:.84rem;line-height:1.55}
+.integrative-coverage-reasons{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:12px 0}
+.integrative-coverage-reasons>div{display:grid;gap:3px;border:1px solid #dfe6f0;border-radius:8px;padding:11px 12px;min-width:0}
+.integrative-coverage-reasons strong{font-size:1.15rem;color:#1f3454;font-variant-numeric:tabular-nums}
+.integrative-coverage-reasons span{font-size:.79rem;color:#526480}
+.integrative-coverage-detail{margin:9px 0;padding:10px 12px;border:1px solid #dfe6ef;border-radius:8px;background:#fcfdff;min-width:0}
+.integrative-coverage-detail summary{font-size:.85rem;font-weight:650;color:#294570;cursor:pointer}
+.integrative-coverage-detail[open] summary{margin-bottom:11px}
+.integrative-coverage-controls{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:8px 0}
+.integrative-coverage-controls label{font-size:.81rem;font-weight:650;color:#38506f}
+.integrative-coverage-controls input{min-width:190px;flex:1 1 210px}
+.integrative-coverage-controls span{font-size:.8rem;color:#536580}
+.integrative-coverage-table{max-height:355px;overflow:auto}
+.integrative-coverage-table table{width:max-content;min-width:100%;font-size:.8rem}
+.integrative-coverage-table th{position:sticky;top:0;z-index:1;background:#f3f6fb}
+.integrative-coverage-table th button{cursor:pointer;background:transparent;border:0;font:inherit;font-weight:650;color:#28416a;text-align:left;padding:3px}
+.integrative-coverage-table td{overflow-wrap:anywhere;max-width:310px}
+.integrative-interactive-scatter [data-integrative-point]{cursor:pointer;outline:0}
+.integrative-interactive-scatter [data-integrative-point]:focus-visible{stroke:#1d3557;stroke-width:2.5}
+.integrative-sample-metadata{padding:10px;border:1px solid #dfe6ef;background:#f8faff;border-radius:8px;max-height:240px;overflow:auto}
+.integrative-sample-metadata[hidden]{display:none}
+.integrative-sample-metadata dl{display:grid;grid-template-columns:minmax(115px,35%) minmax(0,1fr);gap:6px 12px;margin:8px 0 0;font-size:.8rem}
+.integrative-sample-metadata dt{font-weight:650;color:#304463;overflow-wrap:anywhere}
+.integrative-sample-metadata dd{margin:0;overflow-wrap:anywhere}

@@ -50,6 +50,17 @@ function pointColor(point,report) {
   }
   return color[((point.cluster-1)%color.length+color.length)%color.length]
 }
+export function integrativeClusterCautionHtml(report,escape=defaultEscape){
+  const small=(report?.membership||[]).filter(r=>Number.isInteger(r.observations)&&r.observations>0&&r.observations<=2)
+  if(!small.length)return ''
+  const single=small.filter(r=>r.observations===1)
+  const names=small.map(r=>`cluster ${r.cluster} (${r.observations} observation${r.observations===1?'':'s'})`).join(', ')
+  const singleton=single.length?` ${single.length} cluster${single.length===1?' contains':'s contain'} only one observation and cannot establish a biological subtype.`:''
+  const sampleActions=single.flatMap(r=>(report?.points||[]).filter(p=>p.cluster===r.cluster)).map(p=>
+    `<button type="button" class="secondary-button" data-integrative-inspect-sample="${escape(p.observation)}">Inspect ${escape(p.observation)}</button>`).join(' ')
+  return `<div class="integrative-cluster-caution" role="note"><strong>Review small descriptive clusters:</strong> ${escape(names)}.${singleton} The adjusted Rand index can be high when most observations belong to one group. Check source coverage, sample metadata and QC before any biological interpretation. ${sampleActions}</div>`
+}
+
 export function integrativeScatterMarkup(report,axes=[],escape=defaultEscape,format=fixed) {
   if(!report?.points?.length)return '<p class="method-note">No joint coordinates are available.</p>'
   const pts=report.points.filter(p=>isFiniteNumber(p.x)&&isFiniteNumber(p.y))
@@ -64,7 +75,7 @@ export function integrativeScatterMarkup(report,axes=[],escape=defaultEscape,for
   const circles=pts.map((p,i)=>{
     const row=covered.get(p.observation)||{}
     const x=sx(p.x).toFixed(2),y=sy(p.y).toFixed(2),obs=escape(p.observation)
-    return `<circle data-integrative-point="${i}" data-observation="${obs}" cx="${x}" cy="${y}" r="4.2" fill="${pointColor(p,report)}" opacity="0.87" stroke="#fff" stroke-width="0.65"><title>${obs} · Patient: ${escape(row.patient||'Not selected')} · Visit: ${escape(row.timepoint||'Not selected')} · Cluster ${escape(p.cluster)} · PCo1 ${escape(format(p.x,4))}; PCo2 ${escape(format(p.y,4))}</title></circle><text class="integrative-point-label" data-integrative-label="${i}" x="${x}" y="${y}" style="display:none">${obs}</text>`
+    return `<circle data-integrative-point="${i}" data-observation="${obs}" tabindex="0" role="button" aria-label="Inspect observation ${obs}" cx="${x}" cy="${y}" r="4.2" fill="${pointColor(p,report)}" opacity="0.87" stroke="#fff" stroke-width="0.65"><title>${obs} · Patient: ${escape(row.patient||'Not selected')} · Visit: ${escape(row.timepoint||'Not selected')} · Cluster ${escape(p.cluster)} · PCo1 ${escape(format(p.x,4))}; PCo2 ${escape(format(p.y,4))}</title></circle><text class="integrative-point-label" data-integrative-label="${i}" x="${x}" y="${y}" style="display:none">${obs}</text>`
   }).join('')
   const meta=report.metadata
   const colored=Boolean(meta&&(meta.kind==='numeric'||(!meta.too_many_categories&&meta.kind==='categorical')))
@@ -87,14 +98,14 @@ export function integrativeScatterMarkup(report,axes=[],escape=defaultEscape,for
       <g data-scatter-clip="true" clip-path="url(#integrative-scatter-clip)"><g data-scatter-points="true">${circles}</g></g>
       <text x="${width/2}" y="${height-9}" text-anchor="middle">Joint PCo1 (${percent(axes[0])} of positive inertia)</text><text x="15" y="${height/2}" transform="rotate(-90 15 ${height/2})" text-anchor="middle">Joint PCo2 (${percent(axes[1])} of positive inertia)</text>
     </svg><div class="bio-legend integrative-annotation-legend">${context}</div><div class="bio-legend integrative-cluster-legend">${clusterLegend}</div>
-    <div class="integrative-sample-inspection"><label>Inspect one sample <select data-scatter-inspector="true"><option value="">Select a sample</option>${choices}</select></label><p data-scatter-inspection="true" class="method-note" role="status">Select a sample to view its ID, patient, visit and joint cluster. Full sample data is available in Details.</p>
+    <div class="integrative-sample-inspection"><label>Inspect one sample <select data-scatter-inspector="true"><option value="">Select a sample</option>${choices}</select></label><p data-scatter-inspection="true" class="method-note" role="status">Select or click a sample to view its ID, patient, visit and joint cluster.</p><div class="integrative-sample-metadata" data-scatter-metadata="true" hidden></div>
       <details class="integrative-distant-observations"><summary>Inspect distant plotted observations</summary><p class="method-note">These observations are farthest from the centre of the two-dimensional PCoA plot. This is not an outlier test, a full-distance ranking, or a quality-control failure.</p>
         <div class="table-scroll"><table><thead><tr><th>Observation</th><th>Cluster</th><th>PCo1</th><th>PCo2</th><th>Inspect</th></tr></thead><tbody>${farthestTable}</tbody></table></div></details>
     </div>
   </div>`
 }
 
-export function bindIntegrativeScatter(root) {
+export function bindIntegrativeScatter(root,onInspect=null) {
   const wrap=root.querySelector('[data-integrative-scatter]')
   if(!wrap)return
   const svg=wrap.querySelector('svg'),grp=wrap.querySelector('[data-scatter-points]')
@@ -139,12 +150,25 @@ export function bindIntegrativeScatter(root) {
   svg.addEventListener('pointermove',event=>{if(!drag)return;const rect=svg.getBoundingClientRect();panX+=(event.clientX-drag.x)*w/Math.max(1,rect.width);panY+=(event.clientY-drag.y)*h/Math.max(1,rect.height);drag={x:event.clientX,y:event.clientY};update()})
   const release=()=>{drag=null};svg.addEventListener('pointerup',release);svg.addEventListener('pointercancel',release)
   wrap.querySelectorAll('[data-scatter-pick]').forEach(button=>button.addEventListener('click',()=>{if(inspector){inspector.value=button.dataset.scatterPick;inspector.dispatchEvent(new Event('change'))}}))
+  const selectObservation = id => {
+    const index=points.findIndex(point=>point.dataset.observation===id)
+    if(index<0||!inspector)return
+    inspector.value=String(index)
+    inspector.dispatchEvent(new Event('change'))
+    inspector.scrollIntoView?.({block:'nearest'})
+  }
+  points.forEach(point=>{
+    point.addEventListener('click',()=>selectObservation(point.dataset.observation))
+    point.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectObservation(point.dataset.observation)}})
+  })
+  root.querySelectorAll('[data-integrative-inspect-sample]').forEach(button=>button.addEventListener('click',()=>selectObservation(button.dataset.integrativeInspectSample)))
   inspector?.addEventListener('change',()=>{
     const index=Number(inspector.value),valid=inspector.value!==''&&Number.isInteger(index)&&index>=0&&index<points.length
     points.forEach((p,i)=>{p.setAttribute('r',valid&&i===index?'7':'4.2');p.setAttribute('stroke',valid&&i===index?'#111827':'#fff');p.setAttribute('stroke-width',valid&&i===index?'2':'0.65')})
     if(!valid){status.textContent='Select a sample to view its ID and cluster.';return}
     const title=points[index].querySelector('title')
     status.textContent=title?.textContent||points[index].dataset.observation||''
+    if(typeof onInspect==='function')onInspect(points[index].dataset.observation)
   })
   update()
 }

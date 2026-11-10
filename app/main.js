@@ -1,7 +1,8 @@
 import { readIntegrativeMetadataColumns, validIntegrativeIdentityRoles } from './integrative-metadata-columns.js?v=0.22.8'
 import { readLocalSession, saveLocalSession, saveLocalResult, readLocalResults, readStoredSources, listStoredSourceIds, saveStoredSource, removeStoredSources, clearLocalSession, recoverSourceFile, validLocalSession } from './local-session.js?v=0.22.8'
 import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workflow.js?v=0.22.8'
-import { integrativeSummaryHtml, integrativeInfluenceHtml, integrativeScatterMarkup, bindIntegrativeScatter } from './integrative-ux.js?v=0.22.8'
+import { integrativeSummaryHtml, integrativeInfluenceHtml, integrativeScatterMarkup, bindIntegrativeScatter, integrativeClusterCautionHtml } from './integrative-ux.js?v=0.22.8'
+import { buildIntegrativeCoverage, integrativeCoverageHtml, integrativeOmittedTsv, bindIntegrativeCoverage } from './integrative-coverage.js?v=0.22.8'
 import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.8'
 import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.8'
 import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.8'
@@ -3559,6 +3560,37 @@ function ensureBiologicalFindings() {
   }
   return state.bioResult
 }
+let cachedIntegrativeCoverage=null
+function currentIntegrativeCoverage(){
+  const {alignmentPreview:alignment,i2StructureResult:structure,i2Result:distances}=state
+  if(cachedIntegrativeCoverage&&cachedIntegrativeCoverage.alignment===alignment&&
+    cachedIntegrativeCoverage.structure===structure&&cachedIntegrativeCoverage.distances===distances)return cachedIntegrativeCoverage.result
+  const result=buildIntegrativeCoverage(alignment,structure,distances)
+  cachedIntegrativeCoverage={alignment,structure,distances,result}
+  return result
+}
+function showIntegrativeSampleMetadata(observation){
+  const target=document.querySelector('[data-scatter-metadata]')
+  if(!target)return
+  const table=state.alignmentTable
+  const observationColumn=state.alignmentRoles.observation
+  const idIndex=table?.columns?.indexOf(observationColumn)??-1
+  const row=idIndex>=0?table.rows?.find(values=>String(values[idIndex]??'').trim()===observation):null
+  target.replaceChildren()
+  target.hidden=false
+  if(!row){target.textContent='Full metadata for this observation is not available. Review the Sample Metadata page.';return}
+  const heading=document.createElement('strong')
+  heading.textContent=`Local sample metadata: ${observation}`
+  target.append(heading)
+  const list=document.createElement('dl')
+  for(let i=0;i<table.columns.length;i++){
+    const term=document.createElement('dt'),value=document.createElement('dd')
+    term.textContent=table.columns[i]
+    value.textContent=String(row[i]??'')||'Not recorded'
+    list.append(term,value)
+  }
+  target.append(list)
+}
 function integrativeOverviewPanel() {
   const structure=state.i2StructureResult
   if(!structure) return `<section class="card integrative-overview" role="tabpanel" id="integrative-overview-panel" aria-labelledby="integrative-overview-tab">
@@ -3583,12 +3615,14 @@ function integrativeOverviewPanel() {
   const kept=m.retained===null?'—':m.retained.toLocaleString()
   const eligible=m.eligible===null?'—':m.eligible.toLocaleString()
   const metadataColumns=(state.alignmentTable?.columns||[]).filter(c=>c!==state.alignmentRoles.observation)
-  const sameId=Boolean(state.alignmentRoles.observation) && state.alignmentRoles.observation===state.alignmentRoles.subject
+  const coverageReport=currentIntegrativeCoverage()
   return `<section class="card integrative-overview" role="tabpanel" id="integrative-overview-panel" aria-labelledby="integrative-overview-tab">
     <div class="card-heading"><div><h3>Main findings</h3><p>Sample coverage, joint patterns and feature associations.</p></div><span class="tag neutral">Exploratory</span></div>
     ${integrativeSummaryHtml({eligible:m.eligible,retained:m.retained,modalities:m.modalities,clusters:report?.membership?.length??null,ari:m.meanAri,escape:escapeHtml})}
-    ${sameId?`<p class="notice-banner" role="status">The same column (${escapeHtml(state.alignmentRoles.subject)}) identifies observations and patients. This is correct only when each patient has one observation. For repeated visits, select a separate Patient ID column and rerun the analysis.</p>`:''}
-    ${m.excluded>0?`<p class="notice-banner">${m.excluded.toLocaleString()} eligible observations were not included in the complete-distance joint structure. Check coverage before interpreting the clusters. The retained cohort is chosen by a deterministic method; it is not guaranteed to be the largest possible complete cohort.</p>`:''}
+    ${report?integrativeClusterCautionHtml(report,escapeHtml):''}
+    <div class="integrative-overview-section integrative-overview-coverage"><h4>Who was included in the joint model?</h4>
+      ${integrativeCoverageHtml(coverageReport)}
+    </div>
     <div class="integrative-overview-grid">
       ${report?`<article class="plot-card"><div class="plot-heading"><strong>Joint sample patterns</strong><span>Unsupervised PCoA · cluster sizes describe observations, not confirmed biological groups.</span></div>
         <div class="integrative-plot-metadata"><label>Color points by <select id="integrative-overview-annotation"><option value="">Joint clusters</option>${metadataColumns.map(c=>`<option value="${escapeHtml(c)}" ${c===state.bioMetadataColumn?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select></label></div>
@@ -3839,7 +3873,13 @@ function bindIntegrativeRunControls(){
   document.querySelector('#integrative-view-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
   document.querySelector('#integrative-open-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
   document.querySelector('#integrative-overview-annotation')?.addEventListener('change',event=>{state.bioMetadataColumn=event.currentTarget.value;state.bioResult=null;state.bioError='';render()})
-  bindIntegrativeScatter(document)
+  bindIntegrativeScatter(document,showIntegrativeSampleMetadata)
+  bindIntegrativeCoverage(document)
+  document.querySelector('#integrative-coverage-export')?.addEventListener('click',()=>{
+    const report=currentIntegrativeCoverage()
+    if(report)void saveTextFile('4c-insight-joint-cohort-omissions.tsv',integrativeOmittedTsv(report))
+      .catch(error=>{state.integrativeRunError=`Omitted-observation export: ${error.message}`;render()})
+  })
   document.querySelector('#integrative-open-source-details')?.addEventListener('click',()=>{state.integrativeView='details';render();document.querySelector('#biological-findings')?.scrollIntoView({block:'start'})})
   document.querySelector('#integrative-review-error')?.addEventListener('click',()=>{state.integrativeView='details';render()})
 }
