@@ -959,3 +959,40 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .integrative-overview .analysis-warnings { margin-bottom: .85rem; }
 @media (max-width: 700px) { .integrative-settings-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 @media (max-width: 470px) { .integrative-settings-grid { grid-template-columns: minmax(0,1fr); } }
+
+/* Researcher-first integrative Overview, presentation only. */
+.integrative-study-summary .summary-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
+.integrative-study-takeaway{margin:12px 0 4px;padding:12px 14px;border-left:3px solid #3159d9;background:#f5f8ff;border-radius:5px;color:#253b58;font-size:.86rem;line-height:1.55}
+.integrative-advanced-settings{margin:10px 0;border:1px solid #d7e0ed;border-radius:7px;background:#fff;padding:10px 12px}
+.integrative-advanced-settings summary,.integrative-step-disclosure summary{cursor:pointer;font-size:.84rem;font-weight:650;color:#24427e}
+.integrative-advanced-settings[open] summary{margin-bottom:10px}
+.integrative-advanced-settings .method-note{margin:0 0 10px}
+.integrative-step-disclosure{margin:12px 0;padding:10px 12px;border:1px solid #b6d8c8;background:#f2faf7;border-radius:8px}
+.integrative-step-disclosure[open] .integrative-run-steps{margin-top:12px}
+.integrative-ablation-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:9px;margin:10px 0}
+.integrative-ablation-tile{display:grid;align-content:start;gap:7px;padding:11px;border:1px solid #e0e6f0;border-radius:8px;background:#fbfcff;min-width:0}
+.integrative-ablation-tile strong{font-size:.79rem;color:#263a59;overflow-wrap:anywhere}
+.integrative-ablation-tile span{font-size:.74rem;color:#58697f;display:flex;justify-content:space-between;gap:6px}
+.integrative-ablation-tile b{color:#1d3557;font-variant-numeric:tabular-nums}
+.integrative-ablation-tile small{color:#805c31;overflow-wrap:anywhere}
+.integrative-plot-metadata{display:flex;justify-content:flex-end;margin:9px 0}
+.integrative-plot-metadata label,.integrative-sample-inspection label{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:.79rem;font-weight:600;color:#38506f}
+.integrative-plot-metadata select,.integrative-sample-inspection select{min-width:0;max-width:100%;font-weight:400}
+.integrative-interactive-scatter svg{width:100%;height:auto;display:block;touch-action:none;user-select:none}
+.integrative-interactive-scatter svg text{font:12px system-ui,sans-serif;fill:#485775}
+.integrative-interactive-scatter .integrative-point-label{fill:#132d4f;paint-order:stroke;stroke:#fff;stroke-linejoin:round;pointer-events:none;font-weight:650}
+.integrative-plot-tools{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin:8px 0}
+.integrative-plot-tools button{padding:5px 9px;background:#fff;border:1px solid #d4deee;border-radius:6px;color:#24427e;cursor:pointer;font-size:.72rem}
+.integrative-plot-tools button:focus-visible{outline:2px solid #3159d9}
+.integrative-plot-tools small{font-size:.69rem;color:#5d6c80;flex:1 1 130px}
+.integrative-annotation-legend,.integrative-cluster-legend{justify-content:flex-start;gap:9px;margin:6px 0}
+.integrative-annotation-legend span,.integrative-cluster-legend span{font-size:.72rem;color:#52647b}
+.integrative-sample-inspection{border-top:1px solid #e1e8f0;margin-top:10px;padding:11px 1px 0;display:grid;gap:5px}
+.integrative-sample-inspection p{margin:3px 0;overflow-wrap:anywhere}
+@media(max-width:1050px){.integrative-study-summary .summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.integrative-study-summary .summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.integrative-ablation-grid{grid-template-columns:minmax(0,1fr)}}
+
+.integrative-distant-observations{margin-top:9px;padding-top:8px;border-top:1px solid #e6ebf3}
+.integrative-distant-observations summary{cursor:pointer;color:#3159d9;font-size:.78rem;font-weight:600}
+.integrative-distant-observations table{font-size:.75rem}
+.integrative-distant-observations .secondary-button{padding:4px 7px;font-size:.74rem}

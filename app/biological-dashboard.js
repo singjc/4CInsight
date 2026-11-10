@@ -30,18 +30,19 @@ export function allModalityRows(report) {
 
 /** Do not merge statistical scales. Correlation and between/within are separate panels. */
 export function modalityOverviewHtml(report) {
+  const ratioMaximum = Math.max(2,...allModalityRows(report).filter(r=>r.included&&finite(r.between_within_ratio)).map(r=>r.between_within_ratio))
   return `<div class="bio-modality-grid" role="list" aria-label="All seven measured data types">${allModalityRows(report).map(row => {
     if (!row.included) return `<article class="bio-modality-tile bio-modality-unavailable" role="listitem"><strong>${esc(row.label)}</strong><span>Not in fitted model</span><small>No feature-level result is inferred</small></article>`
     const r = row.between_within_ratio, c = row.joint_distance_correlation
     const w = finite(c) ? Math.min(100,100*Math.abs(c)) : 0
-    const v = finite(r) ? Math.min(100,Math.max(0,50*r)) : 0
+    const v = finite(r) ? Math.min(100,Math.max(0,100*r/ratioMaximum)) : 0
     return `<article class="bio-modality-tile" role="listitem"><strong>${esc(row.label)}</strong>
       <small>${row.pairs.toLocaleString()} of ${row.expected_pairs.toLocaleString()} pairs (${pct(row.pair_coverage)})</small>
       <span>Agreement with joint distances <b>${num(c)}</b></span>
       <div class="bio-meter bio-correlation" role="img" aria-label="Pearson distance correlation ${num(c)}"><i style="width:${w.toFixed(1)}%;background:${c<0?'#b44a59':'#3159d9'}"></i></div>
       <span>Between/within cluster distance <b>${num(r)}</b></span>
-      <div class="bio-meter" role="img" aria-label="Between within ratio ${num(r)}; visual range 0 to 2"><i style="width:${v.toFixed(1)}%;background:#16856b"></i></div>
-      <small>${esc(row.distance_label)} · ratios and correlations are descriptive</small>
+      <div class="bio-meter" role="img" aria-label="Between within ratio ${num(r)}; shared visual range 0 to ${num(ratioMaximum)}"><i style="width:${v.toFixed(1)}%;background:#16856b"></i></div>
+      <small>${esc(row.distance_label)} · ratios and correlations are descriptive. Ratio bar scale: 0–${num(ratioMaximum)} for every tile.</small>
     </article>`
   }).join('')}</div>`
 }

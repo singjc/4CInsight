@@ -1,6 +1,7 @@
 import { readIntegrativeMetadataColumns, validIntegrativeIdentityRoles } from './integrative-metadata-columns.js?v=0.22.8'
 import { readLocalSession, saveLocalSession, saveLocalResult, readLocalResults, readStoredSources, listStoredSourceIds, saveStoredSource, removeStoredSources, clearLocalSession, recoverSourceFile, validLocalSession } from './local-session.js?v=0.22.8'
 import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workflow.js?v=0.22.8'
+import { integrativeSummaryHtml, integrativeInfluenceHtml, integrativeScatterMarkup, bindIntegrativeScatter } from './integrative-ux.js?v=0.22.8'
 import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.8'
 import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.8'
 import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.8'
@@ -1308,7 +1309,7 @@ function renderNav() {
 
   document.querySelector('#sidebar-status').innerHTML = `
     <span class="status-dot ${state.wasmReady ? 'ok' : ''}"></span>
-    <div><strong>${escapeHtml(state.engine)}</strong><span>Ready for analysis</span>${(pending.size || activeCompareController || activeI2bController) ? '<button id="stop-science-work" class="danger-text-button">Stop operation</button>' : ''}</div>`
+    <div><strong>${escapeHtml(state.engine)}</strong><span>Engine status · App ${escapeHtml(APP_VERSION)}</span><span>Ready for analysis</span>${(pending.size || activeCompareController || activeI2bController) ? '<button id="stop-science-work" class="danger-text-button">Stop operation</button>' : ''}</div>`
 }
 
 function summaryCard(label, value, detail) {
@@ -3256,27 +3257,8 @@ function bindJointStabilityEvents() {
 
 // Biological interpretation is post-fit and never feeds labels or ranked features
 // back into the unsupervised distance model.
-function biologicalScatterSvg(report) {
-  const points=report.points
-  if(!points?.length)return ''
-  const width=650,height=350,pad=49
-  const xs=points.map(p=>p.x),ys=points.map(p=>p.y)
-  const [xmin,xmax]=paddedExtent(xs),[ymin,ymax]=paddedExtent(ys)
-  const sx=x=>pad+(x-xmin)/(xmax-xmin)*(width-2*pad)
-  const sy=y=>height-pad-(y-ymin)/(ymax-ymin)*(height-2*pad)
-  const colors=['#3159d9','#d97706','#15803d','#a21caf','#0f766e','#b91c1c','#64748b','#2563eb','#854d0e','#be185d','#0369a1','#4d7c0f']
-  const categories=report.metadata?.kind==='categorical'&&!report.metadata.too_many_categories
-    ?report.metadata.categories.map(r=>r.value):[]
-  const circles=points.map(p=>{
-    const v=p.annotation||''
-    const index=categories.indexOf(v)
-    const c=index>=0?colors[index%colors.length]:colors[(p.cluster-1)%colors.length]
-    const x=sx(p.x),y=sy(p.y)
-    return `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="4.2" fill="${c}" opacity="0.84" stroke="#fff" stroke-width="0.5"><title>${escapeHtml(p.observation)} · Cluster ${p.cluster} · ${escapeHtml(report.column?`${report.column}: ${v||'Missing'}`:'No metadata annotation selected')} · PCo1 ${formatNumber(p.x,4)}, PCo2 ${formatNumber(p.y,4)}</title></circle>`
-  }).join('')
-  const legend=categories.length?categories.slice(0,12).map((v,i)=>`<span><i style="background:${colors[i%colors.length]}"></i>${escapeHtml(v)}</span>`).join(''):
-    report.membership.map(row=>`<span><i style="background:${colors[(row.cluster-1)%colors.length]}"></i>Joint cluster ${row.cluster}</span>`).join('')
-  return `<div class="bio-scatter"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Joint ordination with post-fit annotation colors"><rect x="${pad}" y="${pad}" width="${width-2*pad}" height="${height-2*pad}" fill="#fff" stroke="#e3e8f1"/>${circles}<text x="${width/2}" y="${height-9}" text-anchor="middle">Joint PCo1</text><text x="15" y="${height/2}" transform="rotate(-90 15 ${height/2})" text-anchor="middle">Joint PCo2</text></svg><div class="bio-legend">${legend}</div></div>`
+function biologicalScatterSvg(report, structure=state.i2StructureResult) {
+  return integrativeScatterMarkup(report, structure?.pcoa?.axis_variance_explained || [] , escapeHtml,formatNumber)
 }
 // Post-fit feature color overlay. This does not refit distances or PCoA.
 function biologicalFeatureScatterSvg(report,profile) {
@@ -3600,27 +3582,33 @@ function integrativeOverviewPanel() {
   }).join('')
   const kept=m.retained===null?'—':m.retained.toLocaleString()
   const eligible=m.eligible===null?'—':m.eligible.toLocaleString()
+  const metadataColumns=(state.alignmentTable?.columns||[]).filter(c=>c!==state.alignmentRoles.observation)
+  const sameId=Boolean(state.alignmentRoles.observation) && state.alignmentRoles.observation===state.alignmentRoles.subject
   return `<section class="card integrative-overview" role="tabpanel" id="integrative-overview-panel" aria-labelledby="integrative-overview-tab">
-    <div class="card-heading"><div><h3>Main findings</h3><p>Sample structure, measured coverage and candidate molecular signals in one view.</p></div><span class="tag neutral">Exploratory</span></div>
-    <div class="summary-grid compact-grid">
-      ${summaryCard('Aligned observations',eligible,'Passed metadata exclusions')}
-      ${summaryCard('Joint structure',kept,'Observations with complete fixed-view distances')}
-      ${summaryCard('Data types fitted',String(m.modalities),'Of seven possible')}
-      ${summaryCard('Cluster agreement',m.meanAri===null?'Not assessed':formatNumber(m.meanAri,3),'Mean patient-subset adjusted Rand index')}
-    </div>
-    ${m.excluded>0?`<p class="notice-banner">${m.excluded.toLocaleString()} eligible observations were not included in the complete-distance joint structure. Check coverage before interpreting the clusters.</p>`:''}
+    <div class="card-heading"><div><h3>Main findings</h3><p>Sample coverage, joint patterns and feature associations.</p></div><span class="tag neutral">Exploratory</span></div>
+    ${integrativeSummaryHtml({eligible:m.eligible,retained:m.retained,modalities:m.modalities,clusters:report?.membership?.length??null,ari:m.meanAri,escape:escapeHtml})}
+    ${sameId?`<p class="notice-banner" role="status">The same column (${escapeHtml(state.alignmentRoles.subject)}) identifies observations and patients. This is correct only when each patient has one observation. For repeated visits, select a separate Patient ID column and rerun the analysis.</p>`:''}
+    ${m.excluded>0?`<p class="notice-banner">${m.excluded.toLocaleString()} eligible observations were not included in the complete-distance joint structure. Check coverage before interpreting the clusters. The retained cohort is chosen by a deterministic method; it is not guaranteed to be the largest possible complete cohort.</p>`:''}
     <div class="integrative-overview-grid">
-      ${report?`<article class="plot-card"><div class="plot-heading"><strong>Joint sample patterns</strong><span>Unsupervised PCoA; colors are post-fit annotations.</span></div>${biologicalScatterSvg(report)}</article>`:'<article class="plot-card"><h4>Joint sample patterns</h4><p class="method-note">The metadata interpretation is not available. See Details for the reason.</p></article>'}
-      ${report?`<article class="plot-card"><div class="plot-heading"><strong>How the data types compare</strong><span>Observed coverage, distance correlation and cluster distance ratio.</span></div>${modalityOverviewHtml(report)}</article>`:'<article class="plot-card"><p class="method-note">Modality interpretation needs a valid joint result.</p></article>'}
+      ${report?`<article class="plot-card"><div class="plot-heading"><strong>Joint sample patterns</strong><span>Unsupervised PCoA · cluster sizes describe observations, not confirmed biological groups.</span></div>
+        <div class="integrative-plot-metadata"><label>Color points by <select id="integrative-overview-annotation"><option value="">Joint clusters</option>${metadataColumns.map(c=>`<option value="${escapeHtml(c)}" ${c===state.bioMetadataColumn?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select></label></div>
+        ${report.metadata?.too_many_categories?'<p class="method-note">This metadata column has too many categories for separate colours. Cluster colours are shown. Choose a grouping column with fewer categories.</p>':''}
+        ${biologicalScatterSvg(report)}</article>`:'<article class="plot-card"><h4>Joint sample patterns</h4><p class="method-note">The metadata interpretation is not available. See Details for the reason.</p></article>'}
+      ${report?`<article class="plot-card"><div class="plot-heading"><strong>Data type coverage and agreement</strong><span>Pair coverage is measured within retained observations. Agreement with the joint distances is descriptive, not independent feature importance.</span></div>${modalityOverviewHtml(report)}</article>`:'<article class="plot-card"><p class="method-note">Modality interpretation needs a valid joint result.</p></article>'}
     </div>
-    <div class="integrative-overview-section"><h4>Candidate molecular signals</h4>
+    <div class="integrative-overview-section"><h4>How much does each data type affect the joint structure?</h4>
+      ${integrativeInfluenceHtml(structure,escapeHtml,formatNumber)}
+    </div>
+    <div class="integrative-overview-section"><h4>Features associated with joint sample patterns</h4>
+      <p class="method-note">These features are ranked by correlation with the fitted joint coordinates. They are not statistically significant findings, independent differential-expression results, or evidence of clinical subtypes.</p>
       ${state.bioFeatureResult?featureLollipopHtml(state.bioFeatureResult,'pcoa1_spearman',5):'<p class="method-note">Gene and transcript features have not been ranked. Check the workflow steps above, then inspect source availability in Details.</p>'}
       <div class="integrative-insight-grid">${nonRnaCards}</div>
+      <button id="integrative-open-source-details" type="button" class="secondary-button">Inspect measured receptor, isotype and immune features in Details</button>
       ${sourceError?`<p class="analysis-warnings">Source-feature review: ${escapeHtml(sourceError)}</p>`:''}
       <p class="method-note">Feature rankings are post-fit associations, not independent differential-expression results. No p-values, FDR, pathway claims or clinical subgroup labels are inferred.</p>
     </div>
     <div class="integrative-overview-section"><h4>What to check before biological interpretation</h4>
-      <p class="method-note">Review unusual sample distances and QC metadata; examine which modalities influence the clusters; check missing observations and patient-level stability. Use Details for the full heatmap, sample inspector and exports.</p>
+      <p class="method-note">Inspect distant samples and their metadata. Check the observations excluded from clustering, review sensitivity when a data type is removed, and examine patient-level stability. Cluster agreement does not confirm biological groups or clinical subtypes.</p>
       <button id="integrative-open-details" type="button" class="secondary-button">Open detailed results</button>
     </div>
   </section>`
@@ -3776,20 +3764,23 @@ function integrativeMainSettings() {
   const choices=(selected,includeEmpty=false)=>`${includeEmpty?'<option value="">Not selected</option>':''}${cols.map(c=>`<option value="${escapeHtml(c)}" ${selected===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}`
   const chosen=state.hitConfig.integrativeModalities||{}
   return `<section class="integrative-main-settings" aria-label="Main multi-omics settings">
-    <div class="integrative-settings-heading"><strong>Main analysis settings</strong><span>Identity and modality settings are managed here. Advanced methods remain in Details.</span></div>
+    <div class="integrative-settings-heading"><strong>Main analysis settings</strong><span>Choose the sample and patient IDs and data types. Open Advanced settings for other controls.</span></div>
     <div class="integrative-settings-grid">
       <label>Metadata source<select id="integrative-setting-source" ${locked}><option value="active" ${state.alignmentSource==='active'?'selected':''}>Selected metadata file</option><option value="draft" ${state.alignmentSource==='draft'?'selected':''}>Open metadata draft</option></select></label>
       <label>Metadata file<select id="integrative-setting-metadata" ${locked} ${state.alignmentSource==='draft'?'disabled':''}>${candidates.map(r=>`<option value="${escapeHtml(r.id)}" ${r.id===state.qcConfig.metadataId?'selected':''}>${escapeHtml(r.name)}</option>`).join('')}</select></label>
       <label>Observation ID<select id="integrative-setting-observation" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Reading metadata columns…</option>':choices(state.alignmentRoles.observation)}</select></label>
       <label>Patient ID<select id="integrative-setting-patient" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Reading metadata columns…</option>':choices(state.alignmentRoles.subject,true)}</select></label>
       <label>Visit / timepoint<select id="integrative-setting-visit" ${locked||(!cols.length?'disabled':'')}>${!cols.length?'<option value="">Reading metadata columns…</option>':choices(state.alignmentRoles.time,true)}</select></label>
-      <label>Parallel data types<select id="integrative-setting-workers" ${locked}>${[1,2,3].map(n=>`<option value="${n}" ${state.i2bParallelWorkers===n?'selected':''}>${n} ${n===1?'worker':'workers'}</option>`).join('')}</select></label>
-      <label>Minimum data types per pair<input id="integrative-setting-min-views" type="number" min="2" max="7" value="${state.i2MinViews}" ${locked}/></label>
-      <label>Descriptive clusters<input id="integrative-setting-clusters" type="number" min="2" max="12" value="${state.bioClusterCount}" ${locked}/></label>
-      <label>Patient stability repeats<input id="integrative-setting-repeats" type="number" min="10" max="500" value="${state.jointStabilityConfig.repeats}" ${locked}/></label>
     </div>
+    <details class="integrative-advanced-settings"><summary>Advanced settings · computation and sensitivity</summary><p class="method-note">Minimum data types per pair is used for broad pairwise distance fusion. The final joint ordination requires complete distances across all selected data types for every retained sample pair. These are different coverage requirements.</p><div class="integrative-settings-grid">
+      <label>Parallel data types<select id="integrative-setting-workers" ${locked}>${[1,2,3].map(n=>`<option value="${n}" ${state.i2bParallelWorkers===n?'selected':''}>${n} ${n===1?'worker':'workers'}</option>`).join('')}</select></label>
+      <label>Minimum data types per pair (fusion)<input id="integrative-setting-min-views" type="number" min="2" max="7" value="${state.i2MinViews}" ${locked}/></label>
+      <label>Descriptive clusters (post-fit)<input id="integrative-setting-clusters" type="number" min="2" max="12" value="${state.bioClusterCount}" ${locked}/></label>
+      <label>Patient stability repeats<input id="integrative-setting-repeats" type="number" min="10" max="500" value="${state.jointStabilityConfig.repeats}" ${locked}/></label>
+    </div></details>
     <div class="integrative-settings-modalities" role="group" aria-label="Data types in complete analysis">${I1_MODALITIES.map(m=>`<label class="check-label"><input type="checkbox" data-integrative-main-modality="${m.key}" ${chosen[m.key]===false?'':'checked'} ${locked}/><span>${escapeHtml(m.label)}</span></label>`).join('')}</div>
     <label class="check-label integrative-one-patient"><input type="checkbox" id="integrative-setting-one-patient" ${state.i2StructureOnePerPatient?'checked':''} ${locked}/><span>One observation per patient in the joint structure</span></label>
+    ${state.alignmentRoles.observation&&state.alignmentRoles.subject===state.alignmentRoles.observation?`<p class="notice-banner" role="status">Observation ID and Patient ID use the same column. This is correct only when each patient has one observation. Choose a separate Patient ID column for repeated visits.</p>`:''}
     ${state.integrativeColumnError?`<p class="analysis-warnings" role="alert">${escapeHtml(state.integrativeColumnError)}</p>`:''}
     ${!cols.length && !state.integrativeColumnError?`<p class="method-note" role="status">${state.alignmentSource==='draft'?'Open a local metadata draft in Sample Metadata before selecting its columns.':'Reading column names from the selected local metadata file. The analysis does not start until the columns are available.'}</p>`:''}
     <p class="method-note">A single metadata column can identify both the observation and the patient when each patient has one sample. Changing source IDs or data types requires fresh alignment. No disease labels enter model fitting.</p>
@@ -3847,6 +3838,9 @@ function bindIntegrativeRunControls(){
   document.querySelector('#integrative-view-overview')?.addEventListener('click',()=>{state.integrativeView='overview';render()})
   document.querySelector('#integrative-view-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
   document.querySelector('#integrative-open-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
+  document.querySelector('#integrative-overview-annotation')?.addEventListener('change',event=>{state.bioMetadataColumn=event.currentTarget.value;state.bioResult=null;state.bioError='';render()})
+  bindIntegrativeScatter(document)
+  document.querySelector('#integrative-open-source-details')?.addEventListener('click',()=>{state.integrativeView='details';render();document.querySelector('#biological-findings')?.scrollIntoView({block:'start'})})
   document.querySelector('#integrative-review-error')?.addEventListener('click',()=>{state.integrativeView='details';render()})
 }
 
@@ -3858,6 +3852,9 @@ function significantHitsView() {
   const disabled=busy||state.busy||state.i2bBusy||state.i2Busy||state.alignmentBusy||state.mergeBusy||!ready||!integrativeSettingColumns().length||state.integrativeColumnBusy||Boolean(state.integrativeColumnError)
   const stepMarkup=steps.map(row=>`<div class="integrative-step" data-status="${escapeHtml(row.status)}"><span class="integrative-step-marker" aria-hidden="true">${messages[row.status]||'○'}</span><p><strong>${escapeHtml(row.label)}</strong><small>${escapeHtml(row.message||row.status)}</small></p></div>`).join('')
   const detail=state.integrativeView==='details'
+  const stepDone=steps.length>0 && steps.every(row=>['complete','skipped','warning'].includes(row.status)) && !busy
+  const problems=steps.some(row=>['warning','failed','stopped'].includes(row.status))
+  const completed=steps.filter(row=>row.status==='complete').length
   return `<section class="page-heading"><div><span class="eyebrow">Integrative Analysis</span><h2>Explore shared biological patterns across data types</h2><p>Run the full local analysis once, review the main findings, or open the detailed scientific results.</p></div><div class="local-card"><strong>On-device multi-omics</strong><span>Seven available data types · Exact sample alignment · No source upload</span></div></section>
     ${state.error?`<div class="error-banner" role="alert">${escapeHtml(state.error)}</div>`:''}
     <section class="card integrative-entry"><div class="integrative-main-action">
@@ -3866,7 +3863,7 @@ function significantHitsView() {
     </div>
     ${integrativeMainSettings()}
     ${!ready?'<p class="notice-banner">Connect the local metadata file in Project or open a metadata draft before starting.</p>':''}
-    ${steps.length?`<div class="integrative-run-steps" aria-label="Complete analysis progress" role="status" aria-live="polite">${stepMarkup}</div>`:''}
+    ${steps.length?(stepDone?`<details class="integrative-step-disclosure" ${problems?"open":""}><summary>${completed} of ${steps.length} analysis stages complete${problems?" · review stage warnings":""}</summary><div class="integrative-run-steps" aria-label="Complete analysis stages">${stepMarkup}</div></details>`:`<div class="integrative-run-steps" aria-label="Complete analysis progress" role="status" aria-live="polite">${stepMarkup}</div>`):''}
     ${busy && steps.some(x=>x.id==='sources'&&x.status==='running')?`<div class="integrative-live-progress"><strong>Processing local source files</strong><progress id="integrative-live-source-bar" max="${Math.max(1,sourceProgressSummary(state.i2bProgressRows).total)}" value="${sourceProgressSummary(state.i2bProgressRows).completed}" aria-label="Source file processing progress"></progress><p id="integrative-live-source-status" role="status">${escapeHtml(state.i2bProgress||'Starting source workers')}</p></div>`:''}
     ${state.integrativeRunError?`<div class="analysis-warnings" role="alert"><strong>Analysis stopped:</strong> ${escapeHtml(state.integrativeRunError)}. Open Details to see the stage report and source errors.</div>`:''}
     <div class="integrative-tab-controls" role="tablist" aria-label="Integrative analysis results">

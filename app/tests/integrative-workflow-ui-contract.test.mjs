@@ -28,7 +28,8 @@ test('required steps are verified and source processing stays local',()=>{
 })
 test('view only moves validated science outputs; does not use clinical labels for fitting',()=>{
  const main=read('../main.js')
- assert.match(main,/summaryCard\('Joint structure'/)
+ assert.match(main,/integrativeSummaryHtml\(/)
+ assert.match(main,/integrativeInfluenceHtml\(/)
  assert.match(main,/modalityOverviewHtml\(report\)/)
  assert.match(main,/featureLollipopHtml\(state\.bioFeatureResult/)
  assert.match(main,/Feature rankings are post-fit associations/)
