@@ -54,6 +54,28 @@ export function boxToWindow(window, bounds, width, height, n) {
   return next
 }
 
+/** Wheel zoom and drag-pan act on the existing ordered matrix only. */
+export function zoomHeatmapWindow(window,focusX,focusY,factor,n){
+  validateHeatmapWindow(window,n)
+  if(![focusX,focusY,factor].every(finite)||factor<=0)return window
+  const fx=clamp(focusX,0,1),fy=clamp(focusY,0,1)
+  const cols=window.columnEnd-window.columnStart,rows=window.rowEnd-window.rowStart
+  const newCols=clamp(Math.round(cols*factor),2,n)
+  const newRows=clamp(Math.round(rows*factor),2,n)
+  const col=window.columnStart+fx*cols,row=window.rowStart+fy*rows
+  const columnStart=clamp(Math.round(col-fx*newCols),0,n-newCols)
+  const rowStart=clamp(Math.round(row-fy*newRows),0,n-newRows)
+  return {columnStart,columnEnd:columnStart+newCols,rowStart,rowEnd:rowStart+newRows}
+}
+export function panHeatmapWindow(window,dx,dy,renderedWidth,renderedHeight,n){
+  validateHeatmapWindow(window,n)
+  if(![dx,dy,renderedWidth,renderedHeight].every(finite)||renderedWidth<=0||renderedHeight<=0)return window
+  const cols=window.columnEnd-window.columnStart,rows=window.rowEnd-window.rowStart
+  const col=clamp(window.columnStart-Math.round(dx*cols/renderedWidth),0,n-cols)
+  const row=clamp(window.rowStart-Math.round(dy*rows/renderedHeight),0,n-rows)
+  return {columnStart:col,columnEnd:col+cols,rowStart:row,rowEnd:row+rows}
+}
+
 export function heatmapDisplayScale(distances, n, mode = DEFAULT_SCALE) {
   if ((!Array.isArray(distances) && !(distances instanceof Float64Array)) || distances.length !== n * n) {
     throw new Error('Distance matrix must be a complete square')
@@ -155,6 +177,10 @@ export function heatmapViewerMarkup() {
     <div class="joint-heatmap-toolbar" role="group" aria-label="Heatmap view controls">
       <strong>Clustered distance matrix</strong>
       <span class="joint-heatmap-toolbar-actions">
+        <button type="button" id="joint-heatmap-zoom-in" class="secondary-button">Zoom +</button>
+        <button type="button" id="joint-heatmap-zoom-out" class="secondary-button">Zoom −</button>
+        <button type="button" id="joint-heatmap-mode-pan" class="secondary-button" aria-pressed="false">Pan</button>
+        <button type="button" id="joint-heatmap-mode-box" class="secondary-button is-active" aria-pressed="true">Box zoom</button>
         <button type="button" id="joint-heatmap-back" class="secondary-button" disabled>Previous zoom</button>
         <button type="button" id="joint-heatmap-reset" class="secondary-button">Show all</button>
         <button type="button" id="joint-heatmap-expand" class="secondary-button" aria-expanded="false">Expand view</button>
@@ -169,7 +195,7 @@ export function heatmapViewerMarkup() {
       <div class="joint-heatmap-key-numbers"><span>0 · very similar</span><span id="joint-heatmap-cap">Scale not available</span></div>
       <small id="joint-heatmap-range-note">Colors are descriptive distances, not significance or expression changes.</small>
     </div>
-    <p class="method-note joint-heatmap-instructions">Drag a box across the matrix to zoom into the selected rows and columns. The top and left dendrograms show the matching portion of the <strong>original clustering</strong>; the model is not recalculated. Zoom in to display more sample IDs.</p>
+    <p class="method-note joint-heatmap-instructions">Scroll over the matrix to zoom. Choose Box zoom and drag a rectangle, or choose Pan and drag to move the visible area. The top and left dendrograms show the matching portion of the <strong>original clustering</strong>; the model is not recalculated. Zoom in to display more sample IDs.</p>
     <div class="joint-heatmap-scroll" id="joint-heatmap-scroll" role="region" tabindex="0" aria-label="Scrollable clustered distance heatmap, with top and left dendrograms">
       <div class="joint-heatmap-grid" id="joint-heatmap-grid">
         <canvas id="joint-top-tree" role="img" aria-label="Original dendrogram, columns"></canvas>
@@ -193,7 +219,7 @@ let viewer = null
 let abortEvents = null
 function getState(result) {
   if (lastResult !== result || !viewer) {
-    active = {window:completeWindow(result.observations.length),history:[],expanded:false,mode:DEFAULT_SCALE}
+    active = {window:completeWindow(result.observations.length),history:[],expanded:false,mode:DEFAULT_SCALE,gesture:'box'}
     lastResult = result
   }
   return active
@@ -317,6 +343,7 @@ function draw(result, root, state, resetScroll = false) {
   root.querySelector('#joint-heatmap-expand').textContent=state.expanded?'Close expanded view':'Expand view'
   root.querySelector('#joint-heatmap-expand').setAttribute('aria-expanded',String(state.expanded))
   root.querySelector('#joint-heatmap-scale').value=state.mode
+  for(const name of ['pan','box']){const button=root.querySelector(`#joint-heatmap-mode-${name}`);button?.setAttribute('aria-pressed',String(state.gesture===name));button?.classList.toggle('is-active',state.gesture===name)}
   root.classList.toggle('is-expanded',state.expanded)
   const caption=`Showing ${rows} row samples (${window.rowStart+1}–${window.rowEnd}) and ${cols} column samples (${window.columnStart+1}–${window.columnEnd}) of ${n} clustered observations. Sample names appear when space permits. Box zoom does not re-fit the dendrogram.`
   root.querySelector('#joint-heatmap-window-description').textContent=caption
@@ -359,12 +386,12 @@ export function mountJointHeatmapViewer(result) {
     if(event.button!==0)return
     start=localPosition(event);latest=start
     matrix.setPointerCapture?.(event.pointerId)
-    setSelection(start,latest)
+    if(state.gesture==='box')setSelection(start,latest)
     event.preventDefault()
   },{signal})
   matrix.addEventListener('pointermove',event=>{
     const p=localPosition(event)
-    if(start){latest=p;setSelection(start,p);return}
+    if(start){latest=p;if(state.gesture==='box')setSelection(start,p);return}
     const win=state.window
     const x=win.columnStart+Math.floor(p.x*(win.columnEnd-win.columnStart)/Math.max(1,p.width))
     const y=win.rowStart+Math.floor(p.y*(win.rowEnd-win.rowStart)/Math.max(1,p.height))
@@ -377,11 +404,30 @@ export function mountJointHeatmapViewer(result) {
   matrix.addEventListener('pointerup',event=>{
     if(!start)return
     latest=localPosition(event)
-    const next=boxToWindow(state.window,{x0:start.x,y0:start.y,x1:latest.x,y1:latest.y},latest.width,latest.height,result.observations.length)
+    const next=state.gesture==='box'
+      ?boxToWindow(state.window,{x0:start.x,y0:start.y,x1:latest.x,y1:latest.y},latest.width,latest.height,result.observations.length)
+      :panHeatmapWindow(state.window,latest.x-start.x,latest.y-start.y,latest.width,latest.height,result.observations.length)
     start=null;latest=null;selection.hidden=true
-    if(next){state.history.push({...state.window});state.window=next;refresh(true)}
+    if(next&&JSON.stringify(next)!==JSON.stringify(state.window)){state.history.push({...state.window});state.window=next;refresh(true)}
   },{signal})
   matrix.addEventListener('pointercancel',()=>{start=null;latest=null;selection.hidden=true},{signal})
+  matrix.addEventListener('wheel',event=>{
+    const p=localPosition(event)
+    event.preventDefault()
+    const next=zoomHeatmapWindow(state.window,p.x/Math.max(1,p.width),p.y/Math.max(1,p.height),event.deltaY<0?.76:1.32,result.observations.length)
+    if(JSON.stringify(next)!==JSON.stringify(state.window)){
+      state.history.push({...state.window});state.window=next;refresh(true)
+    }
+  },{passive:false,signal})
+  for(const name of ['pan','box'])root.querySelector(`#joint-heatmap-mode-${name}`).addEventListener('click',()=>{
+    state.gesture=name;selection.hidden=true;start=null;latest=null;refresh()
+  },{signal})
+  for(const [id,factor] of [['joint-heatmap-zoom-in',.7],['joint-heatmap-zoom-out',1.4]])root.querySelector(`#${id}`).addEventListener('click',()=>{
+    const next=zoomHeatmapWindow(state.window,.5,.5,factor,result.observations.length)
+    if(JSON.stringify(next)!==JSON.stringify(state.window)){
+      state.history.push({...state.window});state.window=next;refresh(true)
+    }
+  },{signal})
   root.querySelector('#joint-heatmap-back').addEventListener('click',()=>{
     if(!state.history.length)return
     state.window=state.history.pop();refresh(true)

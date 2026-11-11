@@ -1,3 +1,4 @@
+import {bindPlotNavigation, bindPlotToolbar, plotNavigationToolbar, boxZoomView, PLOT_ZOOM_MAX} from './plot-navigation.js?v=0.22.8'
 // UX11: interactive Results plots and local exports. No network or scientific computations.
 const SVG_NS = 'http://www.w3.org/2000/svg'
 const RESULT_NAMES = {
@@ -137,7 +138,7 @@ function axisRedrawLabels(svg,state,visible){
     if(!Number.isFinite(x)||!Number.isFinite(y))continue
     coords.push({node:p,x,y})
     const key=cell(x,y);if(!cells.has(key))cells.set(key,[])
-    cells.get(key).push({x,y})
+    cells.get(key).push({node:p,x,y})
   }
   const occupied=[]
   const maxLabels=svg.closest?.('.overview-expanded')?40:22
@@ -149,8 +150,7 @@ function axisRedrawLabels(svg,state,visible){
     const cx=Math.floor(p.x/radiusX),cy=Math.floor(p.y/radiusY)
     let near=false
     for(let a=-1;a<=1&&!near;a++)for(let b=-1;b<=1&&!near;b++)for(const pt of cells.get(`${cx+a},${cy+b}`)||[]){
-      if(pt===p)continue
-      if(pt.x===p.x&&pt.y===p.y)continue
+      if(pt.node===p.node)continue
       if(Math.abs(pt.x-p.x)<radiusX&&Math.abs(pt.y-p.y)<radiusY){near=true;break}
     }
     if(near)continue
@@ -287,51 +287,39 @@ export function resetPlotZoom(svg) {
   if(s)setView(svg,{...s.base})
 }
 function attachPanAndZoom(svg) {
-  if (!svg || svg.dataset.interactiveOverview === 'true') return
+  if (!svg) return null
   const axis=axisStateFor(svg)
-  if(!axis&&!viewState(svg))return
+  const generic=axis?null:viewState(svg)
+  if(!axis&&!generic)return null
   if(axis)redrawAxisPlot(svg,axis)
-  svg.dataset.interactiveOverview = 'true'
-  svg.setAttribute('tabindex', '0')
-  svg.setAttribute('aria-keyshortcuts', '+ - 0')
-  svg.addEventListener('wheel', (event) => {
-    // Ctrl/Cmd prevents long-page scrolling from unexpectedly zooming a plot.
-    if (!event.ctrlKey && !event.metaKey) return
-    event.preventDefault()
-    const rect = svg.getBoundingClientRect()
-    const anchor=axis?axisEventAnchor(svg,event,axis):{
-      x:clamp((event.clientX-rect.left)/Math.max(1,rect.width),0,1),
-      y:clamp((event.clientY-rect.top)/Math.max(1,rect.height),0,1)}
-    changePlotZoom(svg,event.deltaY<0?0.8:1.25,anchor.x,anchor.y)
-  }, { passive: false })
-  let drag = null
-  svg.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0 || event.pointerType === 'touch') return
-    const s=axis||viewState(svg)
-    if(!s || s.view.width >= (axis?1:s.base.width))return
-    drag = { x: event.clientX, y: event.clientY }
-    svg.setPointerCapture?.(event.pointerId)
-    svg.classList.add('overview-panning')
-  })
-  svg.addEventListener('pointermove', (event) => {
-    if (!drag) return
-    const rect = svg.getBoundingClientRect()
-    const s = viewState(svg)
-    if(axis){
-      const width=rect.width*(axis.plot.right-axis.plot.left)/axis.original.width
-      const height=rect.height*(axis.plot.bottom-axis.plot.top)/axis.original.height
-      axisSetView(svg,axis,axisPanWindow(axis.view,event.clientX-drag.x,event.clientY-drag.y,width,height,axis.kind==='volcano'))
-    }else setView(svg,panPlotBounds(s.view,s.base,event.clientX-drag.x,event.clientY-drag.y,rect.width,rect.height))
-    drag = { x: event.clientX, y: event.clientY }
-  })
-  const finish = () => { drag = null; svg.classList.remove('overview-panning') }
-  svg.addEventListener('pointerup', finish)
-  svg.addEventListener('pointercancel', finish)
-  svg.addEventListener('dblclick', () => resetPlotZoom(svg))
-  svg.addEventListener('keydown', (event) => {
-    if (event.key === '+' || event.key === '=') { event.preventDefault(); changePlotZoom(svg, 0.8) }
-    else if (event.key === '-') { event.preventDefault(); changePlotZoom(svg, 1.25) }
-    else if (event.key === '0') { event.preventDefault(); resetPlotZoom(svg) }
+  svg.dataset.interactiveOverview='true'
+  const plot=axis?axis.plot:null
+  return bindPlotNavigation(svg,{
+    plot,
+    zoom:(factor,ax,ay)=>changePlotZoom(svg,factor,ax,axis?1-ay:ay),
+    reset:()=>resetPlotZoom(svg),
+    pan:(dx,dy)=>{
+      const rect=svg.getBoundingClientRect()
+      if(axis){
+        const w=rect.width*(axis.plot.right-axis.plot.left)/axis.original.width
+        const h=rect.height*(axis.plot.bottom-axis.plot.top)/axis.original.height
+        axisSetView(svg,axis,axisPanWindow(axis.view,dx,dy,w,h,axis.kind==='volcano'))
+      }else{
+        const state=viewState(svg)
+        setView(svg,panPlotBounds(state.view,state.base,dx,dy,rect.width,rect.height))
+      }
+    },
+    box:b=>{
+      if(axis){
+        const v=axis.view
+        const next={x:v.x+b.x0*v.width,y:v.y+(1-b.y1)*v.height,
+          width:(b.x1-b.x0)*v.width,height:axis.kind==='volcano'?(b.y1-b.y0)*v.height:1}
+        if(next.width>=1/16&&next.height>=1/16)axisSetView(svg,axis,next)
+      }else{
+        const state=viewState(svg),next=boxZoomView(state.view,b)
+        if(next&&next.width>=state.base.width/PLOT_ZOOM_MAX)setView(svg,next)
+      }
+    }
   })
 }
 
@@ -491,13 +479,10 @@ function plotExportControls(svg, key, { zoom = false } = {}) {
   actions.className = 'results-plot-tools'
   actions.setAttribute('role','group')
   actions.setAttribute('aria-label',`${RESULT_NAMES[key] || key} plot controls`)
-  if (zoom) {
-    const controls = [
-      ['Zoom +','Zoom into the chart',() => changePlotZoom(svg, 0.75)],
-      ['Zoom −','Zoom out of the chart',() => changePlotZoom(svg, 1.35)],
-      ['Reset','Show the whole chart',() => resetPlotZoom(svg)],
-    ]
-    controls.forEach(([label,title,action]) => actions.appendChild(makeButton(label,title,action)))
+  if(zoom){
+    const layout=document.createElement('div')
+    layout.innerHTML=plotNavigationToolbar({compact:true})
+    actions.appendChild(layout.firstElementChild)
   }
   actions.appendChild(makeButton('SVG','Save the currently viewed plot as a vector image',() => downloadPlotSvg(svg,`4C-Insight-${key}-plot`)))
   actions.appendChild(makeButton('PNG','Save the currently viewed plot as a high-resolution image',() => downloadPlotPng(svg,`4C-Insight-${key}-plot`)))
@@ -518,8 +503,12 @@ export function bindOverviewInteractions(root, result, onExpand = null) {
     const svg = card.querySelector('svg.overview-svg')
     const tools = card.querySelector('.overview-card-tools')
     if (svg) {
-      attachPanAndZoom(svg)
-      if (tools && !tools.querySelector('.results-plot-tools')) tools.appendChild(plotExportControls(svg,key,{zoom:true}))
+      card.dataset.plotNavRoot='true'
+      const navigation=attachPanAndZoom(svg)
+      if (tools && !tools.querySelector('.results-plot-tools')) {
+        tools.appendChild(plotExportControls(svg,key,{zoom:true}))
+        bindPlotToolbar(card,navigation)
+      }
     }
     const expand = card.querySelector('[data-overview-expand]')
     if (expand) expand.addEventListener('click',() => {

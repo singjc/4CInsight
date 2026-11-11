@@ -1,3 +1,4 @@
+import {bindPlotNavigation, bindPlotToolbar, plotNavigationToolbar, boxZoomDomain, boxZoomView, attachStaticSvgNavigation, attachTableHeatmapNavigation, PLOT_ZOOM_MAX} from './plot-navigation.js?v=0.22.8'
 import { readIntegrativeMetadataColumns, validIntegrativeIdentityRoles } from './integrative-metadata-columns.js?v=0.22.8'
 import { readLocalSession, saveLocalSession, saveLocalResult, readLocalResults, readStoredSources, listStoredSourceIds, saveStoredSource, removeStoredSources, clearLocalSession, recoverSourceFile, validLocalSession } from './local-session.js?v=0.22.8'
 import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workflow.js?v=0.22.8'
@@ -1675,12 +1676,7 @@ function exclusionRuleView(prefix, title, enabled, column, selectedValues, colum
 }
 
 function plotControls(plotId) {
-  return `<div class="plot-toolbar" role="toolbar" aria-label="Plot zoom controls">
-    <button type="button" class="plot-tool-button" data-plot-id="${plotId}" data-plot-action="out" aria-label="Zoom out">−</button>
-    <button type="button" class="plot-tool-button" data-plot-id="${plotId}" data-plot-action="fit">Fit</button>
-    <button type="button" class="plot-tool-button" data-plot-id="${plotId}" data-plot-action="in" aria-label="Zoom in">+</button>
-    <span class="plot-toolbar-hint">Ctrl/⌘ + wheel zooms plot coordinates · drag to pan</span>
-  </div>`
+  return `<div class="plot-toolbar" data-plot-navigation="${plotId}">${plotNavigationToolbar({compact:false})}</div>`
 }
 
 function plotLegend(plotId, caseLabel, controlLabel) {
@@ -1735,7 +1731,7 @@ function pcaSvg(pca, plotId, caseLabel, controlLabel) {
     return `<circle class="${klass}" data-plot-group="${group}" data-point-index="${index}" data-x="${Number(point.x)}" data-y="${Number(point.y)}" data-sample-id="${escapeHtml(point.sample_id)}" cx="${x}" cy="${y}" r="4.2"><title>${escapeHtml(point.sample_id)} · ${escapeHtml(point.group)} · subject ${escapeHtml(point.subject)} · ${escapeHtml(pca.x_label)} ${formatNumber(point.x)} · ${escapeHtml(pca.y_label)} ${formatNumber(point.y)}</title></circle><text class="scatter-point-label" data-plot-group="${group}" data-point-label="${index}" x="${Number(x)+7}" y="${Number(y)-6}" style="display:none">${escapeHtml(point.sample_id)}</text>`
   }).join('')
   const clipId = `${plotId}-clip`
-  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-kind="pca" data-width="${width}" data-height="${height}" data-pad="${pad}" data-min-x="${minX}" data-max-x="${maxX}" data-min-y="${minY}" data-max-y="${maxY}">
+  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-nav-root="true" data-plot-kind="pca" data-width="${width}" data-height="${height}" data-pad="${pad}" data-min-x="${minX}" data-max-x="${maxX}" data-min-y="${minY}" data-max-y="${maxY}">
     ${plotControls(plotId)}
     <div class="plot-scroll interactive-plot-scroll coordinate-plot"><svg class="science-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(pca.name)}">
       <defs><clipPath id="${clipId}"><rect x="${pad}" y="${pad}" width="${width-pad*2}" height="${height-pad*2}"/></clipPath></defs>
@@ -1786,7 +1782,7 @@ function volcanoSvg(analysis, plotId) {
   }).join('')
   const thresholdY = -Math.log10(fdr)
   const clipId = `${plotId}-clip`
-  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-kind="pca" data-width="${width}" data-height="${height}" data-pad="${pad}" data-min-x="${minX}" data-max-x="${maxX}" data-min-y="${minY}" data-max-y="${maxY}" data-volcano-fdr-y="${thresholdY}" data-volcano-fc="${fc}">
+  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-nav-root="true" data-plot-kind="pca" data-width="${width}" data-height="${height}" data-pad="${pad}" data-min-x="${minX}" data-max-x="${maxX}" data-min-y="${minY}" data-max-y="${maxY}" data-volcano-fdr-y="${thresholdY}" data-volcano-fc="${fc}">
     ${plotControls(plotId)}
     <div class="plot-scroll interactive-plot-scroll coordinate-plot"><svg class="science-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="Differential expression volcano plot">
       <defs><clipPath id="${clipId}"><rect x="${pad}" y="${pad}" width="${width-pad*2}" height="${height-pad*2}"/></clipPath></defs>
@@ -1821,7 +1817,7 @@ function dendrogramSvg(tree, plotId, caseLabel, controlLabel) {
     const y = sy(leaf.position)
     return `<text class="dendro-label" data-plot-group="${group}" x="${left-10}" y="${(y+3).toFixed(2)}" text-anchor="end">${escapeHtml(leaf.sample_id)}</text><circle class="${klass}" data-plot-group="${group}" cx="${left}" cy="${y.toFixed(2)}" r="2.7"><title>${escapeHtml(leaf.sample_id)} · ${escapeHtml(leaf.group)} · subject ${escapeHtml(leaf.subject)}</title></circle>`
   }).join('')
-  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-kind="dendrogram" data-width="${width}" data-height="${height}">
+  return `<div class="plot-shell" data-interactive-plot="${plotId}" data-plot-nav-root="true" data-plot-kind="dendrogram" data-width="${width}" data-height="${height}">
     ${plotControls(plotId)}
     <div class="plot-scroll dendro-scroll interactive-plot-scroll coordinate-plot"><svg class="science-plot dendrogram" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(tree.name)}">${lines}${leafMarks}<text class="plot-label" x="${(left+width-right)/2}" y="${height-6}" text-anchor="middle">${escapeHtml(tree.distance_label)} · ${escapeHtml(tree.linkage)}</text></svg></div>
     ${plotLegend(plotId, caseLabel, controlLabel)}
@@ -1986,59 +1982,50 @@ function fitPlot(shell) {
 
 function bindInteractivePlots() {
   document.querySelectorAll('[data-interactive-plot]').forEach((shell) => {
-    const viewport = shell.querySelector('.interactive-plot-scroll')
+    if(shell.dataset.plotNavigationMounted==='true')return
     const svg = shell.querySelector('.science-plot')
-    if (!viewport || !svg) return
+    if (!svg) return
     fitPlot(shell)
-
-    shell.querySelectorAll('[data-plot-action]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const action = button.dataset.plotAction
-        if (action === 'fit') fitPlot(shell)
-        else if (shell.dataset.plotKind === 'pca') pcaZoom(shell, action === 'in' ? 0.8 : 1.25)
-        else dendrogramZoom(shell, action === 'in' ? 0.8 : 1.25)
+    shell.querySelectorAll('[data-plot-group-toggle]').forEach(button=>{
+      button.addEventListener('click',()=>{
+        const group=button.dataset.plotGroupToggle
+        const hidden=button.getAttribute('aria-pressed')!=='false'
+        button.setAttribute('aria-pressed',hidden?'false':'true')
+        button.classList.toggle('is-hidden',hidden)
+        shell.querySelectorAll(`[data-plot-group="${group}"]`).forEach(mark=>{mark.style.display=hidden?'none':''})
+        if(shell.dataset.plotKind==='pca')renderPcaDomain(shell,shell._plotDomain||pcaInitialDomain(shell))
       })
     })
-
-    shell.querySelectorAll('[data-plot-group-toggle]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const group = button.dataset.plotGroupToggle
-        const visible = button.getAttribute('aria-pressed') !== 'false'
-        button.setAttribute('aria-pressed', visible ? 'false' : 'true')
-        button.classList.toggle('is-hidden', visible)
-        shell.querySelectorAll(`[data-plot-group="${group}"]`).forEach((mark) => { mark.style.display = visible ? 'none' : '' })
-      })
+    const isPca=shell.dataset.plotKind==='pca'
+    const pad=Number(shell.dataset.pad),width=Number(shell.dataset.width),height=Number(shell.dataset.height)
+    const zoom=(factor,ax=.5,ay=.5)=>isPca?pcaZoom(shell,factor,ax,ay):dendrogramZoom(shell,factor,ax,ay)
+    const pan=(dx,dy)=>{
+      if(!isPca)return dendrogramPan(shell,dx,dy,svg)
+      const bounds=svg.getBoundingClientRect()
+      return pcaPan(shell,dx*width/Math.max(1,bounds.width),dy*height/Math.max(1,bounds.height))
+    }
+    const box=b=>{
+      if(isPca){
+        const current=shell._plotDomain||pcaInitialDomain(shell)
+        const target=boxZoomDomain(current,b)
+        if(!target)return
+        // The maximum zoom is relative to the whole fitted coordinate domain.
+        const original=pcaInitialDomain(shell)
+        if((original.maxX-original.minX)/(target.maxX-target.minX)>50 ||
+           (original.maxY-original.minY)/(target.maxY-target.minY)>50)return
+        renderPcaDomain(shell,target)
+      }else{
+        const view=shell._plotViewBox||dendrogramInitialViewBox(shell)
+        const next=boxZoomView(view,b)
+        if(next&&next.width>=width/PLOT_ZOOM_MAX&&next.height>=height/PLOT_ZOOM_MAX)renderDendrogramViewBox(shell,next)
+      }
+    }
+    const controller=bindPlotNavigation(svg,{
+      plot:isPca?{left:pad,right:width-pad,top:pad,bottom:height-pad}:null,
+      zoom,pan,box,reset:()=>fitPlot(shell)
     })
-
-    viewport.addEventListener('wheel', (event) => {
-      if (!event.ctrlKey && !event.metaKey) return
-      event.preventDefault()
-      const rect = svg.getBoundingClientRect()
-      const anchorX = Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width)))
-      const anchorY = Math.min(1, Math.max(0, (event.clientY - rect.top) / Math.max(1, rect.height)))
-      const factor = event.deltaY < 0 ? 0.88 : 1.14
-      if (shell.dataset.plotKind === 'pca') pcaZoom(shell, factor, anchorX, anchorY)
-      else dendrogramZoom(shell, factor, anchorX, anchorY)
-    }, { passive: false })
-
-    let drag = null
-    viewport.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return
-      drag = { x: event.clientX, y: event.clientY }
-      viewport.setPointerCapture?.(event.pointerId)
-      viewport.classList.add('is-dragging')
-    })
-    viewport.addEventListener('pointermove', (event) => {
-      if (!drag) return
-      const dx = event.clientX - drag.x
-      const dy = event.clientY - drag.y
-      drag = { x: event.clientX, y: event.clientY }
-      if (shell.dataset.plotKind === 'pca') pcaPan(shell, dx, dy)
-      else dendrogramPan(shell, dx, dy, viewport)
-    })
-    const stopDrag = () => { drag = null; viewport.classList.remove('is-dragging') }
-    viewport.addEventListener('pointerup', stopDrag)
-    viewport.addEventListener('pointercancel', stopDrag)
+    bindPlotToolbar(shell,controller)
+    shell.dataset.plotNavigationMounted='true'
   })
 }
 
@@ -2248,6 +2235,7 @@ function bindResultsEvents() {
   document.querySelector('#export-comparison')?.addEventListener('click', () => void exportCompareResult())
   bindGlobalThresholdEvents()
   bindInteractivePlots()
+  attachStaticSvgNavigation(document)
   if (state.resultsMode === 'overview') {
     bindOverviewInteractions(document, state.compareResult, (key, expanded) => {
       const current = new Set(state.resultsExpanded)
@@ -3056,7 +3044,7 @@ function jointStructurePointSvg(result) {
     return `<circle class="joint-point" data-point-index="${i}" data-sample-id="${escapeHtml(point.observation)}" data-x="${point.x}" data-y="${point.y}" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="4.5"><title>${escapeHtml(point.observation)} · Patient: ${escapeHtml(row?.subject||'Unknown')} · Timepoint: ${escapeHtml(row?.timepoint||'Not selected')} · ${xLabel} ${formatNumber(point.x,4)} · ${yLabel} ${formatNumber(point.y,4)}</title></circle><text class="scatter-point-label" data-point-label="${i}" x="${(x+7).toFixed(2)}" y="${(y-6).toFixed(2)}" style="display:none">${escapeHtml(point.observation)}</text>`
   }).join('')
   const id='joint-ordination'
-  return `<div class="plot-shell" data-interactive-plot="${id}" data-plot-kind="pca" data-width="${width}" data-height="${height}" data-pad="${pad}" data-min-x="${minX}" data-max-x="${maxX}" data-min-y="${minY}" data-max-y="${maxY}">
+  return `<div class="plot-shell" data-interactive-plot="${id}" data-plot-nav-root="true" data-plot-kind="pca" data-width="${width}" data-height="${height}" data-pad="${pad}" data-min-x="${minX}" data-max-x="${maxX}" data-min-y="${minY}" data-max-y="${maxY}">
     ${plotControls(id)}
     <div class="plot-scroll interactive-plot-scroll coordinate-plot"><svg class="science-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="Joint unsupervised principal coordinates">
       <defs><clipPath id="${id}-clip"><rect x="${pad}" y="${pad}" width="${width-pad*2}" height="${height-pad*2}"/></clipPath></defs>
@@ -4009,6 +3997,7 @@ function bindSignificantHitEvents() {
       .catch(error => { state.error = error instanceof Error ? error.message : String(error); render() })
   })
   bindInteractivePlots()
+  attachStaticSvgNavigation(document)
 }
 
 
@@ -4619,6 +4608,7 @@ function bindCompareEvents() {
   document.querySelector('#export-comparison')?.addEventListener('click', () => void exportCompareResult())
   bindGlobalThresholdEvents()
   bindInteractivePlots()
+  attachStaticSvgNavigation(document)
 
   if (
     state.qcConfig.metadataId &&
@@ -5096,6 +5086,8 @@ function render() {
   if (state.tab === 'docs') bindDocsEvents()
   if (state.tab === 'settings') bindSettingsEvents()
   enhanceTables()
+  attachStaticSvgNavigation(main)
+  attachTableHeatmapNavigation(main)
   renderSystemInfo()
   scheduleLocalSessionSave()
   document.querySelector('#system-chip')?.addEventListener('click', () => { state.tab = 'settings'; render() })

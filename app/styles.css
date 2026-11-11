@@ -1025,3 +1025,33 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .integrative-sample-metadata dl{display:grid;grid-template-columns:minmax(115px,35%) minmax(0,1fr);gap:6px 12px;margin:8px 0 0;font-size:.8rem}
 .integrative-sample-metadata dt{font-weight:650;color:#304463;overflow-wrap:anywhere}
 .integrative-sample-metadata dd{margin:0;overflow-wrap:anywhere}
+
+/* Uniform navigation for plots that support a spatial viewport. */
+.plot-nav-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:5px;padding:6px 8px;background:#fbfcff;border-bottom:1px solid #e4e9f3}
+.plot-nav-button{background:#fff;border:1px solid #cfdaea;border-radius:6px;padding:5px 8px;font:600 11px system-ui,sans-serif;color:#304563;min-height:29px;cursor:pointer}
+.plot-nav-button:hover{background:#edf3ff}
+.plot-nav-button.is-active,.plot-nav-button[aria-pressed="true"]{background:#e7eeff;border-color:#5576df;color:#173eae}
+.plot-nav-button:focus-visible{outline:2px solid #3159d9;outline-offset:2px}
+.plot-nav-hint{font-size:10px;color:#53667f;flex:1 1 160px}
+.plot-navigation-enabled{cursor:grab;touch-action:pan-y;user-select:none}
+.plot-navigation-enabled[data-plot-mode="box"]{cursor:crosshair}
+.plot-navigation-enabled[data-plot-mode="pan"]:active{cursor:grabbing}
+.plot-navigation-selection{fill:rgba(59,103,229,.15);stroke:#2d5cdb;stroke-width:1.5;stroke-dasharray:5 3;vector-effect:non-scaling-stroke;pointer-events:none}
+.plot-navigation-point-label{fill:#243852;font-weight:650;font-family:system-ui,sans-serif;paint-order:stroke;stroke:#fff;stroke-linejoin:round;pointer-events:none}
+.integrative-interactive-scatter .plot-nav-toolbar{margin:5px 0 8px}
+.plot-shell .plot-toolbar{padding:0;border-bottom:0}
+.plot-shell .plot-toolbar .plot-nav-toolbar{width:100%;box-sizing:border-box}
+.overview-card-tools .plot-nav-toolbar{padding:2px 0;background:transparent;border:0}
+.bio-feature-plot .plot-nav-toolbar,.bio-native-plot .plot-nav-toolbar,.longitudinal-dendrogram-scroll .plot-nav-toolbar,.i2-heatmap-scroll .plot-nav-toolbar{margin-bottom:5px}
+.joint-heatmap-toolbar .secondary-button.is-active,.joint-heatmap-toolbar [aria-pressed="true"]{background:#e7eeff;border-color:#5274df;color:#183c9e}
+#joint-heatmap-matrix{cursor:crosshair;touch-action:pan-y}
+.joint-heatmap-viewer:has(#joint-heatmap-mode-pan[aria-pressed="true"]) #joint-heatmap-matrix{cursor:grab}
+@media(max-width:680px){.plot-nav-toolbar{gap:4px;padding:6px}.plot-nav-button{font-size:10px}.plot-nav-hint{flex-basis:100%}}
+
+/* Table heatmap: adjust display cell size only; retain every measured value. */
+.significant-heatmap{--plot-heatmap-cell:15px;--plot-heatmap-header:88px}
+.significant-heatmap .heatmap-cell{width:var(--plot-heatmap-cell);min-width:var(--plot-heatmap-cell);height:var(--plot-heatmap-cell)}
+.significant-heatmap .heatmap-sample-head{width:var(--plot-heatmap-cell);min-width:var(--plot-heatmap-cell);height:var(--plot-heatmap-header)}
+.significant-heatmap .heatmap-annotation-label,.significant-heatmap .heatmap-group-cell{top:var(--plot-heatmap-header)}
+.significant-heatmap .heatmap-group-cell{width:var(--plot-heatmap-cell);min-width:var(--plot-heatmap-cell)}
+.plot-navigation-table-selection{position:fixed;z-index:9990;pointer-events:none;border:2px dashed #3159d9;background:rgba(49,89,217,.13);box-sizing:border-box}

@@ -28,7 +28,7 @@ test('joint scatter shows sample counts, positive-inertia labels, patient inspec
    {observation:'sample2',x:3,y:4,cluster:2,annotation:''}],
   coverage:[{observation:'sample<1>',cluster:1,patient:'person<1>',timepoint:'V1'}]}
  const html=integrativeScatterMarkup(report,[.412,.213])
- for(const text of ['41.2% of positive inertia','21.3% of positive inertia','Cluster 2: 2 observations','data-integrative-point','data-scatter-inspector','data-scatter-action="in"','Inspect distant plotted observations','distinct patients','Patient: person&lt;1&gt;'])assert.ok(html.includes(text),text)
+ for(const text of ['41.2% of positive inertia','21.3% of positive inertia','Cluster 2: 2 observations','data-integrative-point','data-scatter-inspector','data-plot-nav-action="in"','Inspect distant plotted observations','distinct patients','Patient: person&lt;1&gt;'])assert.ok(html.includes(text),text)
  assert.ok(html.includes('sample&lt;1&gt;'))
  assert.doesNotMatch(html,/<1>|person<1>/)
  assert.equal(typeof bindIntegrativeScatter,'function')

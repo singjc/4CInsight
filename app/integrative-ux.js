@@ -1,3 +1,4 @@
+import {bindPlotNavigation, bindPlotToolbar, plotNavigationToolbar, PLOT_ZOOM_MAX} from './plot-navigation.js?v=0.22.8'
 /** Integrative Overview presentation only. Does not fit, label, or change scientific results.
  * All data comes from completed validated local analyses.
  */
@@ -91,8 +92,8 @@ export function integrativeScatterMarkup(report,axes=[],escape=defaultEscape,for
   const xMean=pts.reduce((sum,p)=>sum+p.x,0)/pts.length,yMean=pts.reduce((sum,p)=>sum+p.y,0)/pts.length
   const farthest=pts.map((p,i)=>({p,i,score:(p.x-xMean)**2+(p.y-yMean)**2})).sort((a,b)=>b.score-a.score||a.i-b.i).slice(0,5)
   const farthestTable=farthest.map(({p,i})=>`<tr><td>${escape(p.observation)}</td><td>${escape(p.cluster)}</td><td>${escape(format(p.x,3))}</td><td>${escape(format(p.y,3))}</td><td><button type="button" class="secondary-button" data-scatter-pick="${i}">Inspect</button></td></tr>`).join('')
-  return `<div class="bio-scatter integrative-interactive-scatter" data-integrative-scatter="true">
-    <div class="integrative-plot-tools" role="group" aria-label="Zoom and pan the joint ordination"><button type="button" data-scatter-action="in">Zoom in</button><button type="button" data-scatter-action="out">Zoom out</button><button type="button" data-scatter-action="fit">Reset view</button><small>Drag to pan. Sample IDs appear when they do not overlap.</small></div>
+  return `<div class="bio-scatter integrative-interactive-scatter" data-integrative-scatter="true" data-plot-nav-root="true">
+    ${plotNavigationToolbar()}
     <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Joint principal coordinates plot with sample IDs on zoom"><defs><clipPath id="integrative-scatter-clip"><rect x="${pad}" y="${pad}" width="${width-2*pad}" height="${height-2*pad}" /></clipPath></defs>
       <rect x="${pad}" y="${pad}" width="${width-2*pad}" height="${height-2*pad}" fill="#fff" stroke="#e3e8f1"/>
       <g data-scatter-clip="true" clip-path="url(#integrative-scatter-clip)"><g data-scatter-points="true">${circles}</g></g>
@@ -114,7 +115,7 @@ export function bindIntegrativeScatter(root,onInspect=null) {
   const labels=[...wrap.querySelectorAll('[data-integrative-label]')]
   const inspector=wrap.querySelector('[data-scatter-inspector]'),status=wrap.querySelector('[data-scatter-inspection]')
   const pad=49,w=650,h=365,plotW=w-2*pad,plotH=h-2*pad
-  let zoom=1,panX=0,panY=0,drag=null
+  let zoom=1,panX=0,panY=0
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,v))
   function update(){
     const halfX=(zoom-1)*plotW/2,halfY=(zoom-1)*plotH/2
@@ -122,10 +123,30 @@ export function bindIntegrativeScatter(root,onInspect=null) {
     const tx=(pad+plotW/2)*(1-zoom)+panX,ty=(pad+plotH/2)*(1-zoom)+panY
     grp.setAttribute('transform',`translate(${tx.toFixed(3)} ${ty.toFixed(3)}) scale(${zoom.toFixed(3)})`)
     const occupied=[]
+    // Spatial buckets keep dense overlapping samples unlabelled without
+    // quadratic all-pairs checks on large cohorts.
+    const neighbors=new Map(),bucketW=27,bucketH=17
+    const coords=points.map((point,i)=>({
+      i,x:Number(point.getAttribute('cx'))*zoom+tx,
+      y:Number(point.getAttribute('cy'))*zoom+ty,
+    }))
+    for(const entry of coords){
+      const key=`${Math.floor(entry.x/bucketW)},${Math.floor(entry.y/bucketH)}`
+      if(!neighbors.has(key))neighbors.set(key,[])
+      neighbors.get(key).push(entry)
+    }
     labels.forEach((label,i)=>{
       label.style.display='none'
       if(zoom<2) return
-      const p=points[i],x=Number(p.getAttribute('cx'))*zoom+tx,y=Number(p.getAttribute('cy'))*zoom+ty
+      const p=points[i],{x,y}=coords[i]
+      const cx=Math.floor(x/bucketW),cy=Math.floor(y/bucketH)
+      let crowded=false
+      for(let a=-1;a<=1&&!crowded;a++)for(let b=-1;b<=1&&!crowded;b++){
+        for(const q of neighbors.get(`${cx+a},${cy+b}`)||[]){
+          if(q.i!==i&&Math.abs(q.x-x)<bucketW&&Math.abs(q.y-y)<bucketH){crowded=true;break}
+        }
+      }
+      if(crowded)return
       const name=p.dataset.observation||''
       const len=Math.min(170,Math.max(22,name.length*6.3)),left=x+8,top=y-15
       if(x<pad||x>w-pad||y<pad||y>h-pad||left+len>w-pad)return
@@ -138,17 +159,29 @@ export function bindIntegrativeScatter(root,onInspect=null) {
       label.style.display='inline'
     })
   }
-  wrap.querySelectorAll('[data-scatter-action]').forEach(button=>button.addEventListener('click',()=>{
-    const a=button.dataset.scatterAction
-    if(a==='fit'){zoom=1;panX=0;panY=0}else{
-      const factor=a==='in'?1.8:1/1.8
-      zoom=clamp(zoom*factor,1,12);panX*=zoom/Math.max(1,zoom/factor);panY*=zoom/Math.max(1,zoom/factor)
-    }
+  const reset=()=>{zoom=1;panX=0;panY=0;update()}
+  function zoomAt(factor,ax=.5,ay=.5){
+    const next=clamp(zoom*factor,1,PLOT_ZOOM_MAX)
+    const actual=next/zoom
+    panX=panX*actual+(pad+ax*plotW-(pad+plotW/2))*(1-actual)
+    panY=panY*actual+(pad+ay*plotH-(pad+plotH/2))*(1-actual)
+    zoom=next;update()
+  }
+  function boxAt(b){
+    const x=(b.x0+b.x1)/2,y=(b.y0+b.y1)/2
+    const current=zoom
+    zoomAt(1/Math.max(b.x1-b.x0,b.y1-b.y0),x,y)
+    if(zoom===current)return
+    panX+=(pad+plotW/2)-(pad+x*plotW)
+    panY+=(pad+plotH/2)-(pad+y*plotH)
     update()
-  }))
-  svg.addEventListener('pointerdown',event=>{if(event.button!==0||zoom<=1)return;drag={x:event.clientX,y:event.clientY};svg.setPointerCapture?.(event.pointerId)})
-  svg.addEventListener('pointermove',event=>{if(!drag)return;const rect=svg.getBoundingClientRect();panX+=(event.clientX-drag.x)*w/Math.max(1,rect.width);panY+=(event.clientY-drag.y)*h/Math.max(1,rect.height);drag={x:event.clientX,y:event.clientY};update()})
-  const release=()=>{drag=null};svg.addEventListener('pointerup',release);svg.addEventListener('pointercancel',release)
+  }
+  const navigation=bindPlotNavigation(svg,{
+    plot:{left:pad,right:w-pad,top:pad,bottom:h-pad},
+    zoom:(factor,x,y)=>zoomAt(1/factor,x,y),reset,box:boxAt,
+    pan:(dx,dy)=>{const rect=svg.getBoundingClientRect();panX+=dx*w/Math.max(1,rect.width);panY+=dy*h/Math.max(1,rect.height);update()}
+  })
+  bindPlotToolbar(wrap,navigation)
   wrap.querySelectorAll('[data-scatter-pick]').forEach(button=>button.addEventListener('click',()=>{if(inspector){inspector.value=button.dataset.scatterPick;inspector.dispatchEvent(new Event('change'))}}))
   const selectObservation = id => {
     const index=points.findIndex(point=>point.dataset.observation===id)
