@@ -1060,3 +1060,35 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .plot-coordinate-gridline{stroke:#e8edf5;stroke-width:.7;vector-effect:non-scaling-stroke}
 .plot-coordinate-tick{font:10px system-ui,sans-serif;fill:#566982;pointer-events:none}
 .integrative-interactive-scatter .plot-coordinate-tick{font-size:10px;fill:#566982}
+
+/* Guided post-fit biological interpretation. Read-only data products and navigation. */
+.biological-next-steps{scroll-margin-top:18px}
+.biological-next-steps .card-heading{align-items:start;margin-bottom:12px}
+.bio-next-steps-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0 18px}
+.bio-next-step{border:1px solid #dce5f0;border-radius:9px;padding:14px;background:#fbfcff;display:flex;flex-direction:column;align-items:flex-start;gap:8px;min-width:0}
+.bio-next-step strong{font-size:.9rem;color:#203a5a}
+.bio-next-step p{font-size:.81rem;line-height:1.5;color:#4d5e77;margin:0;overflow-wrap:anywhere}
+.bio-next-step .secondary-button{margin-top:auto;max-width:100%;white-space:normal;text-align:left}
+.bio-next-step .bio-next-caution{color:#895824}
+.bio-next-review{border-top:1px solid #e3e9f1;padding:16px 0;scroll-margin-top:14px}
+.bio-next-review h5{font-size:.93rem;margin:0 0 8px;color:#243a59}
+.bio-next-review .method-note{font-size:.82rem;line-height:1.6}
+.bio-next-evidence-table,.bio-next-feature-table{max-height:340px;overflow:auto;margin:10px 0}
+.bio-next-evidence-table table,.bio-next-feature-table table{min-width:690px;width:100%;font-size:.8rem}
+.bio-next-evidence-table th,.bio-next-feature-table th{position:sticky;top:0;z-index:1;background:#f3f6fb;text-align:left}
+.bio-next-evidence-table td,.bio-next-feature-table td{overflow-wrap:anywhere;max-width:220px}
+.bio-next-controls,.bio-next-actions{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:12px 0}
+.bio-next-controls label,.bio-next-actions label{display:grid;gap:5px;font-size:.81rem;font-weight:650;color:#344b6b;flex:1 1 155px;min-width:0}
+.bio-next-controls input,.bio-next-controls select,.bio-next-actions select{width:100%;max-width:100%;box-sizing:border-box}
+.bio-next-actions button{min-height:32px;white-space:normal;text-align:left}
+#bio-next-count,#bio-next-export-status{font-size:.79rem;color:#405a7a;margin:8px 0}
+#bio-next-export-status[hidden]{display:none}
+@media(max-width:720px){.bio-next-steps-grid{grid-template-columns:minmax(0,1fr)}.bio-next-evidence-table table,.bio-next-feature-table table{min-width:650px}}
+
+.bio-next-expand{display:block}
+.bio-next-expand>summary{font-size:.93rem;font-weight:650;cursor:pointer;color:#244375;list-style-position:inside}
+.bio-next-expand[open]>summary{margin-bottom:12px}
+.bio-next-expand>summary:focus-visible{outline:2px solid #3159d9;outline-offset:3px}
+
+.biological-next-steps .method-note{color:#50637e}
+.biological-next-steps #bio-next-export-status{background:#f3f8ff;border-left:3px solid #4268c9;padding:8px 10px;border-radius:4px}

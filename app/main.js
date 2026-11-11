@@ -4,6 +4,7 @@ import { readLocalSession, saveLocalSession, saveLocalResult, readLocalResults, 
 import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workflow.js?v=0.22.8'
 import { integrativeSummaryHtml, integrativeInfluenceHtml, integrativeScatterMarkup, bindIntegrativeScatter, integrativeClusterCautionHtml } from './integrative-ux.js?v=0.22.8'
 import { buildIntegrativeCoverage, integrativeCoverageHtml, integrativeOmittedTsv, bindIntegrativeCoverage } from './integrative-coverage.js?v=0.22.8'
+import { biologicalCandidates, biologicalCandidatesTsv, exploratoryGeneRankingTsv, biologicalNextStepsHtml, bindBiologicalFeatureExplorer } from './biological-next-steps.js?v=0.22.8'
 import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.8'
 import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.8'
 import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.8'
@@ -3548,6 +3549,7 @@ function ensureBiologicalFindings() {
   }
   return state.bioResult
 }
+let currentBiologicalNextRows=[]
 let cachedIntegrativeCoverage=null
 function currentIntegrativeCoverage(){
   const {alignmentPreview:alignment,i2StructureResult:structure,i2Result:distances}=state
@@ -3581,11 +3583,11 @@ function showIntegrativeSampleMetadata(observation){
 }
 function integrativeOverviewPanel() {
   const structure=state.i2StructureResult
-  if(!structure) return `<section class="card integrative-overview" role="tabpanel" id="integrative-overview-panel" aria-labelledby="integrative-overview-tab">
+  if(!structure) {currentBiologicalNextRows=[];return `<section class="card integrative-overview" role="tabpanel" id="integrative-overview-panel" aria-labelledby="integrative-overview-tab">
     ${state.integrativeRunError?`<div class="analysis-warnings" role="alert"><strong>Analysis stopped:</strong> ${escapeHtml(state.integrativeRunError)} <button id="integrative-review-error" type="button" class="secondary-button">Review error details</button></div>`:''}
     <h3>Your results at a glance</h3><p class="method-note">Select <strong>Run complete analysis</strong>. The application will align samples, calculate source distances, fit the joint sample structure, and prepare available biological findings. Results will appear here automatically. Review methods and exports in Details.</p>
     <p class="method-note">The analysis uses local files. It does not require Compare Groups or disease labels.</p>
-  </section>`
+  </section>`}
   const report=ensureBiologicalFindings()
   let source=null,sourceError=''
   try {
@@ -3604,6 +3606,7 @@ function integrativeOverviewPanel() {
   const eligible=m.eligible===null?'—':m.eligible.toLocaleString()
   const metadataColumns=(state.alignmentTable?.columns||[]).filter(c=>c!==state.alignmentRoles.observation)
   const coverageReport=currentIntegrativeCoverage()
+  currentBiologicalNextRows=biologicalCandidates(state.bioFeatureResult,source)
   return `<section class="card integrative-overview" role="tabpanel" id="integrative-overview-panel" aria-labelledby="integrative-overview-tab">
     <div class="card-heading"><div><h3>Main findings</h3><p>Sample coverage, joint patterns and feature associations.</p></div><span class="tag neutral">Exploratory</span></div>
     ${integrativeSummaryHtml({eligible:m.eligible,retained:m.retained,modalities:m.modalities,clusters:report?.membership?.length??null,ari:m.meanAri,escape:escapeHtml})}
@@ -3633,6 +3636,10 @@ function integrativeOverviewPanel() {
       <p class="method-note">Inspect distant samples and their metadata. Check the observations excluded from clustering, review sensitivity when a data type is removed, and examine patient-level stability. Cluster agreement does not confirm biological groups or clinical subtypes.</p>
       <button id="integrative-open-details" type="button" class="secondary-button">Open detailed results</button>
     </div>
+    ${biologicalNextStepsHtml({report,coverage:coverageReport,rna:state.bioFeatureResult,source,compare:state.compareResult,
+      thresholds:{...state.globalThresholds,omicsMinAdjustedEffect:state.hitConfig.omicsMinAdjustedEffect??0},
+      enabled:state.hitConfig.integrativeModalities||{},observationRole:state.alignmentRoles.observation,
+      patientRole:state.alignmentRoles.subject})}
   </section>`
 }
 function integrativeDetailsPanel() {
@@ -3863,6 +3870,8 @@ function bindIntegrativeRunControls(){
   document.querySelector('#integrative-overview-annotation')?.addEventListener('change',event=>{state.bioMetadataColumn=event.currentTarget.value;state.bioResult=null;state.bioError='';render()})
   bindIntegrativeScatter(document,showIntegrativeSampleMetadata)
   bindIntegrativeCoverage(document)
+  bindBiologicalFeatureExplorer(document,currentBiologicalNextRows)
+  bindBiologicalNextStepActions()
   document.querySelector('#integrative-coverage-export')?.addEventListener('click',()=>{
     const report=currentIntegrativeCoverage()
     if(report)void saveTextFile('4c-insight-joint-cohort-omissions.tsv',integrativeOmittedTsv(report))
@@ -3870,6 +3879,67 @@ function bindIntegrativeRunControls(){
   })
   document.querySelector('#integrative-open-source-details')?.addEventListener('click',()=>{state.integrativeView='details';render();document.querySelector('#biological-findings')?.scrollIntoView({block:'start'})})
   document.querySelector('#integrative-review-error')?.addEventListener('click',()=>{state.integrativeView='details';render()})
+}
+
+function bindBiologicalNextStepActions() {
+  const status=document.querySelector('#bio-next-export-status')
+  const message=text=>{if(status){status.textContent=text;status.hidden=false}}
+  function localExport(filename,content) {
+    const mime=filename.endsWith('.tsv')?'text/tab-separated-values':'application/json'
+    void saveTextFile(filename,content,mime).then(()=>message(`Export requested: ${filename}`))
+      .catch(error=>message(`Could not save: ${error instanceof Error?error.message:String(error)}`))
+  }
+  document.querySelectorAll('[data-bio-next]').forEach(button=>button.addEventListener('click',()=>{
+    const action=button.dataset.bioNext
+    if(action==='coverage')document.querySelector('.integrative-overview-coverage')?.scrollIntoView({block:'start'})
+    if(action==='metadata'){
+      document.querySelector('.integrative-overview-grid')?.scrollIntoView({block:'start'})
+      document.querySelector('#integrative-overview-annotation')?.focus()
+    }
+    if(action==='compare'){
+      // Group and control values must be defined by the user, not inferred from a fitted cluster.
+      state.tab='compare';render()
+    }
+    if(action==='results'&&state.compareResult){state.tab='results';state.resultsMode='overview';render()}
+    if(action==='features'){
+      const explorer=document.querySelector('#bio-next-feature-explorer')
+      if(explorer)explorer.open=true
+      explorer?.scrollIntoView({block:'start'})
+      document.querySelector('#bio-next-query')?.focus()
+    }
+    if(action==='details'){
+      state.integrativeView='details';render()
+      document.querySelector('#biological-findings')?.scrollIntoView({block:'start'})
+    }
+    if(action==='export-features')localExport('4c-insight-all-measured-postfit-associations.tsv',biologicalCandidatesTsv(currentBiologicalNextRows))
+    if(action==='export-genes'){
+      const axis=document.querySelector('#bio-next-axis')?.value||'pcoa1_spearman'
+      try{
+        const result=exploratoryGeneRankingTsv(currentBiologicalNextRows,axis)
+        if(result.total===0){message('No gene ranks are available. Check that the gene feature analysis completed.');return}
+        localExport(`4c-insight-exploratory-gene-ranks-${axis}.tsv`,result.tsv)
+        if(result.excludedDuplicateIds)message(`Export excludes ${result.excludedDuplicateIds} rows with duplicate gene identifiers. Check identifiers before enrichment.`)
+      }catch(error){message(error.message)}
+    }
+    if(action==='export-audit'){
+      const coverage=currentIntegrativeCoverage(),structure=state.i2StructureResult
+      const audit={schema:'4c-insight-biological-interpretation-audit-v1',app_version:APP_VERSION,
+        generated_at:new Date().toISOString(),status:'exploratory_not_independently_validated',
+        validation:'No held-out or independent validation was performed by this workflow',
+        fitted_cohort:{eligible:coverage?.eligible??null,retained:coverage?.retained??null,excluded:coverage?.excluded??null,
+          exclusion_reasons:coverage?.byReason??null,cluster_sizes:ensureBiologicalFindings()?.membership??[],
+          fitted_modalities:structure?.fixed_modalities??[],patient_id_column:state.alignmentRoles.subject||null,
+          observation_id_column:state.alignmentRoles.observation||null},
+        pcoa_ranking:{method:'Post-fit Spearman association; not FDR-controlled or causal',
+          feature_rows:currentBiologicalNextRows.length},
+        previous_comparison:state.compareResult?{name:state.compareResult.comparisonName||null,
+          thresholds_display_only:{...state.globalThresholds,omicsMinAdjustedEffect:state.hitConfig.omicsMinAdjustedEffect??0},
+          cohort_overlap_with_joint:'not_verified',independent_validation:false}:null,
+        pathway_enrichment:{status:'not_calculated',p_value:null,q_value:null},
+        caution:'Do not treat post-fit cluster contrasts or Spearman ranks as confirmatory differential expression.'}
+      localExport('4c-insight-interpretation-audit.json',JSON.stringify(audit,null,2)+'\n')
+    }
+  }))
 }
 
 function significantHitsView() {
