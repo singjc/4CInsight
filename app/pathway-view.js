@@ -2,6 +2,7 @@
 import {parseGeneSetsGmt,preparePathwayGenes,runPathwayEnrichment,pathwayInputSignature,pathwayResultsTsv,REACTOME_GMT_URL} from './pathway-enrichment.js?v=0.22.8'
 import {readGmtSelection,fetchDefaultReactomeGmt} from './pathway-gmt-loader.js?v=0.22.8'
 import {pathwaySelectionKey,pathwayEvidenceBanner,pathwayScoreChartHtml,inspectPathwayGenes,pathwayInspectorHtml,pathwayInspectorTsv} from './pathway-inspector.js?v=0.22.8'
+import {mountPathwayNetwork,normalizePathwayNetworkConfig} from './pathway-network.js?v=0.22.8'
 
 const esc=x=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;')
 const f=x=>typeof x==='number'&&Number.isFinite(x)?(x<0.001?x.toExponential(2):x.toFixed(3)):'—'
@@ -74,6 +75,7 @@ export function pathwayResultsHtml(report) {
     ${(!String(report.organism||'').trim()||!String(report.geneSetRelease||'').trim())?'<p class="analysis-warnings pathway-provenance-notice" role="status"><strong>Source metadata incomplete.</strong> This saved result lacks an organism or pinned gene-set release. Do not use it as a documented scientific result until you verify those fields and rerun enrichment.</p>':''}
     ${pathwayEvidenceBanner(report)}
     ${pathwayScoreChartHtml(report)}
+    <div id="pathway-network-widget" aria-label="Pathway and gene-sharing networks"></div>
     <div class="pathway-search"><label>Search pathways<input id="pathway-query" type="search" placeholder="Search pathway or gene" autocomplete="off"/></label><span id="pathway-count">${hits.length.toLocaleString()} results</span></div>
     <div class="table-scroll pathway-table"><table><thead><tr><th>Pathway</th><th>Matched genes</th><th>${report.mode==='ora'?'Selected genes':'ES'}</th><th>${report.mode==='ora'?'Fold enrichment':'Normalized ES'}</th><th>p-value</th><th>BH q-value</th><th>Leading / selected genes</th></tr></thead><tbody id="pathway-result-body"></tbody></table></div>
     <section class="pathway-gene-inspector" id="pathway-gene-inspector" aria-label="Selected pathway and exact measured genes" aria-live="polite"></section>
@@ -173,6 +175,28 @@ export function mountPathwayModule(root,{workspace,compare,exploratoryRows,onCha
       onChanged?.()
     }})
     inspectSelected(initialIndex)
+    if(report && workspace.pathwayGeneSets) {
+      try {
+        const prepared=preparePathwayGenes({compare,exploratoryRows,source:report.source,axis:config.axis})
+        if(pathwayInputSignature(prepared,workspace.pathwayGeneSets)===report.inputSignature){
+          workspace.pathwayNetworkConfig=normalizePathwayNetworkConfig(workspace.pathwayNetworkConfig)
+          mountPathwayNetwork(slot,{report,geneSets:workspace.pathwayGeneSets,input:prepared,
+            config:workspace.pathwayNetworkConfig,
+            onConfig:next=>{workspace.pathwayNetworkConfig=next;onChanged?.()},
+            onPathway:index=>{
+              const existing=slot.querySelector(`.pathway-select[data-pathway-index="${index}"]`)
+              if(existing)existing.click()
+              else if(report.results[index]){
+                workspace.pathwaySelectedKey=pathwaySelectionKey(report.results[index])
+                inspectSelected(index);onChanged?.()
+              }
+            },exportFile})
+        }
+      }catch(error){
+        const target=slot.querySelector('#pathway-network-widget')
+        if(target)target.textContent=`Pathway network unavailable: ${error.message}`
+      }
+    }
     bind()
   }
   const getConfig=()=>Object.fromEntries([

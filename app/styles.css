@@ -1178,3 +1178,28 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .pathway-inspector-controls label { display:inline-flex; align-items:center; gap:.35rem; font-weight:650; cursor:pointer; }
 .pathway-inspector-controls span { color:var(--muted,#667085); font-variant-numeric:tabular-nums; }
 .pathway-provenance-notice { margin:.6rem 0; line-height:1.5; }
+
+/* P5: pathway/gene membership networks. Plot marker radii and labels do not scale during zoom. */
+.pathway-network { margin: 1rem 0 1.25rem; padding: 1rem; border: 1px solid var(--line,#dfe4ec); border-radius: 10px; min-width: 0; }
+.pathway-network-heading h6 { margin: 0 0 .25rem; font-size: 1rem; }
+.pathway-network-heading p { margin: 0 0 .6rem; }
+.pathway-network-controls { display: grid; grid-template-columns: repeat(auto-fit,minmax(155px,1fr)); gap: .7rem; align-items: end; margin: .6rem 0; }
+.pathway-network-controls label { min-width: 0; display: flex; flex-direction: column; gap: .22rem; font-size: .76rem; font-weight: 650; }
+.pathway-network-controls label select,.pathway-network-controls label input:not([type="checkbox"]) { min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; }
+.pathway-network-controls label.pathway-network-checkbox { flex-direction: row; align-items: center; gap: .4rem; }
+.pathway-network-advanced { margin: .4rem 0 .6rem; }
+.pathway-network-advanced summary { cursor: pointer; font-size: .82rem; font-weight: 650; }
+.pathway-network-summary { font-size: .82rem; color: var(--muted,#667085); padding: .4rem 0; }
+.pathway-network-tools,.pathway-network-export { display: flex; gap: .4rem; flex-wrap: wrap; margin: .6rem 0; }
+.pathway-network-tools [aria-pressed="true"] { border-color:#315dce; color:#315dce; background:#eaf0ff; }
+.pathway-network-canvas { width: 100%; min-height: 280px; aspect-ratio: 1000 / 570; max-height: 650px; position: relative; border: 1px solid var(--line,#dfe4ec); border-radius: 8px; overflow: hidden; touch-action: none; user-select: none; }
+.pathway-network-svg { display: block; height: 100%; width: 100%; }
+.pathway-network-svg [data-network-node]:focus { outline: none; filter: drop-shadow(0 0 3px #315dce); }
+.pathway-network-selection { position:absolute; box-sizing:border-box; border:1.5px dashed #315dce; background:rgba(49,93,206,.1); pointer-events:none; }
+.pathway-network-inspection { margin: .55rem 0; padding: .55rem .7rem; background:var(--surface-subtle,#f5f7fb); border:1px solid var(--line,#dfe4ec); border-radius:6px; font-size:.82rem; white-space:normal; overflow-wrap:anywhere; }
+@media (max-width: 640px) {
+ .pathway-network { padding: .55rem; }
+ .pathway-network-controls { grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
+ .pathway-network-tools button,.pathway-network-export button { font-size:.76rem; }
+ .pathway-network-canvas { aspect-ratio: 1.3; }
+}

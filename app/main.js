@@ -141,6 +141,7 @@ const state = {
   pathwayGeneSets: null,
   pathwayResult: null,
   pathwaySelectedKey: '',
+  pathwayNetworkConfig: {},
   pathwayLeadingOnly: false,
   pathwayStatus: '',
   bioFeatureAxis: 'pcoa1_spearman',
@@ -965,6 +966,7 @@ function localSessionUiSnapshot() {
     bioMetadataColumn: state.bioMetadataColumn, bioClusterCount: state.bioClusterCount,
     pathwayConfig: { ...state.pathwayConfig },
     pathwaySelectedKey: state.pathwaySelectedKey,
+    pathwayNetworkConfig: { ...state.pathwayNetworkConfig },
     pathwayLeadingOnly: state.pathwayLeadingOnly,
     bioFeatureAxis: state.bioFeatureAxis, bioSelectedProfile: state.bioSelectedProfile,
     bioSelectedSourceFeature: state.bioSelectedSourceFeature,
@@ -1054,6 +1056,7 @@ function applyLocalSessionUi(saved) {
   const integer = (key, min, max) => { const n = Number(saved[key]); if (Number.isInteger(n) && n >= min && n <= max) state[key] = n }
   if (saved.pathwayConfig && typeof saved.pathwayConfig === 'object') state.pathwayConfig = {...state.pathwayConfig,...saved.pathwayConfig}
   if (typeof saved.pathwaySelectedKey === 'string' && saved.pathwaySelectedKey.length <= 5000) state.pathwaySelectedKey = saved.pathwaySelectedKey
+  if (saved.pathwayNetworkConfig && typeof saved.pathwayNetworkConfig === 'object' && !Array.isArray(saved.pathwayNetworkConfig)) state.pathwayNetworkConfig = {...saved.pathwayNetworkConfig}
   if (typeof saved.pathwayLeadingOnly === 'boolean') state.pathwayLeadingOnly = saved.pathwayLeadingOnly
   integer('bioClusterCount', 2, 12); integer('i2MinViews', 2, 7); integer('i2bParallelWorkers', 1, 3)
   if (saved.i2StructureSelection && typeof saved.i2StructureSelection === 'object') state.i2StructureSelection = { ...saved.i2StructureSelection }
@@ -3918,7 +3921,7 @@ function bindIntegrativeRunControls(){
   bindBiologicalFeatureExplorer(document,currentBiologicalNextRows)
   mountPathwayModule(document,{workspace:state,compare:state.compareResult,exploratoryRows:pathwaysSavedGeneRows(),
     onChanged:scheduleLocalSessionSave,
-    exportFile:(filename,content)=>void saveTextFile(filename,content,filename.endsWith('.tsv')?'text/tab-separated-values':'application/json')
+    exportFile:(filename,content)=>void saveTextFile(filename,content,filename.endsWith('.tsv')?'text/tab-separated-values':filename.endsWith('.svg')?'image/svg+xml':'application/json')
       .catch(error=>{state.pathwayStatus=`Pathway export failed: ${error.message}`})})
   bindBiologicalNextStepActions()
   document.querySelector('#integrative-coverage-export')?.addEventListener('click',()=>{
