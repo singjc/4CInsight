@@ -1055,3 +1055,8 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .significant-heatmap .heatmap-annotation-label,.significant-heatmap .heatmap-group-cell{top:var(--plot-heatmap-header)}
 .significant-heatmap .heatmap-group-cell{width:var(--plot-heatmap-cell);min-width:var(--plot-heatmap-cell)}
 .plot-navigation-table-selection{position:fixed;z-index:9990;pointer-events:none;border:2px dashed #3159d9;background:rgba(49,89,217,.13);box-sizing:border-box}
+
+/* Coordinate-only scatter navigation; fixed frame, ticks and marker size. */
+.plot-coordinate-gridline{stroke:#e8edf5;stroke-width:.7;vector-effect:non-scaling-stroke}
+.plot-coordinate-tick{font:10px system-ui,sans-serif;fill:#566982;pointer-events:none}
+.integrative-interactive-scatter .plot-coordinate-tick{font-size:10px;fill:#566982}

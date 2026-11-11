@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
 import {
-  normalizePlotBox,boxZoomDomain,boxZoomView,bindPlotNavigation,plotNavigationToolbar,
+  normalizePlotBox,boxZoomDomain,boxZoomView,bindPlotNavigation,bindCoordinateScatter,plotNavigationToolbar,
 } from '../plot-navigation.js'
 import {completeWindow,zoomHeatmapWindow,panHeatmapWindow} from '../joint-heatmap-viewer.js'
 
@@ -43,7 +43,7 @@ test('all figure toolbars expose wheel zoom, pan, box zoom and reset actions',()
   const html=plotNavigationToolbar()
   for(const token of ['data-plot-nav-action="in"','data-plot-nav-action="out"','data-plot-nav-action="fit"',
     'data-plot-nav-mode="pan"','data-plot-nav-mode="box"','Scroll over plot','double-click'])assert.ok(html.includes(token),token)
-  assert.match(source('integrative-ux.js'),/bindPlotNavigation\(svg/)
+  assert.match(source('integrative-ux.js'),/bindCoordinateScatter\(svg/)
   assert.match(source('main.js'),/boxZoomDomain\(current,b\)/)
   assert.match(source('main.js'),/attachStaticSvgNavigation\(main\)/)
   assert.match(source('results-interactions.js'),/axisSetView\(svg,axis,next\)/)
@@ -110,4 +110,57 @@ test('heatmap table shares zoom mode and keeps measured cells in the DOM',()=>{
   assert.match(plot,/scale\*factor/)
   assert.match(plot,/table\.style\.setProperty\('--plot-heatmap-cell'/)
   assert.doesNotMatch(plot,/\.innerHTML\s*=\s*.*result|fetch\(|XMLHttpRequest|WebSocket/)
+})
+
+
+test('coordinate scatter zoom changes the numeric viewport, not the SVG or point sizes',()=>{
+  const oldDocument=globalThis.document
+  const element=tag=>({tagName:tag,attrs:new Map(),dataset:{},style:{},children:[],textContent:'',
+    classList:{add(){},toggle(){}},
+    setAttribute(k,v){this.attrs.set(k,String(v))},getAttribute(k){return this.attrs.get(k)||null},
+    appendChild(n){n.parentNode=this;this.children.push(n);return n},
+    insertBefore(n,p){n.parentNode=this;const i=this.children.indexOf(p);this.children.splice(i<0?this.children.length:i,0,n)},
+    replaceChildren(...nodes){this.children=nodes},querySelector(){return null},
+    addEventListener(k,f){(this.handlers||=(new Map()));const list=this.handlers.get(k)||[];list.push(f);this.handlers.set(k,list)},
+    getBoundingClientRect(){return {left:0,top:0,width:650,height:365}},closest(){return {querySelectorAll(){return []}}},
+    setPointerCapture(){},
+  })
+  globalThis.document={createElementNS(_ns,tag){return element(tag)}}
+  try{
+    const svg=element('svg');svg.setAttribute('viewBox','0 0 650 365')
+    const point=element('circle');point.setAttribute('r','4.2');point.dataset.observation='S1'
+    point.dataset.x='0';point.dataset.y='0';svg.appendChild(point)
+    const label=element('text');svg.appendChild(label)
+    const controller=bindCoordinateScatter(svg,{plot:{left:49,right:601,top:49,bottom:316},
+      domain:{minX:-5,maxX:5,minY:-2,maxY:2},marks:[{node:point,x:0,y:0,label,name:'S1'}]})
+    assert.ok(controller)
+    assert.equal(point.getAttribute('cx'),'325.000')
+    assert.equal(point.getAttribute('cy'),'182.500')
+    assert.equal(point.getAttribute('r'),'4.2')
+    const axis=svg.children.find(n=>n.getAttribute('class')==='plot-coordinate-ticks')
+    assert.ok(axis)
+    assert.equal(axis.children.filter(n=>n.tagName==='text').length,10)
+    controller.zoom(.5,.8,.5)
+    assert.equal(svg.getAttribute('viewBox'),'0 0 650 365')
+    assert.equal(point.getAttribute('r'),'4.2')
+    assert.equal(point.dataset.x,'0')
+    assert.ok(Number(point.getAttribute('cx'))<325)
+    assert.equal(controller.view.maxX-controller.view.minX,5)
+    controller.reset()
+    assert.equal(point.getAttribute('cx'),'325.000')
+    assert.equal(point.getAttribute('cy'),'182.500')
+    assert.equal(label.style.display,'none')
+  }finally{globalThis.document=oldDocument}
+})
+
+test('feature and repertoire scatter use fixed numeric axes, and no SVG-scale zoom',()=>{
+  const iux=source('integrative-ux.js')
+  const main=source('main.js')
+  const nav=source('plot-navigation.js')
+  assert.match(iux,/data-x="\$\{p\.x\}" data-y="\$\{p\.y\}"/)
+  assert.doesNotMatch(iux,/setAttribute\('transform',/)
+  assert.match(nav,/if\(isScatter\)/)
+  assert.match(nav,/bindCoordinateScatter\(svg,\{plot,domain,marks:marksWithCoords/)
+  assert.match(main,/data-coordinate-min-x="\$\{xmin\}"/)
+  assert.match(main,/data-x="\$\{p\.x\}" data-y="\$\{p\.y\}"/)
 })

@@ -3264,9 +3264,9 @@ function biologicalFeatureScatterSvg(report,profile) {
     const value=measures.get(p.observation),known=Number.isFinite(value)
     const u=known&&span>0?(value-lo)/span:known?0.5:0
     const fill=known?`rgb(${Math.round(235-199*u)},${Math.round(239-160*u)},${Math.round(250-27*u)})`:'#aeb8c9'
-    return `<circle cx="${sx(p.x).toFixed(2)}" cy="${sy(p.y).toFixed(2)}" r="4.3" fill="${fill}" stroke="#fff" stroke-width="0.7"><title>${escapeHtml(p.observation)} · ${escapeHtml(profile.feature)}: ${known?formatNumber(value,3):'Missing'} log2(TPM + 1) · PCo1 ${formatNumber(p.x,3)} · PCo2 ${formatNumber(p.y,3)}</title></circle>`
+    return `<circle data-x="${p.x}" data-y="${p.y}" cx="${sx(p.x).toFixed(2)}" cy="${sy(p.y).toFixed(2)}" r="4.3" fill="${fill}" stroke="#fff" stroke-width="0.7"><title>${escapeHtml(p.observation)} · ${escapeHtml(profile.feature)}: ${known?formatNumber(value,3):'Missing'} log2(TPM + 1) · PCo1 ${formatNumber(p.x,3)} · PCo2 ${formatNumber(p.y,3)}</title></circle>`
   }).join('')
-  return `<div class="bio-scatter bio-feature-plot"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Joint ordination colored by ${escapeHtml(profile.feature)} log2 TPM measurements"><rect x="${pad}" y="${pad}" width="${width-2*pad}" height="${height-2*pad}" fill="#fff" stroke="#e3e8f1"/>${circles}<text x="${width/2}" y="${height-9}" text-anchor="middle">Joint PCo1</text><text x="15" y="${height/2}" transform="rotate(-90 15 ${height/2})" text-anchor="middle">Joint PCo2</text></svg>
+  return `<div class="bio-scatter bio-feature-plot"><svg viewBox="0 0 ${width} ${height}" data-coordinate-min-x="${xmin}" data-coordinate-max-x="${xmax}" data-coordinate-min-y="${ymin}" data-coordinate-max-y="${ymax}" role="img" aria-label="Joint ordination colored by ${escapeHtml(profile.feature)} log2 TPM measurements"><rect x="${pad}" y="${pad}" width="${width-2*pad}" height="${height-2*pad}" fill="#fff" stroke="#e3e8f1"/>${circles}<text x="${width/2}" y="${height-9}" text-anchor="middle">Joint PCo1</text><text x="15" y="${height/2}" transform="rotate(-90 15 ${height/2})" text-anchor="middle">Joint PCo2</text></svg>
     <div class="bio-feature-legend"><span>Low ${formatNumber(lo,2)}</span><i></i><span>High ${formatNumber(hi,2)}</span><span>Gray: missing</span></div></div>`
 }
 function biologicalFindingsPanel() {
@@ -3467,9 +3467,9 @@ function sourceBiologicalPanel(){
         const value=numbers.get(p.observation),valid=Number.isFinite(value)
         const ratio=valid?(hi>lo?(value-lo)/(hi-lo):0.5):0
         const color=valid?`rgb(${Math.round(237-196*ratio)},${Math.round(240-163*ratio)},${Math.round(250-35*ratio)})`:'#bbc4d3'
-        return `<circle cx="${(pad+(p.x-xmin)/(xmax-xmin)*(w-pad*2)).toFixed(2)}" cy="${(h-pad-(p.y-ymin)/(ymax-ymin)*(h-pad*2)).toFixed(2)}" r="4.3" fill="${color}"><title>${escapeHtml(p.observation)} · ${escapeHtml(selectedProfile.feature)}: ${valid?formatNumber(value,3):'Missing'} ${escapeHtml(selectedProfile.unit)}</title></circle>`
+        return `<circle data-x="${p.x}" data-y="${p.y}" cx="${(pad+(p.x-xmin)/(xmax-xmin)*(w-pad*2)).toFixed(2)}" cy="${(h-pad-(p.y-ymin)/(ymax-ymin)*(h-pad*2)).toFixed(2)}" r="4.3" fill="${color}"><title>${escapeHtml(p.observation)} · ${escapeHtml(selectedProfile.feature)}: ${valid?formatNumber(value,3):'Missing'} ${escapeHtml(selectedProfile.unit)}</title></circle>`
       }).join('')
-      profilePlot=`<figure class="bio-native-plot"><svg viewBox="0 0 ${w} ${h}" aria-label="Fixed joint coordinates colored by measured ${escapeHtml(selectedProfile.feature)}"><rect x="${pad}" y="${pad}" width="${w-2*pad}" height="${h-2*pad}" fill="white" stroke="#e3e8f1"/>${circles}</svg><figcaption>${escapeHtml(labels[selectedProfile.modality])} · ${escapeHtml(selectedProfile.family)} · ${escapeHtml(selectedProfile.unit)} · range ${formatNumber(lo,3)}–${formatNumber(hi,3)} · gray: missing. Fixed PCoA coordinates.</figcaption></figure>`
+      profilePlot=`<figure class="bio-native-plot"><svg viewBox="0 0 ${w} ${h}" data-coordinate-min-x="${xmin}" data-coordinate-max-x="${xmax}" data-coordinate-min-y="${ymin}" data-coordinate-max-y="${ymax}" aria-label="Fixed joint coordinates colored by measured ${escapeHtml(selectedProfile.feature)}"><rect x="${pad}" y="${pad}" width="${w-2*pad}" height="${h-2*pad}" fill="white" stroke="#e3e8f1"/>${circles}</svg><figcaption>${escapeHtml(labels[selectedProfile.modality])} · ${escapeHtml(selectedProfile.family)} · ${escapeHtml(selectedProfile.unit)} · range ${formatNumber(lo,3)}–${formatNumber(hi,3)} · gray: missing. Fixed PCoA coordinates.</figcaption></figure>`
     }
   }
   const qcTable=state.alignmentTable

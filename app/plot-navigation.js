@@ -166,6 +166,131 @@ export function bindPlotToolbar(root,controller){
   }))
 }
 
+/** Reproject measured coordinates inside a fixed plot frame.
+ * This changes the visible coordinate domain, not SVG size, mark radius,
+ * axes, scientific coordinates, or fitted data. The returned controller uses
+ * the same wheel/pan/box/reset gesture contract as Results PCA/volcano.
+ */
+export function bindCoordinateScatter(svg,{plot,domain,marks=[],labels=[],showTicks=true}={}){
+  if(!svg||!plot||!domain)return null
+  const {left,right,top,bottom}=plot
+  const original={...domain}
+  const originalW=original.maxX-original.minX,originalH=original.maxY-original.minY
+  if(![left,right,top,bottom,originalW,originalH].every(finite)||right<=left||bottom<=top||originalW<=0||originalH<=0)return null
+  let view={...original}
+  const base=String(svg.getAttribute('viewBox')||'').trim().split(/[\s,]+/).map(Number)
+  const vbW=base[2],vbH=base[3]
+  if(base.length!==4||base.some(n=>!finite(n))||vbW<=0||vbH<=0)return null
+  const source=marks.map((entry,i)=>{
+    const node=entry.node||entry
+    // Source numbers are never replaced by screen coordinates.
+    const x=Number(entry.x??node?.dataset?.x),y=Number(entry.y??node?.dataset?.y)
+    return {node,x,y,label:entry.label||labels[i]||null,name:String(entry.name??node?.dataset?.observation??node?.dataset?.sampleId??node?.querySelector('title')?.textContent?.split(' · ')[0]??'')}
+  })
+  if(source.some(p=>!p.node||!finite(p.x)||!finite(p.y)))return null
+  const axis=document.createElementNS(SVG_NS,'g')
+  axis.setAttribute('class','plot-coordinate-ticks')
+  axis.setAttribute('pointer-events','none')
+  const before=svg.querySelector('[data-scatter-clip]')||source[0]?.node
+  if(before?.parentNode===svg)svg.insertBefore(axis,before)
+  else svg.appendChild(axis)
+  const create=(tag,attrs,text='')=>{
+    const n=document.createElementNS(SVG_NS,tag)
+    for(const [name,value] of Object.entries(attrs))n.setAttribute(name,String(value))
+    if(text)n.textContent=text
+    axis.appendChild(n)
+  }
+  const tickText=value=>{
+    if(Math.abs(value)<1e-12)return '0'
+    return Number(value.toPrecision(3)).toString()
+  }
+  function paint(){
+    const dw=view.maxX-view.minX,dh=view.maxY-view.minY
+    const toX=x=>left+(x-view.minX)*(right-left)/dw
+    const toY=y=>bottom-(y-view.minY)*(bottom-top)/dh
+    axis.replaceChildren()
+    if(showTicks){
+      for(let i=0;i<=4;i++){
+        const t=i/4,x=left+t*(right-left),y=bottom-t*(bottom-top)
+        create('line',{x1:x,x2:x,y1:top,y2:bottom,class:'plot-coordinate-gridline'})
+        create('line',{x1:left,x2:right,y1:y,y2:y,class:'plot-coordinate-gridline'})
+        create('text',{x,y:bottom+14,'text-anchor':'middle',class:'plot-coordinate-tick'},tickText(view.minX+t*dw))
+        create('text',{x:left-6,y:y+3,'text-anchor':'end',class:'plot-coordinate-tick'},tickText(view.minY+t*dh))
+      }
+    }
+    const rendered=source.map((p,i)=>{
+      const x=toX(p.x),y=toY(p.y)
+      const visible=x>=left&&x<=right&&y>=top&&y<=bottom
+      p.node.setAttribute('cx',x.toFixed(3))
+      p.node.setAttribute('cy',y.toFixed(3))
+      p.node.setAttribute('visibility',visible?'visible':'hidden')
+      if(p.label){p.label.style.display='none';p.label.setAttribute('x',(x+7).toFixed(3));p.label.setAttribute('y',(y-6).toFixed(3))}
+      return {p,i,x,y,visible}
+    })
+    const ratio=Math.max(originalW/dw,originalH/dh)
+    if(ratio<2)return
+    const used=[]
+    // Label only distinct screen positions, and do not write over the axes.
+    const buckets=new Map(),bucketW=27,bucketH=17
+    for(const item of rendered){
+      if(!item.visible)continue
+      const key=`${Math.floor(item.x/bucketW)},${Math.floor(item.y/bucketH)}`
+      if(!buckets.has(key))buckets.set(key,[])
+      buckets.get(key).push(item)
+    }
+    for(const item of rendered){
+      const {p,x,y}=item
+      if(!item.visible||!p.label||!p.name||used.length>=40)continue
+      const bx=Math.floor(x/bucketW),by=Math.floor(y/bucketH)
+      let crowded=false
+      for(let u=-1;u<=1&&!crowded;u++)for(let v=-1;v<=1&&!crowded;v++)for(const other of buckets.get(`${bx+u},${by+v}`)||[]){
+        if(other!==item&&Math.abs(other.x-x)<bucketW&&Math.abs(other.y-y)<bucketH){crowded=true;break}
+      }
+      const width=Math.min(170,Math.max(22,p.name.length*6.3)),lx=x+7,ly=y-15
+      if(crowded||lx+width>right||lx<left||ly<top||ly+13>bottom)continue
+      if(used.some(a=>lx<a.right+4&&lx+width+4>a.left&&ly<a.bottom+3&&ly+13>a.top-3))continue
+      used.push({left:lx,right:lx+width,top:ly,bottom:ly+13})
+      p.label.style.display='inline'
+    }
+  }
+  function change(next){
+    if(!next||![next.minX,next.maxX,next.minY,next.maxY].every(finite))return
+    const w=next.maxX-next.minX,h=next.maxY-next.minY
+    if(!(w>0&&h>0)||w>originalW+1e-10||h>originalH+1e-10||w<originalW/PLOT_ZOOM_MAX-1e-10||h<originalH/PLOT_ZOOM_MAX-1e-10)return
+    const minX=clamp(next.minX,original.minX,original.maxX-w)
+    const minY=clamp(next.minY,original.minY,original.maxY-h)
+    view={minX,maxX:minX+w,minY,maxY:minY+h}
+    paint()
+  }
+  const zoom=(factor,ax=.5,ay=.5)=>{
+    const dw=view.maxX-view.minX,dh=view.maxY-view.minY
+    const w=clamp(dw*factor,originalW/PLOT_ZOOM_MAX,originalW)
+    const h=clamp(dh*factor,originalH/PLOT_ZOOM_MAX,originalH)
+    const x=clamp(view.minX+ax*(dw-w),original.minX,original.maxX-w)
+    const y=clamp(view.minY+(1-ay)*(dh-h),original.minY,original.maxY-h)
+    change({minX:x,maxX:x+w,minY:y,maxY:y+h})
+  }
+  const pan=(dx,dy)=>{
+    const r=svg.getBoundingClientRect()
+    const pw=Math.max(1,r.width*(right-left)/vbW),ph=Math.max(1,r.height*(bottom-top)/vbH)
+    const dw=view.maxX-view.minX,dh=view.maxY-view.minY
+    const x=clamp(view.minX-dx*dw/pw,original.minX,original.maxX-dw)
+    const y=clamp(view.minY+dy*dh/ph,original.minY,original.maxY-dh)
+    change({minX:x,maxX:x+dw,minY:y,maxY:y+dh})
+  }
+  const box=b=>{
+    const next=boxZoomDomain(view,b)
+    if(!next)return
+    const w=next.maxX-next.minX,h=next.maxY-next.minY
+    if(w<originalW/PLOT_ZOOM_MAX||h<originalH/PLOT_ZOOM_MAX)return
+    change(next)
+  }
+  const reset=()=>change({...original})
+  const controller=bindPlotNavigation(svg,{plot,zoom,pan,box,reset})
+  paint()
+  return {...controller,get view(){return {...view}}}
+}
+
 // Lightweight viewport for SVG displays that have no data axis engine.
 // Keeps source SVG content untouched; annotations are generated only on zoom.
 export function attachStaticSvgNavigation(root=document){
@@ -188,6 +313,32 @@ export function attachStaticSvgNavigation(root=document){
     svg.appendChild(labelLayer)
     const marks=[...svg.querySelectorAll('circle')].filter(c=>finite(Number(c.getAttribute('cx')))&&finite(Number(c.getAttribute('cy'))))
     const isScatter=container.classList.contains('bio-native-plot')||container.classList.contains('bio-feature-plot')
+    if(isScatter){
+      // Scatter coordinates are reprojected, not enlarged through viewBox.
+      // The plot frame, axes and marker sizes stay fixed.
+      const plotRect=svg.querySelector('rect[x][y][width][height]')
+      if(!plotRect)continue
+      const plot={left:Number(plotRect.getAttribute('x')),top:Number(plotRect.getAttribute('y')),
+        right:Number(plotRect.getAttribute('x'))+Number(plotRect.getAttribute('width')),
+        bottom:Number(plotRect.getAttribute('y'))+Number(plotRect.getAttribute('height'))}
+      const numericBounds=['minX','maxX','minY','maxY'].map(key=>Number(svg.dataset[`coordinate${key[0].toUpperCase()}${key.slice(1)}`]))
+      const hasRealBounds=['minX','maxX','minY','maxY'].every((key,i)=>svg.dataset[`coordinate${key[0].toUpperCase()}${key.slice(1)}`]!==undefined&&finite(numericBounds[i]))
+      const domain=hasRealBounds?{minX:numericBounds[0],maxX:numericBounds[1],minY:numericBounds[2],maxY:numericBounds[3]}:
+        {minX:plot.left,maxX:plot.right,minY:-plot.bottom,maxY:-plot.top}
+      const marksWithCoords=marks.map(circle=>{
+        const x=hasRealBounds?Number(circle.dataset.x):Number(circle.getAttribute('cx'))
+        const y=hasRealBounds?Number(circle.dataset.y):-Number(circle.getAttribute('cy'))
+        const label=document.createElementNS(SVG_NS,'text')
+        label.setAttribute('class','plot-navigation-point-label')
+        label.setAttribute('pointer-events','none')
+        label.textContent=circle.dataset.sampleId||circle.querySelector('title')?.textContent?.split(' · ')[0]||''
+        svg.appendChild(label)
+        return {node:circle,x,y,label,name:label.textContent}
+      })
+      const controller=bindCoordinateScatter(svg,{plot,domain,marks:marksWithCoords,showTicks:hasRealBounds})
+      if(controller){bindPlotToolbar(container,controller);svg.dataset.plotNavMounted='true'}
+      continue
+    }
     function annotate(){
       labelLayer.replaceChildren()
       if(!isScatter||original.width/view.width<2||!marks.length)return
