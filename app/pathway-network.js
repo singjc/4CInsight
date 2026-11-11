@@ -148,6 +148,86 @@ export function layoutPathwayNetwork(graph,{width=1000,height=570}={}){
   return {...graph,width,height,nodes:placed,edges:edgeList}
 }
 
+/** Descriptive connected components of the *displayed* graph; never infer pathways or statistical modules. */
+export function pathwayNetworkComponents(graph){
+  const nodes=graph?.nodes||[],edges=graph?.edges||[]
+  const byId=new Map(nodes.map(n=>[n.id,n]))
+  const links=new Map(nodes.map(n=>[n.id,new Set()]))
+  for(const e of edges){
+    if(!links.has(e.source)||!links.has(e.target))continue
+    links.get(e.source).add(e.target);links.get(e.target).add(e.source)
+  }
+  const visited=new Set(),groups=[]
+  for(const start of nodes){
+    if(visited.has(start.id))continue
+    const pending=[start.id],members=[];visited.add(start.id)
+    for(let i=0;i<pending.length;i++){
+      const id=pending[i];members.push(byId.get(id))
+      for(const next of links.get(id)||[])if(!visited.has(next)){visited.add(next);pending.push(next)}
+    }
+    const memberIds=new Set(members.map(n=>n.id))
+    const pathways=members.filter(n=>n.type==='pathway').sort((a,b)=>
+      (a.q_value??Infinity)-(b.q_value??Infinity)||a.name.localeCompare(b.name))
+    const genes=members.filter(n=>n.type==='gene')
+    const visibleGenes=new Set(genes.map(n=>n.name))
+    const occurrence=new Map()
+    for(const path of pathways)for(const gene of new Set(path.genes||[])){
+      if(graph.view==='bipartite'&&!visibleGenes.has(gene))continue
+      occurrence.set(gene,(occurrence.get(gene)||0)+1)
+    }
+    const sharedGenes=[...occurrence].filter(([,count])=>count>1).map(([gene])=>gene).sort()
+    groups.push({id:members.map(n=>n.id).sort()[0],nodeIds:[...memberIds].sort(),
+      pathways:pathways.map(n=>({id:n.id,name:n.name,reportIndex:n.reportIndex,q_value:n.q_value})),
+      displayedGenes:genes.length,sharedGenes,edgeCount:edges.filter(e=>memberIds.has(e.source)&&memberIds.has(e.target)).length})
+  }
+  groups.sort((a,b)=>b.pathways.length-a.pathways.length||b.edgeCount-a.edgeCount||a.id.localeCompare(b.id))
+  return groups.map((g,i)=>({...g,number:i+1}))
+}
+
+/** Project collision-aware SVG labels into a fixed coordinate frame. Display-only geometry. */
+export function planPathwayNetworkLabels(graph,{view={cx:500,cy:285,k:1},selectedId='',selectedGene='',visibleNodeIds=null}={}){
+  const w=graph?.width||1000,h=graph?.height||570,k=num(view.k,1,1,24)
+  const cx=num(view.cx,w/2,-w*5,w*6),cy=num(view.cy,h/2,-h*5,h*6)
+  const active=visibleNodeIds?new Set(visibleNodeIds):null
+  const projected=(graph?.nodes||[]).map(n=>({node:n,x:w/2+(n.x-cx)*k,y:h/2+(n.y-cy)*k,r:radius(n,graph)}))
+    .filter(p=>p.x>-30&&p.x<w+30&&p.y>-30&&p.y<h+30)
+  const selected=n=>n.id===selectedId||(n.type==='gene'&&n.name===selectedGene)
+  const priority=projected.filter(p=>(p.node.type==='pathway'||selected(p.node))&&(!active||active.has(p.node.id)||selected(p.node)))
+    .sort((a,b)=>Number(selected(b.node))-Number(selected(a.node))||
+      (a.node.q_value??Infinity)-(b.node.q_value??Infinity)||
+      (b.node.degree??0)-(a.node.degree??0)||a.node.name.localeCompare(b.node.name))
+  const budget=k<1.5?6:k<2.5?16:k<4?28:k<7?50:85
+  const labels=[],bounds=[]
+  const intersect=(a,b,pad=2)=>a.x<b.x+b.w+pad&&a.x+a.w+pad>b.x&&a.y<b.y+b.h+pad&&a.y+a.h+pad>b.y
+  for(const p of priority){
+    if(labels.length>=budget)break
+    const short=p.node.name.length>(k<2?29:45)?p.node.name.slice(0,(k<2?26:42))+'…':p.node.name
+    const tw=short.length*6.5+5,th=16,offset=p.r+6
+    const choices=[
+      {x:p.x+offset,y:p.y-th-1},
+      {x:p.x-offset-tw,y:p.y-th-1},
+      {x:p.x-tw/2,y:p.y-offset-th},
+      {x:p.x-tw/2,y:p.y+offset+2},
+    ]
+    const box=choices.find(b=>{
+      const rect={...b,w:tw,h:th}
+      if(rect.x<4||rect.x+tw>w-4||rect.y<4||rect.y+th>h-4)return false
+      if(bounds.some(other=>intersect(rect,other,4)))return false
+      return !projected.some(q=>q.node.id!==p.node.id&&Math.max(rect.x-q.x,0,q.x-(rect.x+tw))**2+
+        Math.max(rect.y-q.y,0,q.y-(rect.y+th))**2<(q.r+3)**2)
+    })
+    if(box){bounds.push({...box,w:tw,h:th});labels.push({nodeId:p.node.id,text:short,x:box.x,y:box.y+12,box:{...box,w:tw,h:th},selected:selected(p.node)})}
+  }
+  return labels
+}
+
+export function pathwayNetworkGroupsTsv(graph){
+  const columns=['group','pathway_count','displayed_gene_nodes','edge_count','pathways','shared_measured_genes']
+  return [columns.join('\t'),...pathwayNetworkComponents(graph).map(g=>[
+    g.number,g.pathways.length,g.displayedGenes,g.edgeCount,g.pathways.map(p=>p.name).join(';'),g.sharedGenes.join(';')
+  ].map(tsv).join('\t'))].join('\n')+'\n'
+}
+
 function finiteScore(v){return valid(v)?v:null}
 function nodeColor(node,graph){
   if(node.type==='gene')return '#7787a6'
@@ -161,30 +241,32 @@ function radius(n,graph){
   return 7.5+Math.min(12,Math.sqrt(-Math.log10(q))*3)
 }
 /** Fixed-size markers and text. Zoom projects world coordinates; it does not scale the SVG. */
-export function pathwayNetworkSvg(graph,{view={cx:500,cy:285,k:1},selectedId='',selectedGene=''}={}){
+export function pathwayNetworkSvg(graph,{view={cx:500,cy:285,k:1},selectedId='',selectedGene='',visibleNodeIds=null}={}){
   const w=graph.width||1000,h=graph.height||570,k=num(view.k,1,1,24),cx=num(view.cx,w/2,-w*5,w*6),cy=num(view.cy,h/2,-h*5,h*6)
   const transform=(x,y)=>({x:w/2+(x-cx)*k,y:h/2+(y-cy)*k})
   const byId=new Map(graph.nodes.map(n=>[n.id,n]))
   const linked=new Set(selectedGene?graph.edges.filter(e=>e.gene===selectedGene).map(e=>e.source):[])
+  const active=visibleNodeIds?new Set(visibleNodeIds):null
   const edgeSvg=graph.edges.map(e=>{
     const a=byId.get(e.source),b=byId.get(e.target);if(!a||!b)return ''
     const A=transform(a.x,a.y),B=transform(b.x,b.y)
     if((A.x<-50&&B.x<-50)||(A.x>w+50&&B.x>w+50)||(A.y<-50&&B.y<-50)||(A.y>h+50&&B.y>h+50))return ''
     const emphasis=(selectedId&&(a.id===selectedId||b.id===selectedId))||(selectedGene&&(e.gene===selectedGene||linked.has(a.id)&&linked.has(b.id)))
+    const faded=active&&(!active.has(a.id)||!active.has(b.id))
     const width=graph.view==='overlap'?0.7+Math.min(3.5,(e.similarity||0)*4):.85
-    return `<line x1="${fix(A.x)}" y1="${fix(A.y)}" x2="${fix(B.x)}" y2="${fix(B.y)}" stroke="${emphasis?'#315dce':'#9aa9c3'}" stroke-opacity="${emphasis?'.95':'.34'}" stroke-width="${fix(width)}"><title>${esc(graph.view==='overlap'?`${e.overlapGenes} common genes; ${graph.config.metric} ${fix(e.similarity)}`:`Gene membership: ${e.gene}`)}</title></line>`
+    return `<line x1="${fix(A.x)}" y1="${fix(A.y)}" x2="${fix(B.x)}" y2="${fix(B.y)}" stroke="${emphasis?'#315dce':'#9aa9c3'}" stroke-opacity="${faded?'.07':emphasis?'.95':'.34'}" stroke-width="${fix(width)}"><title>${esc(graph.view==='overlap'?`${e.overlapGenes} common genes; ${graph.config.metric} ${fix(e.similarity)}`:`Gene membership: ${e.gene}`)}</title></line>`
   }).join('')
-  const annotated=graph.nodes.filter(n=>n.type==='pathway').slice(0,k>=2?graph.nodes.length:8)
-  const labels=new Set(annotated.map(n=>n.id))
   const nodeSvg=graph.nodes.map(n=>{
     const p=transform(n.x,n.y),r=radius(n,graph),selected=n.id===selectedId||n.type==='gene'&&n.name===selectedGene
     if(p.x<-r||p.x>w+r||p.y<-r||p.y>h+r)return ''
-    const label=(selected||labels.has(n.id))&&n.type==='pathway'||selected&&n.type==='gene'
     const tooltip=n.type==='pathway'?`${n.name}; BH q ${n.q_value}; ${n.genes.length} displayed-overlap genes`:`${n.name}; ${n.degree} connected pathways`
     const border=selected?'#112c69':'#ffffff'
-    return `<g data-network-node="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(tooltip)}" aria-pressed="${selected?'true':'false'}" style="cursor:pointer"><title>${esc(tooltip)}</title><circle cx="${fix(p.x)}" cy="${fix(p.y)}" r="${fix(r)}" fill="${nodeColor(n,graph)}" stroke="${border}" stroke-width="${selected?3:1.3}"/><circle cx="${fix(p.x)}" cy="${fix(p.y)}" r="${fix(Math.max(r+5,12))}" fill="transparent"/>${label?`<text x="${fix(p.x+r+4)}" y="${fix(p.y-5)}" font-size="12" fill="#172033" paint-order="stroke" stroke="#ffffff" stroke-width="3">${esc(n.name.length>36?n.name.slice(0,33)+'…':n.name)}</text>`:''}</g>`
+    const faded=active&&!active.has(n.id)&&!selected
+    return `<g data-network-node="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(tooltip)}" aria-pressed="${selected?'true':'false'}" opacity="${faded?'.18':'1'}" style="cursor:pointer"><title>${esc(tooltip)}</title><circle cx="${fix(p.x)}" cy="${fix(p.y)}" r="${fix(r)}" fill="${nodeColor(n,graph)}" stroke="${border}" stroke-width="${selected?3:1.3}"/><circle cx="${fix(p.x)}" cy="${fix(p.y)}" r="${fix(Math.max(r+5,12))}" fill="transparent"/></g>`
   }).join('')
-  return `<svg class="pathway-network-svg" role="img" aria-label="${esc(graph.view==='overlap'?'Pathways connected by shared measured genes':'Genes linked to the pathways containing them')}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg"><rect width="${w}" height="${h}" fill="#fafcff"/><g>${edgeSvg}</g><g>${nodeSvg}</g></svg>`
+  const annotations=planPathwayNetworkLabels(graph,{view,selectedId,selectedGene,visibleNodeIds})
+    .map(label=>`<text x="${fix(label.x)}" y="${fix(label.y)}" font-size="12" fill="#172033" pointer-events="none" paint-order="stroke" stroke="#ffffff" stroke-width="3">${esc(label.text)}</text>`).join('')
+  return `<svg class="pathway-network-svg" role="img" aria-label="${esc(graph.view==='overlap'?'Pathways connected by shared measured genes':'Genes linked to the pathways containing them')}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg"><rect width="${w}" height="${h}" fill="#fafcff"/><g>${edgeSvg}</g><g>${nodeSvg}</g><g class="pathway-network-labels" aria-hidden="true">${annotations}</g></svg>`
 }
 export function pathwayNetworkNodesTsv(graph){
   const columns=['node_id','node_type','name','pathway_id','BH_q','NES','fold_enrichment','gene_rank','gene_score','gene_q','gene_count','degree']
@@ -213,9 +295,11 @@ export function pathwayNetworkFitView(graph,{padding=45}={}){
 }
 function networkState(container,graph,onPathway){
   const viewport={cx:graph.width/2,cy:graph.height/2,k:1},selected={id:'',gene:''}
+  const groups=pathwayNetworkComponents(graph),groupById=new Map(groups.map(g=>[g.id,g]))
+  let focusedGroup=null
   let dragging=null,mode='pan',box=null,suppressClick=false
   const svgHolder=container.querySelector('.pathway-network-canvas')
-  function paint(){svgHolder.innerHTML=pathwayNetworkSvg(graph,{view:viewport,selectedId:selected.id,selectedGene:selected.gene})+(box?`<div class="pathway-network-selection" style="left:${fix(box.x)}%;top:${fix(box.y)}%;width:${fix(box.w)}%;height:${fix(box.h)}%"></div>`:'')}
+  function paint(){svgHolder.innerHTML=pathwayNetworkSvg(graph,{view:viewport,selectedId:selected.id,selectedGene:selected.gene,visibleNodeIds:focusedGroup?.nodeIds||null})+(box?`<div class="pathway-network-selection" style="left:${fix(box.x)}%;top:${fix(box.y)}%;width:${fix(box.w)}%;height:${fix(box.h)}%"></div>`:'')}
   const point=e=>{const bounds=svgHolder.getBoundingClientRect();return {x:((e.clientX-bounds.left)/(bounds.width||1))*graph.width,y:((e.clientY-bounds.top)/(bounds.height||1))*graph.height}}
   function focus(factor,at={x:graph.width/2,y:graph.height/2}){
     const old=viewport.k,next=clamp(old*factor,1,24);if(next===old)return
@@ -223,6 +307,27 @@ function networkState(container,graph,onPathway){
     viewport.cy+=((at.y-graph.height/2)/old)-((at.y-graph.height/2)/next)
     viewport.k=next;paint()
   }
+  const groupSelect=container.querySelector('#pathway-network-group-select')
+  const groupDetail=container.querySelector('.pathway-network-group-detail')
+  function showGroup(){
+    if(!groupDetail)return
+    if(!focusedGroup){groupDetail.textContent='Select a connected group to focus its nodes and inspect its pathways. Each group is based only on visible network edges.';return}
+    groupDetail.innerHTML=`<p><strong>Group ${focusedGroup.number}</strong> · ${focusedGroup.pathways.length} pathways · ${focusedGroup.edgeCount} edges · ${focusedGroup.sharedGenes.length} shared measured genes</p>
+      <p class="method-note">${focusedGroup.sharedGenes.length?'Shared measured genes: '+esc(focusedGroup.sharedGenes.join(', ')):'No shared genes across two displayed pathways in this group.'}</p>
+      <div class="pathway-network-group-paths">${focusedGroup.pathways.map(p=>`<button type="button" class="secondary-button" data-network-group-path="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>`
+    groupDetail.querySelectorAll('[data-network-group-path]').forEach(button=>button.addEventListener('click',()=>{
+      const node=graph.nodes.find(n=>n.id===button.dataset.networkGroupPath)
+      if(node)selectedLabel(node)
+    }))
+  }
+  groupSelect?.addEventListener('change',e=>{
+    focusedGroup=groupById.get(e.currentTarget.value)||null
+    const area=focusedGroup?graph.nodes.filter(n=>focusedGroup.nodeIds.includes(n.id)):graph.nodes
+    const fitted=pathwayNetworkFitView({...graph,nodes:area})
+    viewport.cx=fitted.cx;viewport.cy=fitted.cy;viewport.k=fitted.k
+    showGroup();paint()
+  })
+  showGroup()
   function selectedLabel(n){
     if(n.type==='pathway'){
       selected.id=n.id;selected.gene='';onPathway?.(n.reportIndex)
@@ -288,7 +393,7 @@ export function mountExpandedNetwork(slot){
   const home=slot.querySelector('.pathway-network-home')
   const stage=dialog?.querySelector('.pathway-network-modal-stage')
   if(!expand||!dialog||!home||!stage)return
-  const moved=['.pathway-network-tools','.pathway-network-canvas','.pathway-network-inspection','.pathway-network-help','.pathway-network-export']
+  const moved=['.pathway-network-tools','.pathway-network-canvas','.pathway-network-legend','.pathway-network-components','.pathway-network-inspection','.pathway-network-help','.pathway-network-export']
     .map(selector=>home.querySelector(selector)).filter(Boolean)
   let active=false
   function restore(){
@@ -335,6 +440,8 @@ export function mountPathwayNetwork(root,{report,geneSets,input,config,onConfig=
     try{graph=layoutPathwayNetwork(buildPathwayNetwork(report,geneSets,c,input));graph.reportMode=report.mode}
     catch(e){error=str(e?.message||e)}
     if(!graph){slot.innerHTML=`<p class="analysis-warnings" role="status">Pathway network unavailable: ${esc(error)}</p>`;return}
+    const groups=pathwayNetworkComponents(graph)
+    const alone=groups.filter(g=>g.pathways.length===1).length
     slot.innerHTML=`<section class="pathway-network" aria-label="Descriptive pathway networks">
       <div class="pathway-network-heading"><div><h6>Gene-sharing network</h6><p class="method-note">A descriptive graph of gene-set overlap. Lines are not protein interactions, regulatory effects, or new statistical tests.</p></div><button type="button" id="pathway-network-expand" class="secondary-button pathway-network-expand" aria-haspopup="dialog" aria-expanded="false" aria-controls="pathway-network-dialog">Expand plot</button></div>
       <div class="pathway-network-controls">
@@ -351,13 +458,24 @@ export function mountPathwayNetwork(root,{report,geneSets,input,config,onConfig=
         <label class="pathway-network-checkbox"><input id="pathway-network-hide-single" type="checkbox"${c.hideSingleGenes?' checked':''}/> Hide genes connected to one pathway</label>
         <label>Layout seed<input id="pathway-network-seed" type="number" min="1" max="4294967295" value="${c.seed}"/></label>
       </div></details>
-      <div class="pathway-network-summary" role="status">${graph.nodes.filter(n=>n.type==='pathway').length} pathways · ${graph.nodes.filter(n=>n.type==='gene').length} displayed gene nodes · ${graph.edges.length} edges. ${graph.excludedExactSets.length?graph.excludedExactSets.length+' unmatched/ambiguous GMT pathways excluded.':''}</div>
+      <div class="pathway-network-summary" role="status">${graph.nodes.filter(n=>n.type==='pathway').length} pathways · ${graph.nodes.filter(n=>n.type==='gene').length} displayed gene nodes · ${graph.edges.length} edges · ${groups.length} connected groups (${alone} one-pathway groups). ${graph.excludedExactSets.length?graph.excludedExactSets.length+' unmatched/ambiguous GMT pathways excluded.':''}</div>
       <div class="pathway-network-home">
       <div class="pathway-network-tools"><button type="button" class="secondary-button" data-network-tool="in">Zoom in</button><button type="button" class="secondary-button" data-network-tool="out">Zoom out</button><button type="button" class="secondary-button" data-network-tool="pan" aria-pressed="true">Pan</button><button type="button" class="secondary-button" data-network-tool="box" aria-pressed="false">Box zoom</button><button type="button" class="secondary-button" data-network-tool="fit">Fit nodes</button><button type="button" class="secondary-button" data-network-tool="reset">Reset</button></div>
       <div class="pathway-network-canvas" aria-label="Pathway network graph. Wheel zoom, drag to pan or box zoom. Select a node for details."></div>
+      <div class="pathway-network-legend" aria-label="Network symbols explained">
+        <strong>Network legend</strong> <span><i class="pathway-network-swatch pathway-positive" aria-hidden="true"></i> ${graph.reportMode==='ora'?'ORA pathway':'Positive NES pathway'}</span>
+        ${graph.reportMode==='ora'?'':`<span><i class="pathway-network-swatch pathway-negative" aria-hidden="true"></i> Negative NES pathway</span>`}
+        ${graph.view==='bipartite'?'<span><i class="pathway-network-swatch pathway-gene" aria-hidden="true"></i> Measured gene</span>':''}
+        <small>Larger pathway circle: lower BH q (capped). ${graph.view==='overlap'?'Thicker line: greater gene overlap.':'Line: gene belongs to pathway.'} Node positions and connected groups are descriptive, not evidence of interaction or disease mechanism.</small>
+      </div>
+      <details class="pathway-network-components"><summary>Connected groups · ${groups.length} groups, ${alone} single-pathway groups</summary>
+        <label>Focus a displayed group<select id="pathway-network-group-select"><option value="">All groups</option>${groups.map(g=>`<option value="${esc(g.id)}">Group ${g.number} · ${g.pathways.length} pathway${g.pathways.length===1?'':'s'} · ${g.edgeCount} edges</option>`).join('')}</select></label>
+        <div class="pathway-network-group-detail" aria-live="polite"></div>
+        <p class="method-note">Connected groups depend on the visible node and overlap thresholds. They are not independently tested biological modules.</p>
+      </details>
       <div class="pathway-network-inspection" role="status">Select a pathway node to inspect its genes, or select a gene node to see connected pathways.</div>
       <p class="method-note pathway-network-help">Node size reflects the pathway BH q-value. Blue and orange distinguish signed NES in ranked analysis; gene nodes are grey. The force layout is descriptive and deterministic for the saved layout seed. Display limits do not change tested pathways or the scientific results.</p>
-      <div class="pathway-network-export"><button id="pathway-network-export-nodes" class="secondary-button" type="button">Export nodes TSV</button><button id="pathway-network-export-edges" class="secondary-button" type="button">Export edges TSV</button><button id="pathway-network-export-svg" class="secondary-button" type="button">Export SVG</button><button id="pathway-network-export-json" class="secondary-button" type="button">Export network JSON</button></div>
+      <div class="pathway-network-export"><button id="pathway-network-export-nodes" class="secondary-button" type="button">Export nodes TSV</button><button id="pathway-network-export-edges" class="secondary-button" type="button">Export edges TSV</button><button id="pathway-network-export-svg" class="secondary-button" type="button">Export SVG</button><button id="pathway-network-export-json" class="secondary-button" type="button">Export network JSON</button><button id="pathway-network-export-groups" class="secondary-button" type="button">Export groups TSV</button></div>
       </div>
       <dialog class="pathway-network-dialog" id="pathway-network-dialog" aria-labelledby="pathway-network-modal-title" aria-describedby="pathway-network-modal-description">
         <div class="pathway-network-dialog-heading"><div><h6 id="pathway-network-modal-title">Expanded gene-sharing network</h6><p id="pathway-network-modal-description">${esc(graph.view==='overlap'?'Pathway overlap':'Genes and pathways')} · select nodes, zoom, pan, or export. Layout is descriptive.</p></div><div class="pathway-network-dialog-actions"><button type="button" class="secondary-button" id="pathway-network-show-genes">Inspect selected pathway</button><button type="button" class="secondary-button" id="pathway-network-close">Close plot</button></div></div>
@@ -374,6 +492,7 @@ export function mountPathwayNetwork(root,{report,geneSets,input,config,onConfig=
     slot.querySelector('#pathway-network-export-nodes')?.addEventListener('click',()=>exportFile('4c-insight-pathway-network-nodes.tsv',pathwayNetworkNodesTsv(graph)))
     slot.querySelector('#pathway-network-export-edges')?.addEventListener('click',()=>exportFile('4c-insight-pathway-network-edges.tsv',pathwayNetworkEdgesTsv(graph)))
     slot.querySelector('#pathway-network-export-json')?.addEventListener('click',()=>exportFile('4c-insight-pathway-network.json',pathwayNetworkJson(graph,report)))
+    slot.querySelector('#pathway-network-export-groups')?.addEventListener('click',()=>exportFile('4c-insight-pathway-network-groups.tsv',pathwayNetworkGroupsTsv(graph)))
     slot.querySelector('#pathway-network-export-svg')?.addEventListener('click',()=>exportFile('4c-insight-pathway-network.svg',slot.querySelector('.pathway-network-svg')?.outerHTML||''))
   }
   render()

@@ -1232,3 +1232,28 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
   .pathway-network-modal-stage { padding:.4rem; }
   .pathway-network-modal-stage .pathway-network-canvas { min-height:180px; }
 }
+
+
+/* P5.2: readable network labels, explicit symbols and descriptive component focus. */
+.pathway-network-labels { pointer-events:none; user-select:none; }
+.pathway-network-legend { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem 1rem; padding:.55rem .7rem; background:var(--surface-subtle,#f6f8fc); border:1px solid var(--line,#e0e6ef); border-radius:8px; margin:.55rem 0; font-size:.75rem; }
+.pathway-network-legend > strong { color:var(--ink,#1a263d); }
+.pathway-network-legend > span { display:inline-flex; gap:.4rem; align-items:center; white-space:nowrap; }
+.pathway-network-legend > small { flex-basis:100%; line-height:1.45; color:var(--muted,#67738a); }
+.pathway-network-swatch { display:inline-block; width:.7rem; height:.7rem; border-radius:50%; border:1px solid #fff; box-shadow:0 0 0 1px #c5d0df; flex:none; }
+.pathway-network-swatch.pathway-positive { background:#315dce; }
+.pathway-network-swatch.pathway-negative { background:#d97735; }
+.pathway-network-swatch.pathway-gene { background:#7787a6; }
+.pathway-network-components { border:1px solid var(--line,#e0e6ef); border-radius:8px; padding:.4rem .7rem; margin:.45rem 0; min-width:0; }
+.pathway-network-components > summary { cursor:pointer; font-weight:600; font-size:.8rem; }
+.pathway-network-components > label { display:flex; flex-direction:column; gap:.25rem; margin:.6rem 0; font-size:.75rem; max-width:36rem; }
+.pathway-network-components select { max-width:100%; }
+.pathway-network-group-detail { font-size:.75rem; line-height:1.45; overflow-wrap:anywhere; }
+.pathway-network-group-detail > p { margin:.4rem 0; }
+.pathway-network-group-paths { display:flex; flex-wrap:wrap; gap:.3rem; max-height:12rem; overflow:auto; }
+.pathway-network-group-paths > button { font-size:.72rem; text-align:left; max-width:min(22rem,100%); overflow-wrap:anywhere; }
+.pathway-network-modal-stage .pathway-network-legend, .pathway-network-modal-stage .pathway-network-components { flex:none; }
+@media (max-width:640px) {
+ .pathway-network-legend { gap:.4rem .65rem; padding:.4rem; font-size:.7rem; }
+ .pathway-network-components { padding:.4rem; }
+}
