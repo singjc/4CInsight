@@ -1143,3 +1143,32 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .integrative-pathways-view .pathway-panel { width: 100%; max-width: none; }
 .integrative-pathways-view .pathway-panel > h5 { margin-top: .7rem; }
 @media (max-width: 640px) { .pathway-guided-step { padding: .75rem; } .pathway-step-heading h6 { font-size: .94rem; } .pathway-guided-notice button { display: block; margin: .65rem 0 0; } }
+
+/* Pathways P3: read-only exact-gene inspector and score-scale chart. */
+.pathway-evidence-banner { border-left: 3px solid #365cdb; padding: .9rem 1rem; margin: 1rem 0; background: #f3f6ff; border-radius: 6px; color: #243353; }
+.pathway-evidence-banner p { margin: .45rem 0; font-size: .88rem; }
+.pathway-evidence-banner small { display: block; overflow-wrap: anywhere; color: #515f78; }
+.pathway-score-chart { min-width: 0; margin: 1rem 0; }
+.pathway-score-chart h6 { margin: 0 0 .45rem; }
+.pathway-chart-choice { display: grid; grid-template-columns: minmax(110px, 1.15fr) minmax(80px, 1.5fr) 60px 65px; align-items: center; gap: .5rem; width: 100%; margin: 0; padding: .35rem .45rem; border: 1px solid transparent; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; text-align: left; font: inherit; }
+.pathway-chart-choice:hover,.pathway-chart-choice.is-selected { border-color: #b6c7fa; background: #f0f4ff; }
+.pathway-chart-choice:focus-visible,.pathway-table-choice:focus-visible { outline: 2px solid #4266df; outline-offset: 2px; }
+.pathway-chart-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: .83rem; }
+.pathway-score-track { position: relative; height: 12px; border-radius: 3px; background: #edf1fa; overflow: hidden; }
+.pathway-score-track-signed::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; border-left: 1px solid #7e8a9b; }
+.pathway-score-bar { position: absolute; height: 100%; top: 0; border-radius: 3px; background: #365cdb; }
+.pathway-score-track-signed .pathway-score-bar.positive { left: 50%; }
+.pathway-score-track-signed .pathway-score-bar.negative { right: 50%; background: #dd586c; }
+.pathway-score-track:not(.pathway-score-track-signed) .pathway-score-bar { left: 0; }
+.pathway-score-value,.pathway-score-q { font-size: .75rem; text-align: right; font-variant-numeric: tabular-nums; color: #3c4c69; }
+.pathway-table-choice { border: 0; background: none; color: #254bbd; font: inherit; font-weight: 650; cursor: pointer; text-align: left; padding: .2rem; }
+.pathway-table-choice.is-selected { text-decoration: underline; }
+.pathway-gene-inspector { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line, #dfe4ec); border-radius: 9px; min-width: 0; }
+.pathway-inspector-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: .8rem; flex-wrap: wrap; }
+.pathway-inspector-heading h6 { margin: 0 0 .3rem; font-size: 1.05rem; }
+.pathway-inspector-stats { display: flex; gap: .65rem; flex-wrap: wrap; font-size: .8rem; font-weight: 650; }
+.pathway-inspector-stats span { background: #f3f6fc; border-radius: 5px; padding: .3rem .5rem; }
+.pathway-inspector-table { max-height: 390px; overflow: auto; margin: .7rem 0; }
+.pathway-inspector-table th { position: sticky; top: 0; background: #f4f6fb; z-index: 1; }
+.pathway-gene-inspector-empty { color: var(--muted, #667085); }
+@media (max-width: 680px) { .pathway-chart-choice { grid-template-columns: minmax(78px,1fr) minmax(75px,1fr) 45px 49px; gap: .25rem; } .pathway-chart-name,.pathway-score-value,.pathway-score-q { font-size: .69rem; } .pathway-gene-inspector { padding: .7rem; } }

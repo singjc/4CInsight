@@ -1,6 +1,7 @@
 /** Browser-only pathway panel. Never sends gene identifiers or GMT data to a server. */
 import {parseGeneSetsGmt,preparePathwayGenes,runPathwayEnrichment,pathwayInputSignature,pathwayResultsTsv,REACTOME_GMT_URL} from './pathway-enrichment.js?v=0.22.8'
 import {readGmtSelection,fetchDefaultReactomeGmt} from './pathway-gmt-loader.js?v=0.22.8'
+import {pathwaySelectionKey,pathwayEvidenceBanner,pathwayScoreChartHtml,inspectPathwayGenes,pathwayInspectorHtml,pathwayInspectorTsv} from './pathway-inspector.js?v=0.22.8'
 
 const esc=x=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;')
 const f=x=>typeof x==='number'&&Number.isFinite(x)?(x<0.001?x.toExponential(2):x.toFixed(3)):'—'
@@ -69,24 +70,38 @@ export function pathwayResultsHtml(report) {
     <div><small>BH q ≤ 0.05</small><strong>${qCount.toLocaleString()}</strong></div>
     <div><small>Evidence</small><strong>${report.source==='exploratory'?'Exploratory':'Defined comparison'}</strong></div></div>
     <p class="method-note"><strong>Input:</strong> ${esc(report.provenance)} · ${esc(report.geneSetFile)} · ${esc(report.organism||"Organism not recorded")} · ${esc(report.geneSetRelease||"Gene-set release not recorded")} · ${esc(report.method)}. ${esc(report.correction)}</p>
-    <h6>Leading pathways · −log10(BH q)</h6>
-    <div class="pathway-bars">${top.map(row=>`<div class="pathway-bar-row" title="${esc(row.pathway)}: q=${esc(row.q_value)}"><span>${esc(row.pathway)}</span><div class="pathway-bar-track"><div style="width:${(Math.min(15,-Math.log10(Math.max(row.q_value,1e-15)))/max*100).toFixed(2)}%"></div></div><small>${f(row.q_value)}</small></div>`).join('')}</div>
+    ${pathwayEvidenceBanner(report)}
+    ${pathwayScoreChartHtml(report)}
     <div class="pathway-search"><label>Search pathways<input id="pathway-query" type="search" placeholder="Search pathway or gene" autocomplete="off"/></label><span id="pathway-count">${hits.length.toLocaleString()} results</span></div>
     <div class="table-scroll pathway-table"><table><thead><tr><th>Pathway</th><th>Matched genes</th><th>${report.mode==='ora'?'Selected genes':'ES'}</th><th>${report.mode==='ora'?'Fold enrichment':'Normalized ES'}</th><th>p-value</th><th>BH q-value</th><th>Leading / selected genes</th></tr></thead><tbody id="pathway-result-body"></tbody></table></div>
+    <section class="pathway-gene-inspector" id="pathway-gene-inspector" aria-label="Selected pathway and exact measured genes" aria-live="polite"></section>
     ${report.warnings?.length?`<details class="pathway-warnings"><summary>Method notes and identifier warnings</summary>${report.warnings.map(w=>`<p class="method-note">${esc(w)}</p>`).join('')}</details>`:''}
   </section>`
 }
-export function bindPathwayResults(root,report) {
+export function bindPathwayResults(root,report,{selectedIndex=-1,onSelect=()=>{}}={}) {
   const query=root.querySelector('#pathway-query'),body=root.querySelector('#pathway-result-body'),count=root.querySelector('#pathway-count')
   if(!body||!query||!count)return
+  const indices=new Map((report.results||[]).map((r,i)=>[r,i]))
+  const updatePressed=()=>root.querySelectorAll('.pathway-select').forEach(button=>{
+    const active=Number(button.dataset.pathwayIndex)===selectedIndex
+    button.setAttribute('aria-pressed',String(active))
+    button.classList.toggle('is-selected',active)
+  })
+  root.querySelector('.pathway-results')?.addEventListener('click',event=>{
+    const button=event.target.closest?.('.pathway-select')
+    if(!button || !root.contains(button))return
+    const index=Number(button.dataset.pathwayIndex)
+    if(!Number.isInteger(index)||index<0||index>=report.results.length)return
+    selectedIndex=index;updatePressed();onSelect(index)
+  })
   const draw=()=>{
     const search=query.value.trim().toLocaleLowerCase()
     const rows=report.results.filter(row=>!search||row.pathway.toLocaleLowerCase().includes(search)||
       row.description.toLocaleLowerCase().includes(search)||row.leadingGenes.some(g=>g.toLocaleLowerCase().includes(search)))
     count.textContent=`${rows.length.toLocaleString()} matching pathways of ${report.results.length.toLocaleString()} tested`
-    body.innerHTML=rows.map(row=>`<tr><td><strong>${esc(row.pathway)}</strong><small>${esc(row.description)}</small></td><td>${row.overlap} / ${row.matchedSetSize}</td><td>${f(report.mode==='ora'?row.overlap:row.enrichmentScore)}</td><td>${f(report.mode==='ora'?row.foldEnrichment:row.normalizedScore)}</td><td>${f(row.p_value)}</td><td>${f(row.q_value)}</td><td title="${esc(row.leadingGenes.join(', '))}">${esc(row.leadingGenes.slice(0,12).join(', '))}${row.leadingGenes.length>12?' …':''}</td></tr>`).join('')||'<tr><td colspan="7">No pathways match your search.</td></tr>'
+    body.innerHTML=rows.map(row=>`<tr><td><button type="button" class="pathway-table-choice pathway-select" data-pathway-index="${indices.get(row)}" aria-pressed="false">${esc(row.pathway)}</button><small>${esc(row.description)}</small></td><td>${row.overlap} / ${row.matchedSetSize}</td><td>${f(report.mode==='ora'?row.overlap:row.enrichmentScore)}</td><td>${f(report.mode==='ora'?row.foldEnrichment:row.normalizedScore)}</td><td>${f(row.p_value)}</td><td>${f(row.q_value)}</td><td title="${esc(row.leadingGenes.join(', '))}">${esc(row.leadingGenes.slice(0,12).join(', '))}${row.leadingGenes.length>12?' …':''}</td></tr>`).join('')||'<tr><td colspan="7">No pathways match your search.</td></tr>'
   }
-  query.addEventListener('input',draw);draw()
+  query.addEventListener('input',draw);draw();updatePressed()
 }
 
 /** `workspace` is the existing app state; pathway sets/results are cached in browser-local results. */
@@ -122,7 +137,35 @@ export function mountPathwayModule(root,{workspace,compare,exploratoryRows,onCha
     slot.innerHTML=pathwayPanelHtml({sets:workspace.pathwayGeneSets,result:workspace.pathwayResult,
       config,status:workspace.pathwayStatus||'',compareAvailable,exploratoryAvailable,sourcePreview})
     if(optionsOpen){const options=slot.querySelector('.pathway-options');if(options)options.open=true}
-    bindPathwayResults(slot,workspace.pathwayResult||{results:[]})
+    const report=workspace.pathwayResult
+    const selected=report?.results?.findIndex(row=>pathwaySelectionKey(row)===workspace.pathwaySelectedKey)??-1
+    const initialIndex=selected<0&&report?.results?.length?0:selected
+    function inspectSelected(index){
+      const target=slot.querySelector('#pathway-gene-inspector')
+      if(!target)return
+      const row=report?.results?.[index]||null
+      let inspection={available:false,reason:'Restore the matching gene ranking and GMT to inspect this pathway.'}
+      if(row){
+        try {
+          const prepared=preparePathwayGenes({compare,exploratoryRows,source:report.source,axis:config.axis})
+          if(pathwayInputSignature(prepared,workspace.pathwayGeneSets)===report.inputSignature){
+            inspection=inspectPathwayGenes(report,row,prepared,workspace.pathwayGeneSets)
+          }
+        } catch (_error) { /* Never invent missing genes. */ }
+      }
+      target.innerHTML=pathwayInspectorHtml(report,row,inspection)
+      target.querySelector('#pathway-export-genes')?.addEventListener('click',()=>{
+        try {
+          exportFile?.('4c-insight-selected-pathway-genes.tsv',pathwayInspectorTsv(report,row,inspection))
+        }catch(error){workspace.pathwayStatus=`Pathway gene export failed: ${error.message}`}
+      })
+    }
+    bindPathwayResults(slot,report||{results:[]},{selectedIndex:initialIndex,onSelect:index=>{
+      workspace.pathwaySelectedKey=pathwaySelectionKey(report.results[index])
+      inspectSelected(index)
+      onChanged?.()
+    }})
+    inspectSelected(initialIndex)
     bind()
   }
   const getConfig=()=>Object.fromEntries([

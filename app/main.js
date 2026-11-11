@@ -140,6 +140,7 @@ const state = {
   pathwayConfig: defaultPathwayConfig(),
   pathwayGeneSets: null,
   pathwayResult: null,
+  pathwaySelectedKey: '',
   pathwayStatus: '',
   bioFeatureAxis: 'pcoa1_spearman',
   bioSelectedProfile: '',
@@ -962,6 +963,7 @@ function localSessionUiSnapshot() {
     alignmentRoles: { ...state.alignmentRoles }, alignmentColumns: [...state.alignmentColumns],
     bioMetadataColumn: state.bioMetadataColumn, bioClusterCount: state.bioClusterCount,
     pathwayConfig: { ...state.pathwayConfig },
+    pathwaySelectedKey: state.pathwaySelectedKey,
     bioFeatureAxis: state.bioFeatureAxis, bioSelectedProfile: state.bioSelectedProfile,
     bioSelectedSourceFeature: state.bioSelectedSourceFeature,
     bioInspectObservation: state.bioInspectObservation,
@@ -1049,6 +1051,7 @@ function applyLocalSessionUi(saved) {
     if (typeof saved[key] === 'string') state[key] = saved[key]
   const integer = (key, min, max) => { const n = Number(saved[key]); if (Number.isInteger(n) && n >= min && n <= max) state[key] = n }
   if (saved.pathwayConfig && typeof saved.pathwayConfig === 'object') state.pathwayConfig = {...state.pathwayConfig,...saved.pathwayConfig}
+  if (typeof saved.pathwaySelectedKey === 'string' && saved.pathwaySelectedKey.length <= 5000) state.pathwaySelectedKey = saved.pathwaySelectedKey
   integer('bioClusterCount', 2, 12); integer('i2MinViews', 2, 7); integer('i2bParallelWorkers', 1, 3)
   if (saved.i2StructureSelection && typeof saved.i2StructureSelection === 'object') state.i2StructureSelection = { ...saved.i2StructureSelection }
   if (typeof saved.i2StructureOnePerPatient === 'boolean') state.i2StructureOnePerPatient = saved.i2StructureOnePerPatient
@@ -3890,10 +3893,21 @@ function bindIntegrativeRunControls(){
   bindIntegrativePrimarySettings()
   document.querySelector('#integrative-run-complete')?.addEventListener('click',()=>void runCompleteIntegrativeAnalysis())
   document.querySelector('#integrative-stop-run')?.addEventListener('click',stopScienceWork)
-  document.querySelector('#integrative-view-overview')?.addEventListener('click',()=>{state.integrativeView='overview';render()})
+  document.querySelector('#integrative-view-overview')?.addEventListener('click',()=>{if(state.pathwayBusy)return;state.integrativeView='overview';render()})
   document.querySelector('#integrative-view-details')?.addEventListener('click',()=>{if(state.pathwayBusy)return;state.integrativeView='details';render()})
   document.querySelector('#integrative-view-pathways')?.addEventListener('click',()=>{if(state.pathwayBusy)return;state.integrativeView='pathways';render()})
   document.querySelector('#pathway-open-compare')?.addEventListener('click',()=>{if(state.pathwayBusy)return;state.tab='compare';render()})
+  document.querySelector('.integrative-tab-controls[role="tablist"]')?.addEventListener('keydown',event=>{
+    if(state.pathwayBusy)return
+    const ids=['integrative-view-overview','integrative-view-details','integrative-view-pathways']
+    const old=ids.indexOf(event.target?.id)
+    if(old<0)return
+    const next=event.key==='ArrowRight'?(old+1)%ids.length:event.key==='ArrowLeft'?(old+ids.length-1)%ids.length:event.key==='Home'?0:event.key==='End'?ids.length-1:-1
+    if(next<0)return
+    event.preventDefault()
+    document.getElementById(ids[next])?.click()
+    document.getElementById(ids[next])?.focus()
+  })
   document.querySelector('#integrative-open-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
   document.querySelector('#integrative-overview-annotation')?.addEventListener('change',event=>{state.bioMetadataColumn=event.currentTarget.value;state.bioResult=null;state.bioError='';render()})
   bindIntegrativeScatter(document,showIntegrativeSampleMetadata)
@@ -3987,6 +4001,7 @@ function significantHitsView() {
   const ready=state.alignmentSource==='draft'?Boolean(state.metadataEditor.table):Boolean(selectedFile(state.qcConfig.metadataId))
   const disabled=busy||state.busy||state.i2bBusy||state.i2Busy||state.alignmentBusy||state.mergeBusy||!ready||!integrativeSettingColumns().length||state.integrativeColumnBusy||Boolean(state.integrativeColumnError)
   const stepMarkup=steps.map(row=>`<div class="integrative-step" data-status="${escapeHtml(row.status)}"><span class="integrative-step-marker" aria-hidden="true">${messages[row.status]||'○'}</span><p><strong>${escapeHtml(row.label)}</strong><small>${escapeHtml(row.message||row.status)}</small></p></div>`).join('')
+  const overview=state.integrativeView==='overview'
   const detail=state.integrativeView==='details'
   const pathways=state.integrativeView==='pathways'
   const stepDone=steps.length>0 && steps.every(row=>['complete','skipped','warning'].includes(row.status)) && !busy
@@ -4004,7 +4019,7 @@ function significantHitsView() {
     ${busy && steps.some(x=>x.id==='sources'&&x.status==='running')?`<div class="integrative-live-progress"><strong>Processing local source files</strong><progress id="integrative-live-source-bar" max="${Math.max(1,sourceProgressSummary(state.i2bProgressRows).total)}" value="${sourceProgressSummary(state.i2bProgressRows).completed}" aria-label="Source file processing progress"></progress><p id="integrative-live-source-status" role="status">${escapeHtml(state.i2bProgress||'Starting source workers')}</p></div>`:''}
     ${state.integrativeRunError?`<div class="analysis-warnings" role="alert"><strong>Analysis stopped:</strong> ${escapeHtml(state.integrativeRunError)}. Open Details to see the stage report and source errors.</div>`:''}
     <div class="integrative-tab-controls" role="tablist" aria-label="Integrative analysis results">
-      <button id="integrative-view-overview" type="button" role="tab" aria-controls="integrative-overview-panel" aria-selected="${!detail}" ${!detail?'tabindex="0"':'tabindex="-1"'}>Overview</button>
+      <button id="integrative-view-overview" type="button" role="tab" aria-controls="integrative-overview-panel" aria-selected="${overview}" ${overview?'tabindex="0"':'tabindex="-1"'}>Overview</button>
       <button id="integrative-view-details" type="button" role="tab" aria-controls="integrative-details-panel" aria-selected="${detail}" ${detail?'tabindex="0"':'tabindex="-1"'}>Details</button>
       <button id="integrative-view-pathways" type="button" role="tab" aria-controls="integrative-pathways-panel" aria-selected="${pathways}" ${pathways?'tabindex="0"':'tabindex="-1"'}>Pathways</button>
     </div></section>
