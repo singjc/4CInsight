@@ -1,5 +1,6 @@
 /** Browser-only pathway panel. Never sends gene identifiers or GMT data to a server. */
 import {parseGeneSetsGmt,preparePathwayGenes,runPathwayEnrichment,pathwayInputSignature,pathwayResultsTsv,REACTOME_GMT_URL} from './pathway-enrichment.js?v=0.22.8'
+import {readGmtSelection,fetchDefaultReactomeGmt} from './pathway-gmt-loader.js?v=0.22.8'
 
 const esc=x=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;')
 const f=x=>typeof x==='number'&&Number.isFinite(x)?(x<0.001?x.toExponential(2):x.toFixed(3)):'—'
@@ -12,7 +13,10 @@ export function pathwayPanelHtml({sets,result,config={},status='',compareAvailab
     <h5>Run pathway enrichment on this device</h5>
     <p class="method-note">This tool calculates pathway p-values and Benjamini–Hochberg q-values. It uses gene IDs from a local GMT file. <strong>No source data or gene list is uploaded.</strong> Gene-set matching uses uppercase exact identifiers. It does not convert Ensembl IDs to gene symbols.</p>
     <div class="pathway-grid">
-      <label>Gene-set file (GMT)<input type="file" id="pathway-gmt" accept=".gmt,.txt,text/plain,text/tab-separated-values" aria-label="Import local GMT gene-set file"/></label>
+      <div class="pathway-gmt-picker"><button type="button" class="secondary-button" id="pathway-default">Download &amp; use default Reactome</button>
+        <p class="method-note">Get the current Reactome GMT ZIP after you click. The browser downloads and reads only the gene-set file; it does not upload your samples or gene scores.</p>
+        <a href="${REACTOME_GMT_URL}" target="_blank" rel="noopener noreferrer">Download Reactome ZIP manually</a></div>
+      <label>Or upload custom gene sets (GMT or ZIP)<input type="file" id="pathway-gmt" accept=".gmt,.txt,.zip,.gmt.zip,application/zip,text/plain,text/tab-separated-values" aria-label="Upload custom GMT or GMT ZIP gene sets"/></label>
       <div class="pathway-set-summary"><strong>${nSets?nSets.toLocaleString()+' gene sets':'No gene sets imported'}</strong><span>${nSets?esc(sets.filename):'Download a GMT file or use one you have.'}</span></div>
       <label>Gene-set organism (user verified)<input id="pathway-organism" type="text" maxlength="120" value="${esc(c.organism)}" placeholder="e.g. Homo sapiens"/></label>
       <label>Gene-set release / date<input id="pathway-release" type="text" maxlength="120" value="${esc(c.release)}" placeholder="e.g. 2026-10"/></label>
@@ -20,7 +24,7 @@ export function pathwayPanelHtml({sets,result,config={},status='',compareAvailab
       <label>Test method<select id="pathway-mode"><option value="ora"${selected('ora',c.mode)}>Over-representation (ORA)</option><option value="ranked"${selected('ranked',c.mode)}>Ranked gene-label permutation</option></select></label>
       <label>PCoA axis (exploratory only)<select id="pathway-axis"${c.source==='compare'?' disabled':''}><option value="pcoa1_spearman"${selected('pcoa1_spearman',c.axis)}>PCo1</option><option value="pcoa2_spearman"${selected('pcoa2_spearman',c.axis)}>PCo2</option></select></label>
     </div>
-    <p class="method-note"><a href="${REACTOME_GMT_URL}" target="_blank" rel="noopener noreferrer">Download Reactome's GMT ZIP</a> from its official site. Extract the <code>.gmt</code> file and select it above. You can also use a GMT from another gene-set provider. Confirm its organism, identifier type, license, and release before analysis. The link opens only when clicked; no analysis data is sent.</p>
+    <p class="method-note">You can use a custom <code>.gmt</code> or <code>.zip</code> file. If direct Reactome download is blocked by browser cross-origin rules, use the manual link and select the downloaded ZIP here. Check the organism, gene identifier type, license, and release for every gene-set source. The current Reactome URL is not a pinned release.</p>
     <details class="pathway-options"><summary>Pathway test settings and statistical interpretation</summary>
       <div class="pathway-grid">
         <label>Minimum matched genes in pathway<input id="pathway-min-size" type="number" min="2" step="1" value="${esc(c.minSize)}"/></label>
@@ -72,6 +76,7 @@ export function bindPathwayResults(root,report) {
 export function mountPathwayModule(root,{workspace,compare,exploratoryRows,onChanged,exportFile}={}){
   const slot=root.querySelector('#pathway-analysis-widget');if(!slot)return
   const config=workspace.pathwayConfig||defaultPathwayConfig()
+  workspace.pathwayConfig=config
   const compareAvailable=Boolean(compare?.gene?.analysis?.tests?.length)
   const exploratoryAvailable=Boolean(exploratoryRows?.some(r=>r.kind==='gene'))
   // Active-session results must not be shown with a changed gene ranking or GMT.
@@ -104,14 +109,37 @@ export function mountPathwayModule(root,{workspace,compare,exploratoryRows,onCha
     ['direction','pathway-direction'],['permutations','pathway-permutations'],['seed','pathway-seed'],
     ['organism','pathway-organism'],['release','pathway-release']].map(([key,id])=>[key,slot.querySelector('#'+id)?.value]))
   function bind(){
+    // Keep the gene-set provenance and result cache consistent for both import paths.
+    function acceptGeneSets(parsed, message) {
+      workspace.pathwayGeneSets=parsed
+      workspace.pathwayResult=null
+      config.organism='' // The organism of a new GMT must be verified, not inherited.
+      config.release='' // A moving 'current' URL is not a pinned database release.
+      workspace.pathwayStatus=message+' Verify organism and gene-set release before reporting.'
+      onChanged?.();paint()
+    }
+    slot.querySelector('#pathway-default')?.addEventListener('click',async()=>{
+      const button=slot.querySelector('#pathway-default')
+      const status=slot.querySelector('#pathway-status')
+      button.disabled=true
+      if(status)status.textContent='Downloading the official Reactome GMT ZIP. No sample data is sent…'
+      try{
+        const fetched=await fetchDefaultReactomeGmt()
+        const parsed=parseGeneSetsGmt(fetched.text,fetched.filename)
+        parsed.source=`Official Reactome current GMT ZIP; retrieved ${fetched.retrievedAt} from ${fetched.url}; release not pinned`
+        acceptGeneSets(parsed,`Loaded ${parsed.imported.toLocaleString()} Reactome gene sets.`)
+      }catch(error){
+        workspace.pathwayStatus=`Default download unavailable: ${error.message}`
+        paint() // Preserve the previous gene-set selection and calculated result.
+      }
+    })
     slot.querySelector('#pathway-gmt')?.addEventListener('change',async event=>{
       const file=event.currentTarget.files?.[0];if(!file)return
       try{
-        if(/\.zip$/i.test(file.name))throw new Error('Extract the GMT file from the ZIP archive before import')
-        const parsed=parseGeneSetsGmt(await file.text(),file.name)
-        workspace.pathwayGeneSets=parsed;workspace.pathwayResult=null
-        workspace.pathwayStatus=`Loaded ${parsed.imported.toLocaleString()} gene sets. ${parsed.invalidLines?parsed.invalidLines+' invalid rows were skipped.':''}`
-        onChanged?.();paint()
+        const loaded=await readGmtSelection(file)
+        const parsed=parseGeneSetsGmt(loaded.text,loaded.filename)
+        parsed.source=`User-selected local ${loaded.archiveName?'ZIP ('+loaded.archiveName+')':'GMT'}; release and organism supplied by user`
+        acceptGeneSets(parsed,`Loaded ${parsed.imported.toLocaleString()} gene sets from ${file.name}. ${parsed.invalidLines?parsed.invalidLines+' invalid rows were skipped.':''}`)
       }catch(error){workspace.pathwayStatus=`GMT import failed: ${error.message}`;paint()}
     })
     for(const id of ['pathway-source','pathway-mode','pathway-axis','pathway-min-size','pathway-max-size','pathway-q','pathway-effect','pathway-direction','pathway-permutations','pathway-seed','pathway-organism','pathway-release']){
