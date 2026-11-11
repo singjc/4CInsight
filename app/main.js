@@ -120,6 +120,7 @@ const state = {
   hitProgress: null,
   hitResult: null,
   integrativeView: 'overview',
+  pathwayBusy: false,
   integrativeRunBusy: false,
   integrativeRunError: '',
   integrativeRunSteps: [],
@@ -944,7 +945,7 @@ function updateLocalSessionNotice(message, severity = 'info') {
 function activeSessionWorkRunning() {
   return state.busy || state.mergeBusy || state.alignmentBusy || state.i2bBusy ||
     state.i2Busy || state.i2StructureBusy || state.jointStabilityBusy ||
-    state.bioFeatureBusy || state.integrativeRunBusy
+    state.bioFeatureBusy || state.integrativeRunBusy || state.pathwayBusy
 }
 function scheduleLocalSessionSave() {
   if (!localSessionReady || localSessionRestoring || localSessionDisabled || activeSessionWorkRunning()) return
@@ -1037,7 +1038,7 @@ function queueLocalSourceCache() {
 function applyLocalSessionUi(saved) {
   if (!saved || typeof saved !== 'object') return
   if (['project', 'metadata', 'qc', 'compare', 'results', 'longitudinal', 'hits', 'history', 'docs', 'settings'].includes(saved.tab)) state.tab = saved.tab
-  if (['overview', 'details'].includes(saved.integrativeView)) state.integrativeView = saved.integrativeView
+  if (['overview', 'details', 'pathways'].includes(saved.integrativeView)) state.integrativeView = saved.integrativeView
   if (['overview', 'details'].includes(saved.resultsMode)) state.resultsMode = saved.resultsMode
   if (['active', 'draft'].includes(saved.alignmentSource)) state.alignmentSource = saved.alignmentSource
   if (saved.alignmentRoles && typeof saved.alignmentRoles === 'object') {
@@ -3653,6 +3654,20 @@ function integrativeOverviewPanel() {
       patientRole:state.alignmentRoles.subject})}
   </section>`
 }
+/** Pathways never depends on a prior Overview render or re-runs the fitted joint model. */
+function pathwaysSavedGeneRows() {
+  return biologicalCandidates(state.bioFeatureResult, null)
+}
+function integrativePathwaysPanel() {
+  const corrected=Boolean(state.compareResult?.gene?.analysis?.tests?.length)
+  const exploratory=Boolean(pathwaysSavedGeneRows().some(row=>row.kind==='gene'))
+  return `<section class="card integrative-pathways-view" role="tabpanel" id="integrative-pathways-panel" aria-labelledby="integrative-view-pathways">
+    <div class="card-heading"><div><h3>Pathway analysis</h3><p>Choose a biological question, select gene sets, then calculate and inspect pathway enrichment on this device.</p></div><span class="tag neutral">Local analysis</span></div>
+    ${!corrected?'<div class="pathway-guided-notice"><strong>No corrected gene comparison is available.</strong> Run Compare Groups for a predefined case/control analysis. <button id="pathway-open-compare" type="button" class="secondary-button">Open Compare Groups</button></div>':''}
+    ${!exploratory?'<p class="method-note">Exploratory PCoA gene rankings are not available. Run complete Integrative Analysis to prepare them.</p>':''}
+    <div id="pathway-analysis-widget"></div>
+  </section>`
+}
 function integrativeDetailsPanel() {
   return `<section role="tabpanel" id="integrative-details-panel" aria-labelledby="integrative-details-tab" class="integrative-detail-layout">
     ${integrativeRunDiagnostics()}
@@ -3876,13 +3891,15 @@ function bindIntegrativeRunControls(){
   document.querySelector('#integrative-run-complete')?.addEventListener('click',()=>void runCompleteIntegrativeAnalysis())
   document.querySelector('#integrative-stop-run')?.addEventListener('click',stopScienceWork)
   document.querySelector('#integrative-view-overview')?.addEventListener('click',()=>{state.integrativeView='overview';render()})
-  document.querySelector('#integrative-view-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
+  document.querySelector('#integrative-view-details')?.addEventListener('click',()=>{if(state.pathwayBusy)return;state.integrativeView='details';render()})
+  document.querySelector('#integrative-view-pathways')?.addEventListener('click',()=>{if(state.pathwayBusy)return;state.integrativeView='pathways';render()})
+  document.querySelector('#pathway-open-compare')?.addEventListener('click',()=>{if(state.pathwayBusy)return;state.tab='compare';render()})
   document.querySelector('#integrative-open-details')?.addEventListener('click',()=>{state.integrativeView='details';render()})
   document.querySelector('#integrative-overview-annotation')?.addEventListener('change',event=>{state.bioMetadataColumn=event.currentTarget.value;state.bioResult=null;state.bioError='';render()})
   bindIntegrativeScatter(document,showIntegrativeSampleMetadata)
   bindIntegrativeCoverage(document)
   bindBiologicalFeatureExplorer(document,currentBiologicalNextRows)
-  mountPathwayModule(document,{workspace:state,compare:state.compareResult,exploratoryRows:currentBiologicalNextRows,
+  mountPathwayModule(document,{workspace:state,compare:state.compareResult,exploratoryRows:pathwaysSavedGeneRows(),
     onChanged:scheduleLocalSessionSave,
     exportFile:(filename,content)=>void saveTextFile(filename,content,filename.endsWith('.tsv')?'text/tab-separated-values':'application/json')
       .catch(error=>{state.pathwayStatus=`Pathway export failed: ${error.message}`})})
@@ -3923,9 +3940,7 @@ function bindBiologicalNextStepActions() {
       document.querySelector('#bio-next-query')?.focus()
     }
     if(action==='pathways'){
-      const pane=document.querySelector('#bio-next-pathways')
-      if(pane)pane.open=true
-      pane?.scrollIntoView({block:'start'})
+      state.integrativeView='pathways';render()
     }
     if(action==='details'){
       state.integrativeView='details';render()
@@ -3973,6 +3988,7 @@ function significantHitsView() {
   const disabled=busy||state.busy||state.i2bBusy||state.i2Busy||state.alignmentBusy||state.mergeBusy||!ready||!integrativeSettingColumns().length||state.integrativeColumnBusy||Boolean(state.integrativeColumnError)
   const stepMarkup=steps.map(row=>`<div class="integrative-step" data-status="${escapeHtml(row.status)}"><span class="integrative-step-marker" aria-hidden="true">${messages[row.status]||'○'}</span><p><strong>${escapeHtml(row.label)}</strong><small>${escapeHtml(row.message||row.status)}</small></p></div>`).join('')
   const detail=state.integrativeView==='details'
+  const pathways=state.integrativeView==='pathways'
   const stepDone=steps.length>0 && steps.every(row=>['complete','skipped','warning'].includes(row.status)) && !busy
   const problems=steps.some(row=>['warning','failed','stopped'].includes(row.status))
   const completed=steps.filter(row=>row.status==='complete').length
@@ -3990,8 +4006,9 @@ function significantHitsView() {
     <div class="integrative-tab-controls" role="tablist" aria-label="Integrative analysis results">
       <button id="integrative-view-overview" type="button" role="tab" aria-controls="integrative-overview-panel" aria-selected="${!detail}" ${!detail?'tabindex="0"':'tabindex="-1"'}>Overview</button>
       <button id="integrative-view-details" type="button" role="tab" aria-controls="integrative-details-panel" aria-selected="${detail}" ${detail?'tabindex="0"':'tabindex="-1"'}>Details</button>
+      <button id="integrative-view-pathways" type="button" role="tab" aria-controls="integrative-pathways-panel" aria-selected="${pathways}" ${pathways?'tabindex="0"':'tabindex="-1"'}>Pathways</button>
     </div></section>
-    ${detail?integrativeDetailsPanel():integrativeOverviewPanel()}`
+    ${pathways?integrativePathwaysPanel():detail?integrativeDetailsPanel():integrativeOverviewPanel()}`
 }
 
 async function runSignificantHits() {

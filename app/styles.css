@@ -1128,3 +1128,18 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .pathway-warnings{margin:12px 0;padding:10px;background:#f9fbff;border:1px solid #e1e7f0;border-radius:7px}
 .pathway-warnings summary{font-size:.81rem;color:#2b4672;cursor:pointer}
 @media(max-width:650px){.pathway-bar-row{grid-template-columns:minmax(90px,33%) 1fr 48px;gap:4px}}
+
+/* Integrative Analysis: guided Pathways view (P1/P2; no science changes). */
+.integrative-pathways-view { min-width: 0; }
+.pathway-guided-step { border: 1px solid var(--line, #dfe4ec); border-radius: 10px; margin: 0.85rem 0; padding: 1rem; background: var(--surface, #fff); min-width: 0; }
+.pathway-step-heading { display: flex; align-items: flex-start; gap: .7rem; margin-bottom: .7rem; }
+.pathway-step-heading h6 { margin: 0 0 .3rem; font-size: 1rem; }
+.pathway-step-heading p { margin: 0; color: var(--muted, #667085); font-size: .85rem; }
+.pathway-step-index { border-radius: 50%; width: 1.9rem; height: 1.9rem; min-width: 1.9rem; display: inline-flex; align-items: center; justify-content: center; background: #e9efff; color: #264cca; font-weight: 750; }
+.pathway-guided-notice { padding: .85rem 1rem; background: #f5f8ff; border-left: 3px solid #4567d8; border-radius: 6px; margin: .8rem 0; }
+.pathway-guided-notice button { margin-left: .7rem; }
+.integrative-pathways-view .pathway-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); }
+.integrative-pathways-view .pathway-gmt-picker { min-width: 0; }
+.integrative-pathways-view .pathway-panel { width: 100%; max-width: none; }
+.integrative-pathways-view .pathway-panel > h5 { margin-top: .7rem; }
+@media (max-width: 640px) { .pathway-guided-step { padding: .75rem; } .pathway-step-heading h6 { font-size: .94rem; } .pathway-guided-notice button { display: block; margin: .65rem 0 0; } }

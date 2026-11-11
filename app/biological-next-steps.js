@@ -134,7 +134,7 @@ export function biologicalNextStepsHtml({report,coverage,rna,source,compare,thre
     <details class="bio-next-review bio-next-expand" id="bio-next-pathways"><summary>Pathway analysis and validation</summary>
       <p class="method-note">Pathway enrichment has not been calculated by the joint model. Use the local module below to calculate actual pathway statistics from a user-selected GMT. Corrected group effects and exploratory PCoA correlations are separate inputs. PCoA correlations are not differential-expression statistics.</p>
       <div class="bio-next-actions"><label>Ranked gene axis<select id="bio-next-axis"><option value="pcoa1_spearman">PCo1 Spearman</option><option value="pcoa2_spearman">PCo2 Spearman</option></select></label><button type="button" class="secondary-button" data-bio-next="export-genes">Export exploratory gene ranks (TSV)</button></div>
-      <div id="pathway-analysis-widget"></div>
+      <p class="method-note">The full pathway test is in the Pathways view. It uses your saved gene results and does not need another joint-model fit.</p><button type="button" class="secondary-button" data-bio-next="pathways">Open Pathways</button>
       <p class="method-note">Independent validation: <strong>not available</strong>. Confirm observed clinical associations in held-out patients or independent data. Avoid testing cluster differences on the same measurements used to form those clusters.</p>
       <button type="button" class="secondary-button" data-bio-next="export-audit">Export interpretation audit (JSON)</button>
     </details>

@@ -7,12 +7,27 @@ const f=x=>typeof x==='number'&&Number.isFinite(x)?(x<0.001?x.toExponential(2):x
 const selected=(value,current)=>value===current?' selected':''
 const DEFAULT_CONFIG=Object.freeze({source:'compare',mode:'ora',axis:'pcoa1_spearman',minSize:10,maxSize:500,qThreshold:0.05,effectThreshold:1,direction:'both',permutations:199,seed:20261111,organism:'',release:''})
 export function defaultPathwayConfig(){return {...DEFAULT_CONFIG}}
-export function pathwayPanelHtml({sets,result,config={},status='',compareAvailable=false,exploratoryAvailable=false}={}) {
+export function pathwayPanelHtml({sets,result,config={},status='',compareAvailable=false,exploratoryAvailable=false,sourcePreview=null}={}) {
   const c={...DEFAULT_CONFIG,...config},nSets=sets?.pathways?.length||0
+  const ready=(c.source==='compare'?compareAvailable:exploratoryAvailable)
+  const compatible=c.mode!=='ora'||c.source==='compare'
+  const canRun=nSets>0&&ready&&compatible
   return `<section class="pathway-panel" aria-label="Local pathway enrichment">
     <h5>Run pathway enrichment on this device</h5>
     <p class="method-note">This tool calculates pathway p-values and Benjamini–Hochberg q-values. It uses gene IDs from a local GMT file. <strong>No source data or gene list is uploaded.</strong> Gene-set matching uses uppercase exact identifiers. It does not convert Ensembl IDs to gene symbols.</p>
-    <div class="pathway-grid">
+    <section class="pathway-guided-step" aria-labelledby="pathway-step-question">
+      <div class="pathway-step-heading"><span class="pathway-step-index">1</span><div><h6 id="pathway-step-question">Choose your biological question</h6><p>Use a predefined case/control comparison when available, or explore associations with the fitted joint sample structure.</p></div></div>
+      <div class="pathway-grid">
+      <label>Gene-score source<select id="pathway-source"><option value="compare"${selected('compare',c.source)}>Corrected Compare Groups genes${compareAvailable?'':' (not available)'}</option><option value="exploratory"${selected('exploratory',c.source)}>Exploratory joint PCoA genes${exploratoryAvailable?'':' (not available)'}</option></select></label>
+      <label>Test method<select id="pathway-mode"><option value="ora"${selected('ora',c.mode)}>Over-representation (ORA)</option><option value="ranked"${selected('ranked',c.mode)}>Ranked gene-label permutation</option></select></label>
+      <label>PCoA axis (exploratory only)<select id="pathway-axis"${c.source==='compare'?' disabled':''}><option value="pcoa1_spearman"${selected('pcoa1_spearman',c.axis)}>PCo1</option><option value="pcoa2_spearman"${selected('pcoa2_spearman',c.axis)}>PCo2</option></select></label>
+      </div>
+      <p class="method-note">${c.source==='exploratory'?'<strong>Exploratory:</strong> PCoA gene rankings are post-fit. These tests cannot independently validate disease groups or clusters. Select Ranked enrichment.':compareAvailable?'Corrected Compare Groups gene results are available. ORA or ranked enrichment may be selected.':'No corrected gene results. Run Compare Groups first, or choose exploratory PCoA scores when available.'}</p>
+      ${c.source==='exploratory'&&c.mode==='ora'?'<p class="analysis-warnings" role="status">ORA requires corrected Compare Groups results. Choose Ranked enrichment for exploratory PCoA scores.</p>':''}
+    </section>
+    <section class="pathway-guided-step" aria-labelledby="pathway-step-genesets">
+      <div class="pathway-step-heading"><span class="pathway-step-index">2</span><div><h6 id="pathway-step-genesets">Choose a pathway database</h6><p>Download the default Reactome gene sets or upload a custom GMT or ZIP file. Both options are processed on your device.</p></div></div>
+      <div class="pathway-grid">
       <div class="pathway-gmt-picker"><button type="button" class="secondary-button" id="pathway-default">Download &amp; use default Reactome</button>
         <p class="method-note">Get the current Reactome GMT ZIP after you click. The browser downloads and reads only the gene-set file; it does not upload your samples or gene scores.</p>
         <a href="${REACTOME_GMT_URL}" target="_blank" rel="noopener noreferrer">Download Reactome ZIP manually</a></div>
@@ -20,12 +35,13 @@ export function pathwayPanelHtml({sets,result,config={},status='',compareAvailab
       <div class="pathway-set-summary"><strong>${nSets?nSets.toLocaleString()+' gene sets':'No gene sets imported'}</strong><span>${nSets?esc(sets.filename):'Download a GMT file or use one you have.'}</span></div>
       <label>Gene-set organism (user verified)<input id="pathway-organism" type="text" maxlength="120" value="${esc(c.organism)}" placeholder="e.g. Homo sapiens"/></label>
       <label>Gene-set release / date<input id="pathway-release" type="text" maxlength="120" value="${esc(c.release)}" placeholder="e.g. 2026-10"/></label>
-      <label>Gene-score source<select id="pathway-source"><option value="compare"${selected('compare',c.source)}>Corrected Compare Groups genes${compareAvailable?'':' (not available)'}</option><option value="exploratory"${selected('exploratory',c.source)}>Exploratory joint PCoA genes${exploratoryAvailable?'':' (not available)'}</option></select></label>
-      <label>Test method<select id="pathway-mode"><option value="ora"${selected('ora',c.mode)}>Over-representation (ORA)</option><option value="ranked"${selected('ranked',c.mode)}>Ranked gene-label permutation</option></select></label>
-      <label>PCoA axis (exploratory only)<select id="pathway-axis"${c.source==='compare'?' disabled':''}><option value="pcoa1_spearman"${selected('pcoa1_spearman',c.axis)}>PCo1</option><option value="pcoa2_spearman"${selected('pcoa2_spearman',c.axis)}>PCo2</option></select></label>
-    </div>
+      </div>
+    </section>
     <p class="method-note">You can use a custom <code>.gmt</code> or <code>.zip</code> file. If direct Reactome download is blocked by browser cross-origin rules, use the manual link and select the downloaded ZIP here. Check the organism, gene identifier type, license, and release for every gene-set source. The current Reactome URL is not a pinned release.</p>
-    <details class="pathway-options"><summary>Pathway test settings and statistical interpretation</summary>
+    <section class="pathway-guided-step" aria-labelledby="pathway-step-run">
+      <div class="pathway-step-heading"><span class="pathway-step-index">3</span><div><h6 id="pathway-step-run">Run and interpret</h6><p>Review the input and method. Calculations begin only when you select Run pathway analysis.</p></div></div>
+      <p class="method-note"><strong>Selected input:</strong> ${c.source==='compare'?'Corrected case/control gene results':'Exploratory PCoA gene associations'} · <strong>Method:</strong> ${c.mode==='ora'?'Over-representation analysis (ORA)':'Ranked gene-label permutation enrichment'} · <strong>Gene universe:</strong> ${sourcePreview?.genes?.toLocaleString()||'not available'} unique usable genes · <strong>Gene sets:</strong> ${nSets.toLocaleString()} loaded. The exact tested-gene background is recorded in the results.</p>
+    <details class="pathway-options"><summary>Advanced settings · thresholds, pathway sizes and permutations</summary>
       <div class="pathway-grid">
         <label>Minimum matched genes in pathway<input id="pathway-min-size" type="number" min="2" step="1" value="${esc(c.minSize)}"/></label>
         <label>Maximum matched genes in pathway<input id="pathway-max-size" type="number" min="2" step="1" value="${esc(c.maxSize)}"/></label>
@@ -37,7 +53,8 @@ export function pathwayPanelHtml({sets,result,config={},status='',compareAvailab
       </div>
       <p class="method-note"><strong>ORA:</strong> One-sided hypergeometric test. The background is every unique tested gene with a usable result, not only genes in the GMT. Selected genes require the corrected q-value and log2 group-effect thresholds. <strong>Ranked:</strong> weighted running-sum enrichment with shuffled gene labels over all available scores. Two-sided empirical p-values are corrected with BH across the tested sets. These are not phenotype permutations or the pooled FDR method of Broad GSEA. Overlapping pathways are not independent.</p>
     </details>
-    <div class="pathway-controls"><button type="button" class="primary-button" id="pathway-run" ${!nSets?'disabled':''}>Run local pathway analysis</button><button type="button" class="secondary-button" id="pathway-stop" hidden>Stop</button><button type="button" class="secondary-button" id="pathway-export"${result?'':' disabled'}>Export full pathway results (TSV)</button><button type="button" class="secondary-button" id="pathway-audit"${result?'':' disabled'}>Export method and provenance (JSON)</button></div>
+    <div class="pathway-controls"><button type="button" class="primary-button" id="pathway-run" ${!canRun?'disabled':''}>Run local pathway analysis</button><button type="button" class="secondary-button" id="pathway-stop" hidden>Stop</button><button type="button" class="secondary-button" id="pathway-export"${result?'':' disabled'}>Export full pathway results (TSV)</button><button type="button" class="secondary-button" id="pathway-audit"${result?'':' disabled'}>Export method and provenance (JSON)</button></div>
+    </section>
     <p id="pathway-status" role="status" aria-live="polite" class="pathway-status">${esc(status|| (result?`Last calculation: ${result.matchedSetCount} tested pathways from ${result.backgroundGenes} genes.`:'Import a local GMT to start.'))}</p>
     ${result?pathwayResultsHtml(result):'<p class="method-note">No pathway test has been run in this active session. Ranked PCoA results remain exploratory even after permutation testing. Independent cohort validation is still required.</p>'}
   </section>`
@@ -97,8 +114,13 @@ export function mountPathwayModule(root,{workspace,compare,exploratoryRows,onCha
   }
   function paint(){
     const optionsOpen=Boolean(slot.querySelector('.pathway-options')?.open)
+    let sourcePreview=null
+    try {
+      const prepared=preparePathwayGenes({compare,exploratoryRows,source:config.source,axis:config.axis})
+      sourcePreview={genes:prepared.rows.length}
+    } catch (_error) { sourcePreview=null }
     slot.innerHTML=pathwayPanelHtml({sets:workspace.pathwayGeneSets,result:workspace.pathwayResult,
-      config,status:workspace.pathwayStatus||'',compareAvailable,exploratoryAvailable})
+      config,status:workspace.pathwayStatus||'',compareAvailable,exploratoryAvailable,sourcePreview})
     if(optionsOpen){const options=slot.querySelector('.pathway-options');if(options)options.open=true}
     bindPathwayResults(slot,workspace.pathwayResult||{results:[]})
     bind()
@@ -153,7 +175,7 @@ export function mountPathwayModule(root,{workspace,compare,exploratoryRows,onCha
     }
     slot.querySelector('#pathway-run')?.addEventListener('click',async()=>{
       const run=slot.querySelector('#pathway-run'),stop=slot.querySelector('#pathway-stop'),status=slot.querySelector('#pathway-status')
-      const abort=new AbortController();run.disabled=true;stop.hidden=false
+      const abort=new AbortController();run.disabled=true;stop.hidden=false;workspace.pathwayBusy=true
       stop.addEventListener('click',()=>abort.abort(),{once:true})
       try{
         const input=preparePathwayGenes({compare,exploratoryRows,source:config.source,axis:config.axis})
@@ -166,6 +188,8 @@ export function mountPathwayModule(root,{workspace,compare,exploratoryRows,onCha
         workspace.pathwayStatus=`Tested ${report.matchedSetCount.toLocaleString()} gene sets; ${report.results.filter(r=>r.q_value<=0.05).length} with BH q ≤ 0.05.`
         onChanged?.()
       }catch(error){workspace.pathwayStatus=`Pathway analysis stopped or failed: ${error.message}`}
+      workspace.pathwayBusy=false
+      onChanged?.()
       paint()
     })
     slot.querySelector('#pathway-export')?.addEventListener('click',()=>{
