@@ -5,6 +5,7 @@ import { runWorkflowSteps, integratedOverviewMetrics } from './integrative-workf
 import { integrativeSummaryHtml, integrativeInfluenceHtml, integrativeScatterMarkup, bindIntegrativeScatter, integrativeClusterCautionHtml } from './integrative-ux.js?v=0.22.8'
 import { buildIntegrativeCoverage, integrativeCoverageHtml, integrativeOmittedTsv, bindIntegrativeCoverage } from './integrative-coverage.js?v=0.22.8'
 import { biologicalCandidates, biologicalCandidatesTsv, exploratoryGeneRankingTsv, biologicalNextStepsHtml, bindBiologicalFeatureExplorer } from './biological-next-steps.js?v=0.22.8'
+import {mountPathwayModule, defaultPathwayConfig} from './pathway-view.js?v=0.22.8'
 import { rankDirectSourceFeatures, inspectJointObservation, directFeatureTsv } from './source-biological-interpretation.js?v=0.22.8'
 import { modalityOverviewHtml, combinedFeatureRows, featureLollipopHtml, featuredProfiles, chosenProfile, combinedFeatureTsv } from './biological-dashboard.js?v=0.22.8'
 import { buildBiologicalFindings, findingsTsv } from './biological-findings.js?v=0.22.8'
@@ -135,6 +136,10 @@ const state = {
   bioError: '',
   bioFeatureKind: 'gene',
   bioFeatureResult: null,
+  pathwayConfig: defaultPathwayConfig(),
+  pathwayGeneSets: null,
+  pathwayResult: null,
+  pathwayStatus: '',
   bioFeatureAxis: 'pcoa1_spearman',
   bioSelectedProfile: '',
   bioSelectedSourceFeature: '',
@@ -444,6 +449,7 @@ function resetQcStateAfterInputsChange() {
   state.qcResult = null
   state.qcProgress = null
   state.compareResult = null
+  state.pathwayResult = null
   state.compareProgress = null
   state.longitudinalResult = null
   state.longitudinalProgress = null
@@ -639,6 +645,7 @@ function clearProject() {
   state.qcResult = null
   state.qcProgress = null
   state.compareResult = null
+  state.pathwayResult = null
   state.compareProgress = null
   state.longitudinalResult = null
   state.longitudinalProgress = null
@@ -792,7 +799,7 @@ function configSnapshot() {
   delete compare.transcriptMergedId
   delete longitudinal.geneMergedId
   delete longitudinal.transcriptMergedId
-  return { qc, compare, longitudinal, hit, merge: cloneJson(state.mergeSettings), thresholds: cloneJson(state.globalThresholds), fileRefs, biological: { annotationColumn: state.bioMetadataColumn, clusters: state.bioClusterCount, featureKind: state.bioFeatureKind } }
+  return { qc, compare, longitudinal, hit, merge: cloneJson(state.mergeSettings), thresholds: cloneJson(state.globalThresholds), fileRefs, pathway: cloneJson(state.pathwayConfig), biological: { annotationColumn: state.bioMetadataColumn, clusters: state.bioClusterCount, featureKind: state.bioFeatureKind } }
 }
 
 function applicationStatePayload() {
@@ -875,6 +882,7 @@ function applyConfigSnapshot(configs) {
     if (Number.isInteger(k) && k >= 2 && k <= 12) state.bioClusterCount = k
     if (['gene','transcript'].includes(configs.biological.featureKind)) state.bioFeatureKind = configs.biological.featureKind
   }
+  if (configs.pathway && typeof configs.pathway === 'object') state.pathwayConfig = { ...state.pathwayConfig, ...configs.pathway }
   if (configs.merge && typeof configs.merge === 'object') {
     for (const kind of ['gene', 'transcript']) {
       const metrics = configs.merge[kind]
@@ -906,7 +914,7 @@ const ACTIVE_RESULT_FIELDS = [
   'qcResult', 'compareResult', 'longitudinalResult', 'hitResult',
   'alignmentPreview', 'alignmentTable', 'i2ImportedViews', 'i2bDirectViews',
   'i2Result', 'i2StructureResult', 'jointStabilityResult',
-  'bioResult', 'bioFeatureResult', 'mergeReports', 'metadataInspection',
+  'bioResult', 'bioFeatureResult', 'pathwayGeneSets', 'pathwayResult', 'mergeReports', 'metadataInspection',
 ]
 let localSessionReady = false
 let localSessionRestoring = false
@@ -952,6 +960,7 @@ function localSessionUiSnapshot() {
     resultsMode: state.resultsMode, alignmentSource: state.alignmentSource,
     alignmentRoles: { ...state.alignmentRoles }, alignmentColumns: [...state.alignmentColumns],
     bioMetadataColumn: state.bioMetadataColumn, bioClusterCount: state.bioClusterCount,
+    pathwayConfig: { ...state.pathwayConfig },
     bioFeatureAxis: state.bioFeatureAxis, bioSelectedProfile: state.bioSelectedProfile,
     bioSelectedSourceFeature: state.bioSelectedSourceFeature,
     bioInspectObservation: state.bioInspectObservation,
@@ -1038,6 +1047,7 @@ function applyLocalSessionUi(saved) {
   for (const key of ['bioMetadataColumn', 'bioFeatureAxis', 'bioSelectedProfile', 'bioSelectedSourceFeature', 'bioInspectObservation'])
     if (typeof saved[key] === 'string') state[key] = saved[key]
   const integer = (key, min, max) => { const n = Number(saved[key]); if (Number.isInteger(n) && n >= min && n <= max) state[key] = n }
+  if (saved.pathwayConfig && typeof saved.pathwayConfig === 'object') state.pathwayConfig = {...state.pathwayConfig,...saved.pathwayConfig}
   integer('bioClusterCount', 2, 12); integer('i2MinViews', 2, 7); integer('i2bParallelWorkers', 1, 3)
   if (saved.i2StructureSelection && typeof saved.i2StructureSelection === 'object') state.i2StructureSelection = { ...saved.i2StructureSelection }
   if (typeof saved.i2StructureOnePerPatient === 'boolean') state.i2StructureOnePerPatient = saved.i2StructureOnePerPatient
@@ -1129,6 +1139,7 @@ async function loadApplicationState(file) {
     applyPendingStateConfig()
     state.qcResult = null
     state.compareResult = null
+    state.pathwayResult = null
     state.longitudinalResult = null
     state.hitResult = null
     state.projectMessage = reconnectMessage()
@@ -3871,6 +3882,10 @@ function bindIntegrativeRunControls(){
   bindIntegrativeScatter(document,showIntegrativeSampleMetadata)
   bindIntegrativeCoverage(document)
   bindBiologicalFeatureExplorer(document,currentBiologicalNextRows)
+  mountPathwayModule(document,{workspace:state,compare:state.compareResult,exploratoryRows:currentBiologicalNextRows,
+    onChanged:scheduleLocalSessionSave,
+    exportFile:(filename,content)=>void saveTextFile(filename,content,filename.endsWith('.tsv')?'text/tab-separated-values':'application/json')
+      .catch(error=>{state.pathwayStatus=`Pathway export failed: ${error.message}`})})
   bindBiologicalNextStepActions()
   document.querySelector('#integrative-coverage-export')?.addEventListener('click',()=>{
     const report=currentIntegrativeCoverage()
@@ -3907,6 +3922,11 @@ function bindBiologicalNextStepActions() {
       explorer?.scrollIntoView({block:'start'})
       document.querySelector('#bio-next-query')?.focus()
     }
+    if(action==='pathways'){
+      const pane=document.querySelector('#bio-next-pathways')
+      if(pane)pane.open=true
+      pane?.scrollIntoView({block:'start'})
+    }
     if(action==='details'){
       state.integrativeView='details';render()
       document.querySelector('#biological-findings')?.scrollIntoView({block:'start'})
@@ -3935,7 +3955,10 @@ function bindBiologicalNextStepActions() {
         previous_comparison:state.compareResult?{name:state.compareResult.comparisonName||null,
           thresholds_display_only:{...state.globalThresholds,omicsMinAdjustedEffect:state.hitConfig.omicsMinAdjustedEffect??0},
           cohort_overlap_with_joint:'not_verified',independent_validation:false}:null,
-        pathway_enrichment:{status:'not_calculated',p_value:null,q_value:null},
+        pathway_enrichment:state.pathwayResult?{status:'calculated',method:state.pathwayResult.method,
+          source:state.pathwayResult.source,reference:state.pathwayResult.geneSetFile,
+          tested_sets:state.pathwayResult.matchedSetCount,significant_BH_q005:state.pathwayResult.results.filter(r=>r.q_value<=0.05).length,
+          independent_validation:false}: {status:'not_calculated',p_value:null,q_value:null},
         caution:'Do not treat post-fit cluster contrasts or Spearman ranks as confirmatory differential expression.'}
       localExport('4c-insight-interpretation-audit.json',JSON.stringify(audit,null,2)+'\n')
     }

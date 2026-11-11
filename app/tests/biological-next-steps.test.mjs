@@ -93,7 +93,7 @@ test('app uses existing workflows without inserting clinical labels into joint s
     'bindBiologicalFeatureExplorer(document,currentBiologicalNextRows)',
     "if(action==='compare'){", "state.tab='compare';render()",
     "if(action==='export-features')",'exploratoryGeneRankingTsv(',
-    'cohort_overlap_with_joint:\'not_verified\'', 'pathway_enrichment:{status:\'not_calculated\''])
+    'cohort_overlap_with_joint:\'not_verified\'', 'pathway_enrichment:state.pathwayResult?'])
     assert.ok(main.includes(token),token)
   assert.match(style,/bio-next-feature-table th\{position:sticky/)
   assert.match(main,/await runJointStructure\(\)/)

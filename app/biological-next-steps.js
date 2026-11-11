@@ -110,7 +110,7 @@ export function biologicalNextStepsHtml({report,coverage,rna,source,compare,thre
       <article class="bio-next-step"><strong>3. Test a defined group contrast</strong><p>Select case/control values before analysis. Use correct count models and patient-aware settings as needed.</p>
         <button type="button" class="secondary-button" data-bio-next="compare">Open Compare Groups</button>${compare?'<button type="button" class="secondary-button" data-bio-next="results">Open existing Results</button>':''}</article>
       <article class="bio-next-step"><strong>4. Review features and pathways</strong><p>Use the full ranked lists for hypotheses. Compare with previous adjusted results, then validate.</p>
-        <button type="button" class="secondary-button" data-bio-next="features">Explore ranked features</button></article>
+        <button type="button" class="secondary-button" data-bio-next="features">Explore ranked features</button><button type="button" class="secondary-button" data-bio-next="pathways">Run pathway analysis</button></article>
     </div>
     <p id="bio-next-export-status" role="status" aria-live="polite" hidden></p>
     <div class="bio-next-review" id="bio-next-evidence">
@@ -132,8 +132,9 @@ export function biologicalNextStepsHtml({report,coverage,rna,source,compare,thre
       <div class="bio-next-actions"><button type="button" class="secondary-button" data-bio-next="export-features">Export all measured feature associations (TSV)</button><button type="button" class="secondary-button" data-bio-next="details">Review methods and sample-level features</button></div>
     </details>
     <details class="bio-next-review bio-next-expand" id="bio-next-pathways"><summary>Pathway analysis and validation</summary>
-      <p class="method-note">Pathway enrichment has not been calculated. Export an exploratory full-gene rank list to review gene identifiers and, where appropriate, run a separate documented gene-set method. A PCoA correlation is not a differential-expression statistic; do not report gene-set FDR until a valid enrichment test has been run.</p>
+      <p class="method-note">Pathway enrichment has not been calculated by the joint model. Use the local module below to calculate actual pathway statistics from a user-selected GMT. Corrected group effects and exploratory PCoA correlations are separate inputs. PCoA correlations are not differential-expression statistics.</p>
       <div class="bio-next-actions"><label>Ranked gene axis<select id="bio-next-axis"><option value="pcoa1_spearman">PCo1 Spearman</option><option value="pcoa2_spearman">PCo2 Spearman</option></select></label><button type="button" class="secondary-button" data-bio-next="export-genes">Export exploratory gene ranks (TSV)</button></div>
+      <div id="pathway-analysis-widget"></div>
       <p class="method-note">Independent validation: <strong>not available</strong>. Confirm observed clinical associations in held-out patients or independent data. Avoid testing cluster differences on the same measurements used to form those clusters.</p>
       <button type="button" class="secondary-button" data-bio-next="export-audit">Export interpretation audit (JSON)</button>
     </details>
