@@ -1203,3 +1203,32 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
  .pathway-network-tools button,.pathway-network-export button { font-size:.76rem; }
  .pathway-network-canvas { aspect-ratio: 1.3; }
 }
+
+/* P5.1: expand the existing live pathway plot. The canvas is moved, not cloned. */
+.pathway-network-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; }
+.pathway-network-heading > div { min-width:0; }
+.pathway-network-expand { white-space:nowrap; }
+.pathway-network-home { min-width:0; }
+.pathway-network-dialog { box-sizing:border-box; width:min(1400px,96vw); max-width:none; height:min(940px,94dvh); max-height:94dvh; padding:0; border:1px solid var(--line,#dfe4ec); border-radius:12px; box-shadow:0 22px 70px rgba(12,23,45,.3); color:inherit; background:var(--surface,#fff); }
+.pathway-network-dialog::backdrop { background:rgba(12,24,45,.65); }
+.pathway-network-dialog[open] { display:flex; flex-direction:column; }
+.pathway-network-dialog-heading { padding:.7rem 1rem; border-bottom:1px solid var(--line,#dfe4ec); display:flex; justify-content:space-between; align-items:center; gap:1rem; flex:none; }
+.pathway-network-dialog-heading h6 { margin:0; font-size:1.06rem; }
+.pathway-network-dialog-heading p { margin:.15rem 0 0; font-size:.78rem; color:var(--muted,#667085); }
+.pathway-network-dialog-actions { display:flex; align-items:center; flex-wrap:wrap; gap:.5rem; }
+.pathway-network-modal-stage { display:flex; flex-direction:column; flex:1; min-height:0; overflow:auto; padding:.5rem 1rem .85rem; }
+.pathway-network-modal-stage .pathway-network-tools { flex:none; margin:.25rem 0 .5rem; }
+.pathway-network-modal-stage .pathway-network-canvas { box-sizing:border-box; flex:1 1 auto; min-height:240px; max-height:none; height:auto; aspect-ratio:auto; width:100%; }
+.pathway-network-modal-stage .pathway-network-inspection { flex:none; margin:.5rem 0; }
+.pathway-network-modal-stage .pathway-network-help { flex:none; font-size:.75rem; margin:.15rem 0; }
+.pathway-network-modal-stage .pathway-network-export { flex:none; margin:.15rem 0; }
+.pathway-network-modal-stage .pathway-network-svg { width:100%; height:100%; }
+@media (max-width:640px) {
+  .pathway-network-heading { flex-wrap:wrap; }
+  .pathway-network-dialog { width:99vw; height:96dvh; max-height:96dvh; border-radius:6px; }
+  .pathway-network-dialog-heading { align-items:flex-start; padding:.5rem; }
+  .pathway-network-dialog-heading h6 { font-size:.9rem; }
+  .pathway-network-dialog-heading p { font-size:.69rem; }
+  .pathway-network-modal-stage { padding:.4rem; }
+  .pathway-network-modal-stage .pathway-network-canvas { min-height:180px; }
+}

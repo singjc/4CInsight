@@ -200,6 +200,17 @@ export function pathwayNetworkJson(graph,report){return JSON.stringify({schema:P
   organism:report?.organism||null,geneSetRelease:report?.geneSetRelease||null,
   interpretation:'Graph layout is descriptive. Edges show gene sharing or membership, not interactions or independent significance.'},null,2)+'\n'}
 
+/** Fit all displayed nodes in a fixed SVG coordinate frame. This does not change layout, data, or marker size. */
+export function pathwayNetworkFitView(graph,{padding=45}={}){
+  const nodes=(graph?.nodes||[]).filter(n=>valid(n.x)&&valid(n.y))
+  const w=Number(graph?.width)||1000,h=Number(graph?.height)||570
+  if(!nodes.length)return {cx:w/2,cy:h/2,k:1}
+  const minX=Math.min(...nodes.map(n=>n.x)),maxX=Math.max(...nodes.map(n=>n.x))
+  const minY=Math.min(...nodes.map(n=>n.y)),maxY=Math.max(...nodes.map(n=>n.y))
+  const pad=clamp(Number(padding)||45,20,Math.min(w,h)*.3)
+  const k=clamp(Math.min((w-2*pad)/Math.max(1,maxX-minX),(h-2*pad)/Math.max(1,maxY-minY)),1,24)
+  return {cx:(minX+maxX)/2,cy:(minY+maxY)/2,k}
+}
 function networkState(container,graph,onPathway){
   const viewport={cx:graph.width/2,cy:graph.height/2,k:1},selected={id:'',gene:''}
   let dragging=null,mode='pan',box=null,suppressClick=false
@@ -254,15 +265,65 @@ function networkState(container,graph,onPathway){
   }
   svgHolder.addEventListener('pointerup',finish)
   svgHolder.addEventListener('pointercancel',finish)
+  function fitNodes(){
+    const fitted=pathwayNetworkFitView(graph)
+    viewport.cx=fitted.cx;viewport.cy=fitted.cy;viewport.k=fitted.k;paint()
+  }
   container.querySelectorAll('[data-network-tool]').forEach(button=>button.addEventListener('click',()=>{
     const action=button.dataset.networkTool
     if(action==='reset'){viewport.cx=graph.width/2;viewport.cy=graph.height/2;viewport.k=1;selected.id='';selected.gene='';paint()}
+    else if(action==='fit')fitNodes()
     else if(action==='in')focus(1.4)
     else if(action==='out')focus(1/1.4)
     else {mode=action;container.querySelectorAll('[data-network-tool="pan"],[data-network-tool="box"]').forEach(x=>x.setAttribute('aria-pressed',String(x.dataset.networkTool===mode)))}
   }))
   paint()
   return {view:viewport,selected}
+}
+
+/** Move the active graph and its bound controls into a native dialog; never clone the graph. */
+export function mountExpandedNetwork(slot){
+  const expand=slot.querySelector('#pathway-network-expand')
+  const dialog=slot.querySelector('#pathway-network-dialog')
+  const home=slot.querySelector('.pathway-network-home')
+  const stage=dialog?.querySelector('.pathway-network-modal-stage')
+  if(!expand||!dialog||!home||!stage)return
+  const moved=['.pathway-network-tools','.pathway-network-canvas','.pathway-network-inspection','.pathway-network-help','.pathway-network-export']
+    .map(selector=>home.querySelector(selector)).filter(Boolean)
+  let active=false
+  function restore(){
+    if(!active)return
+    for(const element of moved)home.append(element)
+    active=false
+    expand.setAttribute('aria-expanded','false')
+    expand.focus()
+  }
+  expand.addEventListener('click',()=>{
+    if(active)return
+    if(typeof dialog.showModal!=='function'){
+      const status=slot.querySelector('.pathway-network-inspection')
+      if(status)status.textContent='Expanded plots require a browser with native dialog support. Use zoom and fit controls in this plot.'
+      return
+    }
+    for(const element of moved)stage.append(element)
+    try{
+      dialog.showModal()
+      active=true
+      expand.setAttribute('aria-expanded','true')
+      dialog.querySelector('#pathway-network-close')?.focus()
+    }catch(error){
+      for(const element of moved)home.append(element)
+      active=false
+      expand.setAttribute('aria-expanded','false')
+    }
+  })
+  dialog.addEventListener('close',restore)
+  dialog.querySelector('#pathway-network-close')?.addEventListener('click',()=>dialog.close())
+  dialog.querySelector('#pathway-network-show-genes')?.addEventListener('click',()=>{
+    dialog.close()
+    const inspector=slot.querySelector('#pathway-gene-inspector')
+    inspector?.scrollIntoView?.({block:'start'})
+  })
 }
 
 /** Mount once per pathway-view paint. Full results persist independently of network display settings. */
@@ -275,7 +336,7 @@ export function mountPathwayNetwork(root,{report,geneSets,input,config,onConfig=
     catch(e){error=str(e?.message||e)}
     if(!graph){slot.innerHTML=`<p class="analysis-warnings" role="status">Pathway network unavailable: ${esc(error)}</p>`;return}
     slot.innerHTML=`<section class="pathway-network" aria-label="Descriptive pathway networks">
-      <div class="pathway-network-heading"><div><h6>Gene-sharing network</h6><p class="method-note">A descriptive graph of gene-set overlap. Lines are not protein interactions, regulatory effects, or new statistical tests.</p></div></div>
+      <div class="pathway-network-heading"><div><h6>Gene-sharing network</h6><p class="method-note">A descriptive graph of gene-set overlap. Lines are not protein interactions, regulatory effects, or new statistical tests.</p></div><button type="button" id="pathway-network-expand" class="secondary-button pathway-network-expand" aria-haspopup="dialog" aria-expanded="false" aria-controls="pathway-network-dialog">Expand plot</button></div>
       <div class="pathway-network-controls">
         <label>Network view<select id="pathway-network-view"><option value="overlap"${c.view==='overlap'?' selected':''}>Pathway overlap</option><option value="bipartite"${c.view==='bipartite'?' selected':''}>Genes ↔ pathways</option></select></label>
         <label>Pathways to display<input id="pathway-network-count" type="number" min="2" max="250" value="${c.maxPathways}"/></label>
@@ -291,13 +352,20 @@ export function mountPathwayNetwork(root,{report,geneSets,input,config,onConfig=
         <label>Layout seed<input id="pathway-network-seed" type="number" min="1" max="4294967295" value="${c.seed}"/></label>
       </div></details>
       <div class="pathway-network-summary" role="status">${graph.nodes.filter(n=>n.type==='pathway').length} pathways · ${graph.nodes.filter(n=>n.type==='gene').length} displayed gene nodes · ${graph.edges.length} edges. ${graph.excludedExactSets.length?graph.excludedExactSets.length+' unmatched/ambiguous GMT pathways excluded.':''}</div>
-      <div class="pathway-network-tools"><button type="button" class="secondary-button" data-network-tool="in">Zoom in</button><button type="button" class="secondary-button" data-network-tool="out">Zoom out</button><button type="button" class="secondary-button" data-network-tool="pan" aria-pressed="true">Pan</button><button type="button" class="secondary-button" data-network-tool="box" aria-pressed="false">Box zoom</button><button type="button" class="secondary-button" data-network-tool="reset">Reset</button></div>
+      <div class="pathway-network-home">
+      <div class="pathway-network-tools"><button type="button" class="secondary-button" data-network-tool="in">Zoom in</button><button type="button" class="secondary-button" data-network-tool="out">Zoom out</button><button type="button" class="secondary-button" data-network-tool="pan" aria-pressed="true">Pan</button><button type="button" class="secondary-button" data-network-tool="box" aria-pressed="false">Box zoom</button><button type="button" class="secondary-button" data-network-tool="fit">Fit nodes</button><button type="button" class="secondary-button" data-network-tool="reset">Reset</button></div>
       <div class="pathway-network-canvas" aria-label="Pathway network graph. Wheel zoom, drag to pan or box zoom. Select a node for details."></div>
       <div class="pathway-network-inspection" role="status">Select a pathway node to inspect its genes, or select a gene node to see connected pathways.</div>
-      <p class="method-note">Node size reflects the pathway BH q-value. Blue and orange distinguish signed NES in ranked analysis; gene nodes are grey. The force layout is descriptive and deterministic for the saved layout seed. Display limits do not change tested pathways or the scientific results.</p>
+      <p class="method-note pathway-network-help">Node size reflects the pathway BH q-value. Blue and orange distinguish signed NES in ranked analysis; gene nodes are grey. The force layout is descriptive and deterministic for the saved layout seed. Display limits do not change tested pathways or the scientific results.</p>
       <div class="pathway-network-export"><button id="pathway-network-export-nodes" class="secondary-button" type="button">Export nodes TSV</button><button id="pathway-network-export-edges" class="secondary-button" type="button">Export edges TSV</button><button id="pathway-network-export-svg" class="secondary-button" type="button">Export SVG</button><button id="pathway-network-export-json" class="secondary-button" type="button">Export network JSON</button></div>
+      </div>
+      <dialog class="pathway-network-dialog" id="pathway-network-dialog" aria-labelledby="pathway-network-modal-title" aria-describedby="pathway-network-modal-description">
+        <div class="pathway-network-dialog-heading"><div><h6 id="pathway-network-modal-title">Expanded gene-sharing network</h6><p id="pathway-network-modal-description">${esc(graph.view==='overlap'?'Pathway overlap':'Genes and pathways')} · select nodes, zoom, pan, or export. Layout is descriptive.</p></div><div class="pathway-network-dialog-actions"><button type="button" class="secondary-button" id="pathway-network-show-genes">Inspect selected pathway</button><button type="button" class="secondary-button" id="pathway-network-close">Close plot</button></div></div>
+        <div class="pathway-network-modal-stage"></div>
+      </dialog>
     </section>`
     networkState(slot,graph,onPathway)
+    mountExpandedNetwork(slot)
     const controls={view:'pathway-network-view',maxPathways:'pathway-network-count',qCutoff:'pathway-network-q',genes:'pathway-network-genes',metric:'pathway-network-metric',minCommon:'pathway-network-min-common',minSimilarity:'pathway-network-min-sim',maxGenes:'pathway-network-max-genes',seed:'pathway-network-seed'}
     for(const [field,id] of Object.entries(controls))slot.querySelector('#'+id)?.addEventListener('change',e=>{
       c=normalizePathwayNetworkConfig({...c,[field]:e.currentTarget.value});onConfig(c);render()
