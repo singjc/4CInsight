@@ -328,7 +328,7 @@ export function networkState(container,graph,onPathway){
   container.dataset.networkSelectedPathway=''
   const groups=pathwayNetworkComponents(graph),groupById=new Map(groups.map(g=>[g.id,g]))
   let focusedGroup=null
-  let dragging=null,mode='pan',box=null,suppressClick=false
+  let dragging=null,mode='pan',box=null,lastPointerActivation=-Infinity,lastDragEnd=-Infinity
   const svgHolder=container.querySelector('.pathway-network-canvas')
   function paint(){svgHolder.innerHTML=pathwayNetworkSvg(graph,{view:viewport,selectedId:selected.id,selectedGene:selected.gene,visibleNodeIds:focusedGroup?.nodeIds||null})+(box?`<div class="pathway-network-selection" style="left:${fix(box.x)}%;top:${fix(box.y)}%;width:${fix(box.w)}%;height:${fix(box.h)}%"></div>`:'')}
   const point=e=>{const bounds=svgHolder.getBoundingClientRect();return {x:((e.clientX-bounds.left)/(bounds.width||1))*graph.width,y:((e.clientY-bounds.top)/(bounds.height||1))*graph.height}}
@@ -392,14 +392,35 @@ export function networkState(container,graph,onPathway){
     const node=graph.nodes.find(n=>n.id===button.dataset.networkOpenPathway)
     if(node?.type==='pathway')selectedLabel(node,{openDetails:true})
   })
-  function clickNode(e){const el=e.target.closest?.('[data-network-node]');if(!el||!svgHolder.contains(el))return false
-    const n=graph.nodes.find(x=>x.id===el.dataset.networkNode);if(!n)return false;selectedLabel(n);return true}
-  svgHolder.addEventListener('click',e=>{if(suppressClick){suppressClick=false;return}if(!dragging)clickNode(e)})
-  svgHolder.addEventListener('keydown',e=>{if(!['Enter',' '].includes(e.key))return; if(clickNode(e))e.preventDefault()})
+  function nodeAt(target){
+    const el=target?.closest?.('[data-network-node]')
+    if(!el||!svgHolder.contains(el))return null
+    return graph.nodes.find(n=>n.id===el.dataset.networkNode)||null
+  }
+  function clickNode(e){const n=nodeAt(e.target);if(!n)return false;selectedLabel(n);return true}
+  // Pointer capture retargets a native click to the canvas, not the original SVG node.
+  // Pointerup selects the node saved on pointerdown. Click remains a fallback for
+  // scripted clicks and older input devices; ignore the paired native click.
+  svgHolder.addEventListener('click',e=>{
+    if(e.detail>0&&((e.timeStamp>=lastPointerActivation&&e.timeStamp-lastPointerActivation<500)||
+        (e.timeStamp>=lastDragEnd&&e.timeStamp-lastDragEnd<500)))return
+    if(!dragging)clickNode(e)
+  })
+  svgHolder.addEventListener('keydown',e=>{
+    if(!['Enter',' '].includes(e.key))return
+    const node=nodeAt(e.target)
+    if(clickNode(e)){
+      e.preventDefault()
+      // SVG redraw replaces the focused node; restore keyboard focus.
+      const replacement=[...svgHolder.querySelectorAll('[data-network-node]')].find(el=>el.dataset.networkNode===node?.id)
+      replacement?.focus?.({preventScroll:true})
+    }
+  })
   svgHolder.addEventListener('wheel',e=>{e.preventDefault();focus(e.deltaY<0?1.24:1/1.24,point(e))},{passive:false})
   svgHolder.addEventListener('pointerdown',e=>{
     if(e.button!==0)return
-    const p=point(e);dragging={start:p,last:p,moved:false}
+    const p=point(e),node=nodeAt(e.target)
+    dragging={start:p,last:p,moved:false,nodeId:node?.id||'',pointerId:e.pointerId}
     svgHolder.setPointerCapture?.(e.pointerId)
   })
   svgHolder.addEventListener('pointermove',e=>{
@@ -412,8 +433,15 @@ export function networkState(container,graph,onPathway){
     dragging.last=p
   })
   function finish(e){if(!dragging)return
-    const moved=dragging.moved,begin=dragging.start,end=dragging.last;dragging=null
-    if(moved)suppressClick=true
+    const {moved,start:begin,last:end,nodeId,pointerId}=dragging;dragging=null
+    if(moved)lastDragEnd=e.timeStamp
+    // A stationary mouse/touch tap is a selection, even when pointer capture
+    // directs pointerup and click at the plot container instead of the node.
+    if(!moved&&nodeId&&e.type==='pointerup'){
+      const node=graph.nodes.find(n=>n.id===nodeId)
+      if(node){lastPointerActivation=e.timeStamp;selectedLabel(node)}
+    }
+    if(svgHolder.hasPointerCapture?.(pointerId))svgHolder.releasePointerCapture(pointerId)
     if(mode==='box'&&moved&&Math.abs(end.x-begin.x)>10&&Math.abs(end.y-begin.y)>10){
       const cx=(begin.x+end.x)/2,cy=(begin.y+end.y)/2,original=viewport.k
       viewport.cx+=(cx-graph.width/2)/original;viewport.cy+=(cy-graph.height/2)/original
