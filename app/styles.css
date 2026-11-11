@@ -1172,3 +1172,9 @@ select:focus-visible { outline: 3px solid rgba(49, 89, 217, 0.26); outline-offse
 .pathway-inspector-table th { position: sticky; top: 0; background: #f4f6fb; z-index: 1; }
 .pathway-gene-inspector-empty { color: var(--muted, #667085); }
 @media (max-width: 680px) { .pathway-chart-choice { grid-template-columns: minmax(78px,1fr) minmax(75px,1fr) 45px 49px; gap: .25rem; } .pathway-chart-name,.pathway-score-value,.pathway-score-q { font-size: .69rem; } .pathway-gene-inspector { padding: .7rem; } }
+
+/* Pathways P3.1: compact inspector controls and visible source provenance. */
+.pathway-inspector-controls { display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; margin:.65rem 0 .35rem; font-size:.85rem; }
+.pathway-inspector-controls label { display:inline-flex; align-items:center; gap:.35rem; font-weight:650; cursor:pointer; }
+.pathway-inspector-controls span { color:var(--muted,#667085); font-variant-numeric:tabular-nums; }
+.pathway-provenance-notice { margin:.6rem 0; line-height:1.5; }

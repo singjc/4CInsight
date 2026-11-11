@@ -48,7 +48,8 @@ test('inspection selects only original GMT genes with valid scored results',()=>
 test('ORA selection is the original reported set; gene q and effects are preserved',()=>{
  const inp={rows:[{gene:'A',score:1.5,q:.03},{gene:'B',score:-2,q:.002},{gene:'C',score:0.1,q:.9}]}
  const x=inspectPathwayGenes(compare,compare.results[0],inp,sets)
- assert.deepEqual(x.rows.map(g=>g.selected),[false,true,false])
+ assert.deepEqual(x.rows.map(g=>g.selected),[true,false,false])
+ assert.deepEqual(x.rows.map(g=>g.gene),['B','A','C'])
  const html=pathwayInspectorHtml(compare,compare.results[0],x)
  assert.match(html,/Group log2 effect/)
  assert.match(html,/Corrected gene q-value/)

@@ -57,16 +57,19 @@ export function inspectPathwayGenes(report,row,input,geneSets) {
   const leading=new Set((row.leadingGenes||[]).map(gene))
   const entries=[...new Set(matches[0].genes.map(gene))].map(id=>scored.get(id))
     .filter(Boolean).map(g=>({gene:gene(g.gene),rank:g.rank,score:g.score,q:g.q,selected:leading.has(gene(g.gene))}))
+  // Put saved leading-edge / ORA-selected genes first, then preserve the original measured rank.
+  entries.sort((a,b)=>Number(b.selected)-Number(a.selected)||a.rank-b.rank||a.gene.localeCompare(b.gene))
   // In ranked analysis, 'selected' means leading edge, not statistically significant.
   // In ORA, 'selected' means that the saved ORA threshold selected this gene.
   return {available:true,rows:entries,matched:entries.length,inputSetSize:matches[0].genes.length,
     selectedCount:entries.filter(g=>g.selected).length,selectionLabel:report.mode==='ranked'?'Leading edge':'Selected by ORA thresholds'}
 }
 
-export function pathwayInspectorHtml(report,row,inspection) {
+export function pathwayInspectorHtml(report,row,inspection,{selectedOnly=false}={}) {
   if(!row)return '<div class="pathway-gene-inspector-empty">Select a pathway in the chart or table to inspect its contributing genes.</div>'
   const ranked=report.mode==='ranked',exploratory=report.source==='exploratory'
-  const label=ranked?'Ranking score': 'Group log2 effect'
+  const shown=inspection?.available&&selectedOnly?inspection.rows.filter(g=>g.selected):inspection?.rows||[]
+  const label=ranked?'Ranking score': 'Group log2 effect' 
   const scoreLabel=exploratory?'Spearman correlation with fitted PCoA axis':label
   const description=ranked
     ?'Leading-edge genes contribute to this enrichment score. They are not necessarily differentially expressed or statistically significant.'
@@ -78,9 +81,11 @@ export function pathwayInspectorHtml(report,row,inspection) {
     <p class="method-note">${description} ${exploratory?'The direction of PCoA is arbitrary; correlations do not identify upregulated or downregulated genes.':''}</p>
     ${!inspection?.available?`<p class="analysis-warnings" role="status">${esc(inspection?.reason||'Gene measurements are not available.')}</p>`:
       `<p class="method-note"><strong>${inspection.matched.toLocaleString()}</strong> genes matched the scored background; <strong>${inspection.selectedCount.toLocaleString()}</strong> are ${ranked?'in the leading edge':'selected by the ORA thresholds'}. Matched genes are not automatically significant.</p>
+      <div class="pathway-inspector-controls"><label><input type="checkbox" id="pathway-inspector-selected-only" ${selectedOnly?'checked':''}/> ${ranked?'Show leading-edge genes only':'Show ORA-selected genes only'}</label>
+        <span role="status">Showing ${shown.length.toLocaleString()} of ${inspection.rows.length.toLocaleString()} measured pathway genes</span></div>
       <div class="table-scroll pathway-inspector-table"><table><thead><tr><th>Gene</th><th>Rank</th><th>${esc(scoreLabel)}</th><th>${exploratory?'Gene q-value unavailable':'Corrected gene q-value'}</th><th>${ranked?'Leading edge':'ORA selected'}</th></tr></thead>
-      <tbody>${inspection.rows.map(g=>`<tr><td>${esc(g.gene)}</td><td>${g.rank}</td><td>${fmt(g.score)}</td><td>${fmt(g.q)}</td><td>${g.selected?'Yes':'No'}</td></tr>`).join('')}</tbody></table></div>
-      <button type="button" class="secondary-button" id="pathway-export-genes">Export exact matched genes (TSV)</button>`}
+      <tbody>${shown.map(g=>`<tr><td>${esc(g.gene)}</td><td>${g.rank}</td><td>${fmt(g.score)}</td><td>${fmt(g.q)}</td><td>${g.selected?'Yes':'No'}</td></tr>`).join('')||'<tr><td colspan="5">No selected genes in this pathway.</td></tr>'}</tbody></table></div>
+      <button type="button" class="secondary-button" id="pathway-export-genes">Export all exact matched genes (TSV)</button>`}
     </div>`
 }
 

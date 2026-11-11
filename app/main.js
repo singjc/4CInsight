@@ -141,6 +141,7 @@ const state = {
   pathwayGeneSets: null,
   pathwayResult: null,
   pathwaySelectedKey: '',
+  pathwayLeadingOnly: false,
   pathwayStatus: '',
   bioFeatureAxis: 'pcoa1_spearman',
   bioSelectedProfile: '',
@@ -964,6 +965,7 @@ function localSessionUiSnapshot() {
     bioMetadataColumn: state.bioMetadataColumn, bioClusterCount: state.bioClusterCount,
     pathwayConfig: { ...state.pathwayConfig },
     pathwaySelectedKey: state.pathwaySelectedKey,
+    pathwayLeadingOnly: state.pathwayLeadingOnly,
     bioFeatureAxis: state.bioFeatureAxis, bioSelectedProfile: state.bioSelectedProfile,
     bioSelectedSourceFeature: state.bioSelectedSourceFeature,
     bioInspectObservation: state.bioInspectObservation,
@@ -1052,6 +1054,7 @@ function applyLocalSessionUi(saved) {
   const integer = (key, min, max) => { const n = Number(saved[key]); if (Number.isInteger(n) && n >= min && n <= max) state[key] = n }
   if (saved.pathwayConfig && typeof saved.pathwayConfig === 'object') state.pathwayConfig = {...state.pathwayConfig,...saved.pathwayConfig}
   if (typeof saved.pathwaySelectedKey === 'string' && saved.pathwaySelectedKey.length <= 5000) state.pathwaySelectedKey = saved.pathwaySelectedKey
+  if (typeof saved.pathwayLeadingOnly === 'boolean') state.pathwayLeadingOnly = saved.pathwayLeadingOnly
   integer('bioClusterCount', 2, 12); integer('i2MinViews', 2, 7); integer('i2bParallelWorkers', 1, 3)
   if (saved.i2StructureSelection && typeof saved.i2StructureSelection === 'object') state.i2StructureSelection = { ...saved.i2StructureSelection }
   if (typeof saved.i2StructureOnePerPatient === 'boolean') state.i2StructureOnePerPatient = saved.i2StructureOnePerPatient

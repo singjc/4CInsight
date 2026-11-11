@@ -37,6 +37,7 @@ export function pathwayPanelHtml({sets,result,config={},status='',compareAvailab
       <label>Gene-set organism (user verified)<input id="pathway-organism" type="text" maxlength="120" value="${esc(c.organism)}" placeholder="e.g. Homo sapiens"/></label>
       <label>Gene-set release / date<input id="pathway-release" type="text" maxlength="120" value="${esc(c.release)}" placeholder="e.g. 2026-10"/></label>
       </div>
+      ${(!String(c.organism||'').trim()||!String(c.release||'').trim())?'<p class="analysis-warnings pathway-provenance-notice" role="status">Gene-set organism or exact release is not recorded. Confirm both before scientific reporting. You can run an exploratory analysis now; changing this information requires a new pathway run.</p>':'<p class="method-note">Gene-set organism and release have been entered by the user; 4C Insight has not independently verified them.</p>'}
     </section>
     <p class="method-note">You can use a custom <code>.gmt</code> or <code>.zip</code> file. If direct Reactome download is blocked by browser cross-origin rules, use the manual link and select the downloaded ZIP here. Check the organism, gene identifier type, license, and release for every gene-set source. The current Reactome URL is not a pinned release.</p>
     <section class="pathway-guided-step" aria-labelledby="pathway-step-run">
@@ -70,6 +71,7 @@ export function pathwayResultsHtml(report) {
     <div><small>BH q ≤ 0.05</small><strong>${qCount.toLocaleString()}</strong></div>
     <div><small>Evidence</small><strong>${report.source==='exploratory'?'Exploratory':'Defined comparison'}</strong></div></div>
     <p class="method-note"><strong>Input:</strong> ${esc(report.provenance)} · ${esc(report.geneSetFile)} · ${esc(report.organism||"Organism not recorded")} · ${esc(report.geneSetRelease||"Gene-set release not recorded")} · ${esc(report.method)}. ${esc(report.correction)}</p>
+    ${(!String(report.organism||'').trim()||!String(report.geneSetRelease||'').trim())?'<p class="analysis-warnings pathway-provenance-notice" role="status"><strong>Source metadata incomplete.</strong> This saved result lacks an organism or pinned gene-set release. Do not use it as a documented scientific result until you verify those fields and rerun enrichment.</p>':''}
     ${pathwayEvidenceBanner(report)}
     ${pathwayScoreChartHtml(report)}
     <div class="pathway-search"><label>Search pathways<input id="pathway-query" type="search" placeholder="Search pathway or gene" autocomplete="off"/></label><span id="pathway-count">${hits.length.toLocaleString()} results</span></div>
@@ -153,7 +155,12 @@ export function mountPathwayModule(root,{workspace,compare,exploratoryRows,onCha
           }
         } catch (_error) { /* Never invent missing genes. */ }
       }
-      target.innerHTML=pathwayInspectorHtml(report,row,inspection)
+      target.innerHTML=pathwayInspectorHtml(report,row,inspection,{selectedOnly:workspace.pathwayLeadingOnly===true})
+      target.querySelector('#pathway-inspector-selected-only')?.addEventListener('change',event=>{
+        workspace.pathwayLeadingOnly=event.currentTarget.checked
+        inspectSelected(index)
+        onChanged?.()
+      })
       target.querySelector('#pathway-export-genes')?.addEventListener('click',()=>{
         try {
           exportFile?.('4c-insight-selected-pathway-genes.tsv',pathwayInspectorTsv(report,row,inspection))
