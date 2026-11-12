@@ -1,83 +1,56 @@
-# AI Assistant — JCode setup and privacy (A1)
+# 4C Insight AI Assistant — A2 on-demand JCode companion
 
-## What this is
+## Goal
 
-The **AI Assistant** is an optional view in 4C Insight. It uses the locally installed **JCode** agent harness to provide explanations of analysis methods and results. The app stays browser-first: scientific analyses, source files, History and raw data never move to an application server. Connecting the assistant is a separate, explicit decision.
+Users should open **AI Assistant**, select a model, and chat without running a service or copying access tokens.
 
-A1 supports **read-only chat**. It does not provide JCode with 4C Insight files, a shell tool, a scientific-tool registry, or access to browser data. The bridge launches JCode with `--tool-profile none` from a temporary working directory. **This is not an operating-system sandbox:** external JCode configuration, provider adapters and user-defined hooks may still execute independently. Users who need stronger isolation must run JCode in a reviewed container or OS account with restricted permissions. Do not assume the assistant is a certified clinical tool.
+The main 4C Insight analysis remains browser-only. The optional AI Companion is a **separate native component** because normal websites cannot start JCode or inspect the operating system. It is started by the browser through Native Messaging **only when an approved request occurs**. It has no listening port or permanent service.
 
-## What was borrowed from the earlier OpenDIA GUI design
+## Connection and user consent
 
-The OpenDIA GUI v13.6–13.9 assistant used provider selection, session-only chat, user-reviewed context and permission boundaries. This version adopts those UI principles. The older OpenDIA GUI code was not copied because its archived source was not available in this workspace.
+1. Install a **signed Firefox extension** and the matching, verified native companion **once**. Firefox may ask for permission. The companion installer must be approved by the operating system. These components are **not silently installed** from the website.
+2. Open 4C Insight → AI Assistant → **Check connection**. The page sends a request to the extension. Firefox starts the native companion for that request and stops it afterward.
+3. If JCode is installed, choose OpenAI, Claude or Ollama. Select **Open JCode sign-in** to start JCode's login in a visible terminal where supported. A local Ollama model must already be available.
+4. Enter a question. Cloud providers receive the question and any aggregate data the user explicitly approved. No source file is shared automatically.
 
-## 1. Install and check JCode
+The login button supports Linux desktop terminals in A2. macOS and Windows are not packaged or verified. A different desktop terminal may require the user to start `jcode login --provider <provider>` once.
 
-Choose the operating system in AI Assistant. OS detection is approximate; the browser cannot determine whether JCode is installed or which download matches the CPU. The app provides official commands to **copy and review**. It never executes an installer, downloads an executable in the background, or requests administrator privileges.
+## What A2 implements
 
-- Linux and macOS: download the install script from `https://jcode.sh/install`, inspect it, then run it if approved. Homebrew is an alternative for macOS.
-- Windows 11: download and review `https://jcode.sh/install.ps1` in PowerShell, then run the reviewed file. The optional bridge also requires Python 3.10+.
-- Validate locally with `jcode --version`. JCode may be installed in `~/.local/bin` or `~/.cargo/bin`, or found on PATH.
+- Firefox MV2 development extension in `tools/ai-companion/extension-firefox/`.
+- User-initiated page → content script → extension background → Firefox Native Messaging → per-request Python host.
+- `status`, `login`, and `chat` operations only. No arbitrary command, file, or network endpoint.
+- Allowed providers: `openai`, `claude`, `ollama`.
+- JCode is launched with `--tool-profile none` from a temporary working directory. Provider login uses the installed JCode program; the site does not request model API keys.
+- The chat and context-preview state are in page memory only. Neither is written to the portable state, History, or active session database.
+- Only a fixed, user-approved summary can be supplied; patient IDs, gene identifiers, and raw source paths are not inferred or sent automatically.
 
-JCode official instructions: https://jcode.sh/docs. The built-in official install commands and latest releases can change; follow the current official documentation rather than trusting a stale copied command.
+## Security limits
 
-## 2. Connect a model provider
+Native Messaging is permission-controlled, not a substitute for OS sandboxing. Existing JCode global configuration, skills, user-level hooks, and credentials can still influence its behaviour. Do not treat `--tool-profile none` as a security boundary. The native process inherits the user's credentials as required by the selected provider.
 
-Use your own terminal to perform provider login:
+The extension accepts requests only from the exact 4C Insight GitHub Pages path (or explicitly limited localhost development paths). The host repeats provider and payload validation. There is no localhost port, token or CORS bridge. If a trusted application page is compromised, these allowlisted operations remain available; users must continue to review any context that they share.
 
-```text
-jcode login --provider openai
-jcode login --provider claude
-jcode login --provider ollama
-```
+Do not automatically download and execute JCode install scripts. An end-user installer should bundle a pinned, verified JCode release per OS/CPU or link to a reviewed, signed upstream installer. Installation requires explicit user consent.
 
-Run **only the command for the chosen provider**. JCode manages credentials. Never type OAuth codes, API keys or passwords into the 4C Insight page. OpenAI ChatGPT sign-in and OpenAI API access have different billing. Claude subscription login and Claude API access also differ. Check current provider terms.
+## Development-only Firefox verification
 
-For Ollama, install and run Ollama separately, then run `ollama list` to see installed models. `ollama pull <model-name>` installs a chosen local model. Choose its exact ID in the AI Assistant model field or let JCode use the configured default. Large local models consume disk and RAM.
+The source extension in `tools/ai-companion/extension-firefox/` is **unsigned** and cannot be installed permanently in standard Firefox. To develop, use `about:debugging` → **This Firefox** → **Load Temporary Add-on** → select `manifest.json`. Temporary extensions do not survive browser restart.
 
-You can check provider access in the terminal with `jcode auth-test --all-configured`.
+The Linux native host can be packaged as a `.deb`. The system manifest belongs at `/usr/lib/mozilla/native-messaging-hosts/org.fourcinsight.jcode.json`, and its `path` must reference an executable file at `/usr/lib/4c-insight-ai/native_host.py`. Verify the package contents and hashes before installing; the development build is not signed.
 
-## 3. Start the optional bridge
+In the finished product, publish a Mozilla-signed Firefox extension and verified OS installers. Only then should the AI tab offer a production **Install companion** action linked to those verified releases. Standard Firefox cannot silently approve an unsigned extension.
 
-The companion is a small Python 3.10+ script shipped with the 4C Insight source. It uses only Python's standard library. From the repository root run:
+The user does **not** need to start `python3 tools/ai-assistant-bridge/bridge.py` or paste a token. The A1 bridge is no longer part of the A2 workflow.
 
-```bash
-python3 tools/ai-assistant-bridge/bridge.py
-```
+## Release validation
 
-On Windows with the Python launcher:
+- Install and uninstall the signed add-on and native package.
+- Confirm that a status request starts and exits the native host automatically.
+- Check absent JCode, installed JCode, missing provider credentials, and real authenticated chat.
+- Check Linux distribution variants and sandboxed Firefox separately.
+- Repeat tests on Windows and macOS before declaring them supported.
+- Confirm no open localhost listener, token field, or implicit source-data transmission.
+- Confirm that all existing scientific tests and browser-only functionality remain unchanged.
 
-```powershell
-py -3 tools/ai-assistant-bridge/bridge.py
-```
-
-The bridge binds **127.0.0.1:8765 only**, prints a random access token in the terminal, and allows requests only from `https://singjc.github.io` or a localhost development page. Paste that token into AI Assistant. Press **Check JCode connection**. The assistant can now detect the local JCode binary via the running bridge; the browser **cannot** discover or install local programs without that bridge.
-
-Security controls:
-
-- No `shell=True`, browser-supplied command, arbitrary filesystem route or automatic file upload.
-- Only the `/status` and `/chat` routes exist. Provider values are limited to OpenAI, Claude and Ollama.
-- The bridge requires an origin check and a one-time session token for both routes.
-- Browser requests do not include cookies. The token and chat history stay in browser-tab memory, not project state, IndexedDB or History.
-- JCode is started with `--tool-profile none` in a temporary directory; the optional user-level JCode hooks and provider configuration remain outside this control.
-- One request runs at a time, with a 120-second model timeout; source files are not exposed to it.
-- Cloud providers receive the typed prompt and any **explicitly selected** aggregate context. Ollama can run locally, depending on how the user configures it.
-
-Modern browsers may restrict HTTPS-to-loopback requests or private-network access despite CORS headers. If this happens, check your browser's security policy; **do not disable browser security** to force the connection.
-
-## 4. Ask about results
-
-By default, the assistant sees **only what you type**. To add limited application context, check **Include the aggregate analysis summary** and examine the JSON preview first. Only fixed flags (result available or absent), the number of tested pathways and the evidence classification are included. **No raw gene expression, metadata rows, patient IDs, source filenames or individual gene scores are included.**
-
-Example question: “What does a negative PCo2 correlation mean?” It means that a gene score decreases as the selected PCo2 coordinate increases. The axis sign is arbitrary, so it does not mean that the gene is downregulated in disease.
-
-Example pathway question: “Why do 199 permutations produce tied q-values?” With an add-one empirical p-value, the minimum value is `1/(199+1) = 0.005`. BH correction across overlapping pathways can produce ties; this alone does not establish a disease association.
-
-**Interpretation boundaries:** The assistant cannot validate the biological conclusions, infer causality, or claim that pathway overlap proves physical gene interactions. Corrected case/control results and exploratory PCoA rankings are different evidence types. Verify any statistical or biomedical claim against the original tables and methods.
-
-## 5. Stop or disconnect
-
-Use **Clear conversation** to remove chat text from this page. Stop the bridge in its terminal with Ctrl+C to revoke the current token and end local access. Reloading 4C Insight also clears the in-memory token and chat. JCode provider credentials remain in JCode's own configuration. Uninstall or change them through JCode, not through the 4C Insight browser.
-
-## Future capability and review gates
-
-A2 could add selected scientific evidence retrieval, model catalog discovery, structured tool calls, and per-action permission prompts. Those features **are not present in A1**. Before allowing tools or file modifications, implement an independent deterministic allowlist, explicit per-action approval, provenance capture, sandbox restrictions, scientific validation and cross-platform security tests.
+Documentation: [Mozilla Native Messaging](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging) · [Firefox extension signing](https://support.mozilla.org/en-US/kb/add-on-signing-in-firefox) · [JCode](https://jcode.sh/docs)

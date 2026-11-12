@@ -1,0 +1,17 @@
+{
+  "manifest_version": 2,
+  "name": "4C Insight — JCode Companion (Development)",
+  "version": "0.2.0",
+  "description": "User-initiated JCode chat for the 4C Insight application. No background server.",
+  "browser_specific_settings": {
+    "gecko": {"id": "jcode-companion@4cinsight.org", "strict_min_version": "115.0"}
+  },
+  "permissions": ["nativeMessaging", "https://singjc.github.io/4CInsight/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": {"scripts": ["background.js"]},
+  "content_scripts": [{
+    "matches": ["https://singjc.github.io/4CInsight/*", "http://localhost/*", "http://127.0.0.1/*"],
+    "js": ["content.js"],
+    "run_at": "document_start",
+    "all_frames": false
+  }]
+}
