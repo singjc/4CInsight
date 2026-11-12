@@ -1,6 +1,12 @@
 # 4C Insight analysis guide
 
-This guide explains the current unified **Cohort Analysis** workflow in plain language. The application is intended for cohort QC, robust discovery, candidate prioritization, and transparent sensitivity analysis. It does **not** by itself establish a clinically validated biomarker.
+This guide preserves the original unified **Cohort Analysis** method descriptions and describes how they relate to the current browser-first workflow. For the latest browser-only **Integrative Analysis**, **Pathways**, and gene-sharing networks, start with [the current integrative and pathways guide](integrative_pathways_guide.md). Neither workflow by itself establishes a clinically validated biomarker.
+
+## Current browser workflow: Integrative Analysis and Pathways (November 2026)
+
+The browser app provides **Integrative Analysis → Overview, Details, Pathways**. Select metadata roles and any of seven measured data types, then choose **Run complete analysis**. Overview shows eligible, retained, and omitted observations; joint PCoA, cluster diagnostics, modality influence, and exploratory feature associations. Details gives method and coverage diagnostics. The separate Pathways view accepts corrected Compare Groups gene results or exploratory PCoA gene ranks. It supports **ORA**, **ranked gene-label permutation enrichment**, **Reactome or custom GMT/ZIP**, the selected-pathway gene inspector, and **Pathway overlap / Genes ↔ pathways** networks. See [the step-by-step current guide](integrative_pathways_guide.md) for synthetic examples, limitations, and the network controls.
+
+**Important:** Later sections in this file also describe an earlier unified/native Cohort Analysis design. They are retained as method history, not as instructions to look for a server, cached MSigDB collection, or old all-in-one native pathway UI in the current browser app. Browser Pathways gene sets are selected from Reactome or a custom GMT/ZIP; source organism and exact release must be verified before reporting.
 
 ## Big picture
 
@@ -201,7 +207,7 @@ The existing repertoire controls remain available, including:
 - V/D/J/V–J ambiguity policy,
 - BCR-isotype `Undetermined` exclusion/renormalization sensitivity.
 
-For pathway analysis, either choose a cached public MSigDB human symbol GMT collection or a custom GMT. The report preserves the collection/path provenance used for the run.
+Historical unified/native workflow: this setting used a cached public MSigDB symbol GMT or a custom GMT. In the current browser **Integrative Analysis → Pathways**, select **default Reactome or a custom GMT/ZIP**, then verify organism and exact release. See [the current guide](integrative_pathways_guide.md).
 
 ## 4. Run analysis: primary corrected / standard engine
 

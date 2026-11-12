@@ -8,11 +8,14 @@ import {
   classifyToyVolcano, renderToyVolcano, volcanoSummary, sanitizeToyThresholds,
   bindToyVisualControls,
 } from '../docs-toy-visuals.js'
+import { integrativeVisualDefinitions } from '../docs-integrative.js'
 
 const read = (f) => readFile(new URL(`../${f}`, import.meta.url), 'utf8')
 
-test('every one of the 22 worked examples has an accessible, matching visual', () => {
-  assert.equal(visualDefinitionCount(), 22)
+test('every original and added worked example has an accessible, matching visual', () => {
+  const additional = Object.values(integrativeVisualDefinitions).reduce((total, definitions) => total + definitions.length, 0)
+  assert.equal(additional, 7, 'The seven new integrative/pathway diagrams must remain present')
+  assert.equal(visualDefinitionCount(), 22 + additional, 'The original 22 diagrams and the new diagrams must remain present')
   let count = 0
   for (const section of methodDocs) {
     const examples = methodToyExamples[section.id]
@@ -34,7 +37,7 @@ test('every one of the 22 worked examples has an accessible, matching visual', (
       count += 1
     }
   }
-  assert.equal(count, 22)
+  assert.equal(count, visualDefinitionCount(), 'Every Docs example must have one accessible visual')
 })
 
 test('toy normalization, BH, CLR, clustering, AUC and PCA chart facts match teaching examples', () => {

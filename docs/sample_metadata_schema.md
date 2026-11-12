@@ -28,6 +28,18 @@ The selected roles, not the header spelling, define the analysis. For example, a
 
 If the selected QC/review column contains a value named `Failed`, the UI can automatically propose `Failed` for exclusion; the user can add/remove any distinct status values before running. The completed run freezes the chosen role mapping and excluded values into the result/report provenance.
 
+## Integrative Analysis identity roles
+
+The current browser **Integrative Analysis** uses distinct roles for **Observation ID** (one sample or visit) and **Patient ID** (one person across visits). You can use one metadata column for both roles **only** when each patient has one observation. When there are repeated visits, select a separate patient column and optional **Visit / timepoint** field. Do not use the same per-visit ID as a patient ID for a longitudinal stability analysis.
+
+| Observation ID | Patient ID | Visit / timepoint |
+| --- | --- | --- |
+| `S01_baseline` | `P01` | `Baseline` |
+| `S01_followup` | `P01` | `Month 3` |
+| `S02_baseline` | `P02` | `Baseline` |
+
+These are synthetic rows. See [Integrative Analysis and Pathways](integrative_pathways_guide.md) for role selection, coverage checks, and examples of omitted observations.
+
 ## Cross-modality identifiers
 
 The canonical `sample_id` should represent the biological sample. If an upstream modality uses a different identifier, use the optional alias columns:

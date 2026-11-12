@@ -1,4 +1,5 @@
 import { multiomicsVisualDefinitions } from './docs-new-modalities.js?v=0.22.8'
+import { integrativeVisualDefinitions } from './docs-integrative.js?v=0.22.8'
 // Visual teaching aids for the illustrative examples in the 4C Insight Docs.
 // These diagrams are not results from your cohort.
 // Keep their numeric labels and claims consistent with docs-toy-examples.js.
@@ -322,6 +323,7 @@ function performanceDiagram(id) {
 
 const chartDefinitions = {
   ...multiomicsVisualDefinitions,
+  ...integrativeVisualDefinitions,
   'local-first': [{ title: 'Saved state and local file reconnection', caption: 'Only references go into the JSON; the browser must reconnect the source folder.', render: stateDiagram }],
   'file-merging': [{ title: 'Two workbooks to one expression table', caption: 'Rows match by feature ID. An extra feature is reported, not silently merged.', render: mergeDiagram }],
   'sample-metadata': [{ title: 'Sample-to-file mapping', caption: 'A biological sample ID and a source file ID can be different.', render: metadataDiagram }],

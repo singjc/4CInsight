@@ -1,4 +1,5 @@
 import { multiomicsDocs } from './docs-new-modalities.js?v=0.22.8'
+import { integrativeDocs } from './docs-integrative.js?v=0.22.8'
 export const methodDocs = [
   {
     id: 'local-first',
@@ -175,5 +176,6 @@ export const methodDocs = [
       { label: 'Sandve et al. (2013), Reproducible Computational Research', href: 'https://doi.org/10.1371/journal.pcbi.1003285' },
     ],
   },
+  ...integrativeDocs,
   ...multiomicsDocs,
 ]

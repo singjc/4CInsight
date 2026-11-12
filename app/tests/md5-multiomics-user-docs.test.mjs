@@ -5,6 +5,7 @@ import { methodDocs } from '../docs-content.js'
 import { methodToyExamples, renderToyExamples, exampleSearchText } from '../docs-toy-examples.js'
 import { renderToyVisual, visualDefinitionCount, visualCaption } from '../docs-toy-visuals.js'
 import { multiomicsDocs, multiomicsToyExamples, multiomicsVisualDefinitions } from '../docs-new-modalities.js'
+import { integrativeVisualDefinitions } from '../docs-integrative.js'
 
 const src = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
 const kinds = ['repertoire-diversity','repertoire-sharing','bcr-repertoire','tcr-alpha','tcr-beta','bcr-isotypes','immune-infiltration']
@@ -30,7 +31,8 @@ test('all five added modalities have accurate searchable guide sections and cita
 })
 
 test('new guides retain accessible visual-first diagrams, complete tables, and exact toy text', () => {
-  assert.equal(visualDefinitionCount(),22)
+  assert.equal(Object.keys(integrativeVisualDefinitions).length,7)
+  assert.equal(visualDefinitionCount(),22 + Object.values(integrativeVisualDefinitions).reduce((count, definitions) => count + definitions.length, 0))
   assert.deepEqual(Object.keys(multiomicsToyExamples),kinds)
   assert.deepEqual(Object.keys(multiomicsVisualDefinitions),kinds)
   for (const id of kinds) {

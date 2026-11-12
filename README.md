@@ -2,6 +2,16 @@
 
 **4C Insight** is a local-first multi-omics cohort analysis application. The primary application is a static web app that is designed to run from GitHub Pages. Users select files that remain on their own computer, analysis runs in browser workers with Rust/WebAssembly, and reports are saved back to the user's computer.
 
+## Current browser workflows (November 2026)
+
+The current static application provides **Project**, **Sample Metadata**, **Explore & QC**, **Compare Groups**, **Results**, **Longitudinal**, **Integrative Analysis**, **History**, **Docs**, and **Settings**. Integrative Analysis has **Overview**, **Details**, and a separate **Pathways** view. A browser-local joint workflow can combine the measured distances of seven data types: gene expression, transcript expression, BCR repertoire, TCR alpha, TCR beta, BCR isotypes, and immune infiltration.
+
+Pathways supports **corrected Compare Groups ORA** and **ranked gene-label permutation enrichment** from corrected gene ranks or exploratory joint PCoA associations. It can import a custom GMT/ZIP or download the default Reactome GMT. It provides matched/leading-edge gene inspection, pathway-overlap and gene–pathway networks, interactive plots, and local exports. These views are descriptive or exploratory unless the statistical input and design support a narrower inference. The network edges show **shared genes**, not physical interactions.
+
+For a step-by-step guide with synthetic metadata, cohort-coverage, ORA, permutation, and Jaccard examples, read [Integrative Analysis, Pathways, and Gene-sharing Networks](docs/integrative_pathways_guide.md). The in-app **Docs** page has searchable method sections, examples, diagrams, and literature references.
+
+This current workflow supersedes the historical W5-only feature status below. The Rust/WASM scientific core and browser privacy model remain the architectural basis. The active browser application version is reported separately from the Rust engine version in the UI.
+
 ## Direction from v0.17.0
 
 The old upload/server architecture is retired from the active source tree. Normal browser use must not require a 4C server, temporary project credentials, remote object storage, or file upload.
@@ -22,7 +32,7 @@ HTML / TSV / ZIP / JSON saved locally
 
 The existing Rust scientific modules remain the reference implementation while they are migrated to browser-safe byte/reader APIs. Each migrated workflow must pass native/WASM parity tests before the UI enables it as production analysis.
 
-## Current W5 status
+## Historical W5 milestone (for reference)
 
 W1 established the static local-first browser shell, W2 added metadata/expression QC, W3 added corrected gene/transcript group comparison, and W4 added longitudinal patient-signature analysis. W5 bumps the source version to **v0.21.0** and enables the **Significant Hits** workflow for gene and transcript expression in local Rust/WASM. W5 reuses the exact completed W3 comparison definition and adds post-selection PCA, hierarchical clustering, a clustered heatmap, silhouette, nearest-neighbour group coherence, and subject-blocked PERMANOVA.
 
@@ -48,7 +58,7 @@ W4 adds:
 - cross-modality ranking of gene versus transcript patient-specific stability;
 - native filesystem versus byte/WASM parity fixtures for the longitudinal workflow.
 
-W5 currently enables significant-hit structure for **gene and transcript/isoform expression**. BCR/TCR and immune-infiltration significant-hit panels, repertoire/immune longitudinal analysis, and full browser report generation remain gated until their own byte/WASM parity work is complete. Significant-hit plots are explicitly post-selection descriptive views; they are not independent validation or predictive performance.
+At the W5 milestone, significant-hit structure was enabled for **gene and transcript/isoform expression**. Other data types were still gated in that milestone snapshot. The current browser has since added a seven-modality joint distance workflow and a separate local Pathways view, as documented above. Post-selection plots remain descriptive views, not independent validation or predictive performance.
 
 ## Repository layout
 
