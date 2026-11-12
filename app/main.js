@@ -30,6 +30,7 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
+import { createGuidedTour } from './guided-tour.js?v=0.22.8'
 import { methodDocs } from './docs-content.js?v=0.22.8'
 import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.8'
 import { validateWasmMemoryReport } from './wasm-memory.js'
@@ -48,6 +49,7 @@ import {
 const APP_VERSION = '0.22.8'
 const APP_STATE_SCHEMA = 1
 const dynamicTableSources = new Map()
+let guidedTourController = null
 
 const tabs = [
   ['project', 'Project', '1'],
@@ -5220,9 +5222,10 @@ function render() {
   attachStaticSvgNavigation(main)
   attachTableHeatmapNavigation(main)
   renderSystemInfo()
-  scheduleLocalSessionSave()
+  if (!guidedTourController?.active) scheduleLocalSessionSave()
   document.querySelector('#system-chip')?.addEventListener('click', () => { state.tab = 'settings'; render() })
   document.querySelector('#stop-science-work')?.addEventListener('click', stopScienceWork)
+  guidedTourController?.refresh()
 }
 
 async function registerIsolationServiceWorker() {
@@ -5241,6 +5244,14 @@ async function registerIsolationServiceWorker() {
   }
 }
 
+guidedTourController = createGuidedTour({
+  current: () => ({ tab: state.tab, view: state.integrativeView }),
+  navigate: ({tab, view}) => {
+    state.tab = tab
+    if (view) state.integrativeView = view
+    render()
+  },
+})
 void registerIsolationServiceWorker()
 bindGlobalStateActions()
 render()

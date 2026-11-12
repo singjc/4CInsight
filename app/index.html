@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#111827" />
   <meta name="description" content="4C Insight — local-first multi-omics cohort analysis" />
   <link rel="stylesheet" href="./styles.css?v=0.22.8" />
+  <link rel="stylesheet" href="./guided-tour.css?v=0.22.8" />
   <link rel="stylesheet" href="./integrative-detail-width.css?v=20261109-r1" />
   <link rel="stylesheet" href="./local-session.css?v=20261109-r1" />
   <title>4C Insight</title>
@@ -37,6 +38,10 @@
       <aside class="sidebar" aria-label="Analysis workflows">
         <div class="sidebar-label">Workflow</div>
         <nav id="workflow-nav" class="workflow-nav"></nav>
+        <div class="guided-tour-entry" role="group" aria-label="Guided help">
+          <button id="guided-tour-start" type="button">Guided walkthrough</button>
+          <button id="guided-tour-current" type="button">Tour this tab</button>
+        </div>
         <div id="sidebar-status" class="sidebar-status"></div>
       </aside>
       <main id="main-content" class="main-content"></main>

@@ -1,0 +1,20 @@
+/* Read-only, accessible guided walkthrough. Does not change scientific content. */
+.guided-tour-entry{display:flex;flex-direction:column;gap:7px;padding:12px 10px;border-top:1px solid var(--border-color,#e5eaf2)}
+.guided-tour-entry button{border:1px solid #cad4e5;border-radius:7px;padding:9px 11px;text-align:left;background:#fff;color:#1e3a65;font:inherit;font-size:12px;font-weight:650;cursor:pointer}
+.guided-tour-entry button:hover,.guided-tour-entry button:focus-visible{outline:2px solid #325be2;outline-offset:2px}
+.tour-shade{position:fixed;z-index:9995;background:rgba(12,20,36,.62);pointer-events:auto}
+.tour-highlight{position:fixed;z-index:9996;border:2px solid #6c9dff;border-radius:9px;pointer-events:auto;background:rgba(255,255,255,.04);box-shadow:0 0 0 2px rgba(255,255,255,.65)}
+.guided-tour-panel{position:fixed;z-index:9997;background:#fff;border:1px solid #ccd8f0;border-radius:13px;box-shadow:0 20px 60px rgba(8,18,43,.3);padding:17px 18px;max-width:calc(100vw - 24px);color:#17253d;line-height:1.45}
+.guided-tour-panel[hidden],.tour-shade[hidden],.tour-highlight[hidden]{display:none!important}
+.guided-tour-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.guided-tour-progress{font-size:12px;font-weight:650;color:#345fcb}
+.guided-tour-heading #tour-close{border:0;background:none;font-size:24px;line-height:1;cursor:pointer;padding:0 4px;color:#516078}
+.guided-tour-panel h2{font-size:17px;line-height:1.3;margin:12px 0 8px}
+.guided-tour-panel p{font-size:13px;line-height:1.55;margin:0 0 18px}
+.guided-tour-actions,.guided-tour-actions>div{display:flex;align-items:center;justify-content:space-between;gap:9px}
+.guided-tour-actions button{border:1px solid #c9d3e4;border-radius:7px;background:white;font-size:12px;font-weight:650;color:#1f3554;padding:8px 11px;cursor:pointer}
+.guided-tour-actions button:disabled{opacity:.45;cursor:default}
+.guided-tour-actions .guided-tour-primary{background:#315ae3;border-color:#315ae3;color:white}
+.guided-tour-panel button:focus-visible{outline:3px solid #7c9fff;outline-offset:2px}
+@media(max-width:680px){.guided-tour-entry{padding:8px 5px}.guided-tour-entry button{font-size:11px;padding:7px}.guided-tour-panel{padding:13px}.guided-tour-panel h2{font-size:15px}}
+@media(prefers-reduced-motion:reduce){.guided-tour-panel,.tour-highlight{transition:none!important}}
