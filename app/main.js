@@ -30,7 +30,6 @@ import {
 import { saveTextFile } from './save.js'
 import { mergeMetrics, defaultMergeMetrics, sortedMergeFiles, validateMergeConfig } from './merge-helpers.js'
 import { matchSavedFiles, matchSavedReference } from './state-reconnect.js'
-import { aiAssistantView, mountAiAssistant } from './ai-assistant.js?v=0.22.8'
 import { methodDocs } from './docs-content.js?v=0.22.8'
 import { exampleSearchText, renderToyExamples, bindToyVisualControls } from './docs-toy-examples.js?v=0.22.8'
 import { validateWasmMemoryReport } from './wasm-memory.js'
@@ -58,7 +57,6 @@ const tabs = [
   ['results', 'Results', 'R'],
   ['longitudinal', 'Longitudinal', '4'],
   ['hits', 'Integrative Analysis', '5'],
-  ['ai', 'AI Assistant', 'A'],
   ['history', 'History', '6'],
   ['docs', 'Docs', '?'],
   ['settings', 'Settings', '⚙'],
@@ -1045,7 +1043,7 @@ function queueLocalSourceCache() {
 }
 function applyLocalSessionUi(saved) {
   if (!saved || typeof saved !== 'object') return
-  if (['project', 'metadata', 'qc', 'compare', 'results', 'longitudinal', 'hits', 'ai', 'history', 'docs', 'settings'].includes(saved.tab)) state.tab = saved.tab
+  if (['project', 'metadata', 'qc', 'compare', 'results', 'longitudinal', 'hits', 'history', 'docs', 'settings'].includes(saved.tab)) state.tab = saved.tab
   if (['overview', 'details', 'pathways'].includes(saved.integrativeView)) state.integrativeView = saved.integrativeView
   if (['overview', 'details'].includes(saved.resultsMode)) state.resultsMode = saved.resultsMode
   if (['active', 'draft'].includes(saved.alignmentSource)) state.alignmentSource = saved.alignmentSource
@@ -5199,7 +5197,6 @@ function render() {
     results: resultsView,
     longitudinal: longitudinalView,
     hits: significantHitsView,
-    ai: aiAssistantView,
     history: historyView,
     docs: docsView,
     settings: settingsView,
@@ -5212,18 +5209,6 @@ function render() {
   if (state.tab === 'results') bindResultsEvents()
   if (state.tab === 'longitudinal') bindLongitudinalEvents()
   if (state.tab === 'hits') { bindSignificantHitEvents(); void ensureIntegrativeMetadataColumns() }
-  if (state.tab === 'ai') mountAiAssistant(main,{summary:{
-    integrative: Boolean(state.i2StructureResult),
-    compare: Boolean(state.compareResult),
-    pathways: Boolean(state.pathwayResult),
-    pathwayCount: state.pathwayResult?.results?.length || 0,
-    pathwayEvidence: state.pathwayResult?.source === 'exploratory' ? 'exploratory' : 'unverified',
-  },evidence:{
-    pathway: state.pathwayResult,
-    joint: state.i2StructureResult,
-    compare: state.compareResult,
-    selectedPathwayKey: state.pathwaySelectedKey,
-  }})
   document.querySelectorAll('[data-open-results]').forEach(button => button.addEventListener('click', () => { state.resultsMode = 'overview'; state.tab = 'results'; render() }))
   if (state.tab === 'history') {
     bindHistoryEvents()
