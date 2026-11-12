@@ -1,124 +1,133 @@
-/** 4C Insight A2: on-demand native messaging. No HTTP listener, user tokens, or credential storage. */
-export const AI_PROVIDERS=Object.freeze(['openai','claude','ollama']);
-export const AI_JCODE_DOCS='https://jcode.sh/docs';
-export const AI_CONNECTOR_DOCS='https://github.com/singjc/4CInsight/blob/main/docs/ai_assistant.md';
-export function detectedOs(agent='') {
-  const ua=String(agent).toLowerCase();
-  if (/windows|win32|win64/.test(ua)) return 'windows';
-  if (/macintosh|mac os|darwin/.test(ua)) return 'mac';
-  if (/linux|x11|android/.test(ua)) return 'linux';
-  return 'unknown';
+/** 4C Insight A3: browser-first AI. No JCode, native host, extension, or localhost bridge. */
+import { WEBLLM_IMPORT, LOCAL_MODELS, MODEL_DOCS, browserSupport, cloudChat, cleanQuestion, cleanModelId, ollamaModels, promptMessages, safeAiContext, selectionFromCatalog } from './ai-runtime.js?v=0.22.8';
+const esc = text => String(text ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const state = {
+  mode: 'local', model: LOCAL_MODELS[0].id, provider: 'openai', cloudModel: '', key: '', consent: false,
+  includeContext: false, busy: false, loadedModel: '', engine: null, loading: false, progress: '', status: '',
+  messages: [], question: '', gpu: null, gpuChecked: false, ollama: [],
+};
+let webllm = null;
+let loadPromise = null;
+const providerLabel = { openai:'OpenAI API', claude:'Claude API', ollama:'Ollama (already installed)' };
+const defaults = { openai:'gpt-5.6-terra', claude:'claude-sonnet-4-6', ollama:'' };
+function localReady() { return Boolean(state.engine && state.loadedModel === state.model); }
+function status(message) { state.status = message; const el = typeof document === 'undefined' ? null : document.querySelector('#ai-status'); if (el) el.textContent = message; }
+function chatHtml() {
+  return state.messages.length ? state.messages.map(entry => `<div class="ai-message ${entry.role==='user'?'ai-user':'ai-assistant'}"><strong>${entry.role==='user'?'You':'Assistant'}</strong><p>${esc(entry.content)}</p></div>`).join('') : '<p class="ai-note">Ask a question about an analysis. Your original source files are never attached automatically.</p>';
 }
-export function osInstallInstructions(os) {
-  if(os==='linux')return {label:'Linux',command:'Open the verified 4C AI Companion installer. It registers Firefox Native Messaging. Installation does not start a background service.',note:'Development build: see docs/ai_assistant.md. A normal Firefox release requires a signed extension.'};
-  if(os==='mac')return {label:'macOS',command:'A signed 4C AI Companion installer is required before this connection works.',note:'macOS packaging and permission checks are not yet released.'};
-  if(os==='windows')return {label:'Windows',command:'A signed 4C AI Companion installer is required before this connection works.',note:'Windows packaging and registry integration are not yet released.'};
-  return {label:'Choose operating system',command:'',note:'Operating-system detection is approximate.'};
+function localPanel() {
+  const support = state.gpuChecked ? state.gpu : null;
+  return `<div class="ai-setup-panel"><h3>1. Prepare on-device AI</h3><p class="ai-note">The model runs in this browser. No account, extension, or separate application is needed. The first download requires your approval.</p>
+  <div class="ai-model-grid"><label for="ai-local-model">Model<select id="ai-local-model">${LOCAL_MODELS.map(m => `<option value="${esc(m.id)}" ${state.model===m.id?'selected':''}>${esc(m.label)}</option>`).join('')}</select></label>
+  <div class="ai-model-detail">${esc(LOCAL_MODELS.find(m=>m.id===state.model)?.note || '')} Estimated model GPU memory: ~${esc(LOCAL_MODELS.find(m=>m.id===state.model)?.memoryMB)} MB. This is not the download size or a guarantee of compatibility.</div></div>
+  <div class="ai-actions"><button type="button" id="ai-check-gpu" class="secondary-button">Check browser compatibility</button>
+  <button type="button" id="ai-load" class="primary-button" ${state.loading || state.busy ? 'disabled' : ''}>${state.loading?'Preparing…':localReady()?'Model ready — reload':'Download and start model'}</button>
+  <button type="button" id="ai-unload" class="secondary-button" ${state.engine ? '' : 'disabled'}>Unload from memory</button></div>
+  <p class="ai-note" id="ai-gpu-status">${support ? esc(support.message) : 'Compatibility has not been checked. WebGPU is needed for local inference.'}</p>
+  <div id="ai-load-progress" class="ai-note" role="status" aria-live="polite">${esc(state.progress)}</div>
+  <p class="ai-note">Model software and weights are downloaded from external model/CDN hosts. Inference stays on-device. The browser may reuse cached files; clearing site data can remove them.</p></div>`;
 }
-export function providerInstructions(provider) {
-  if(provider==='claude')return {name:'Claude',command:'jcode login --provider claude',note:'Click Open JCode sign-in. JCode stores credentials outside 4C Insight.'};
-  if(provider==='ollama')return {name:'Ollama',command:'jcode login --provider ollama',note:'Ollama must already be installed and running. Choose a local model in JCode.'};
-  return {name:'OpenAI',command:'jcode login --provider openai',note:'Click Open JCode sign-in. API billing and subscription access can differ.'};
+function cloudPanel() {
+  const isOllama = state.provider === 'ollama';
+  return `<div class="ai-setup-panel"><h3>1. Connect an optional online or existing local provider</h3>
+  <p class="ai-warning"><strong>Advanced mode:</strong> A ChatGPT or Claude subscription does not automatically provide API access. Direct API keys in browser pages are risky. For sensitive work, use on-device AI or a future trusted sign-in service instead.</p>
+  <div class="ai-model-grid"><label>Provider<select id="ai-provider">${Object.entries(providerLabel).map(([id,label])=>`<option value="${id}" ${state.provider===id?'selected':''}>${esc(label)}</option>`).join('')}</select></label>
+  <label>Model ID<input id="ai-cloud-model" value="${esc(state.cloudModel)}" maxlength="101" placeholder="${esc(defaults[state.provider])}" autocomplete="off"></label></div>
+  ${isOllama ? `<p class="ai-note">Ollama is optional and must already be installed and running. A website cannot install or start it. The local server must allow this site's origin.</p>
+    <button type="button" id="ai-ollama-list" class="secondary-button">Find running Ollama models</button>
+    <div class="ai-note">${state.ollama.length ? `Available: ${state.ollama.map(esc).join(', ')}` : 'No Ollama models detected in this tab.'}</div>` : `<p class="ai-note">You need API access and a dedicated key. <a href="${MODEL_DOCS[state.provider]}" rel="noopener noreferrer" target="_blank">Manage your ${esc(state.provider)} API keys</a>. API usage can incur charges.</p>
+   <label>API key for this tab only<input type="password" id="ai-cloud-key" value="" autocomplete="off" spellcheck="false" placeholder="${state.key?'Key is held in this tab':'Paste a restricted short-lived key'}" /></label>
+   <div class="ai-actions"><button type="button" id="ai-forget-key" class="secondary-button">Forget API key</button><span class="ai-note">This site never saves your key. Browser extensions or injected scripts might still access it.</span></div>
+   <label class="ai-context-choice"><input type="checkbox" id="ai-key-consent" ${state.consent?'checked':''}> I understand the risk of putting an API key into a webpage and accept direct browser requests.</label>`}
+  <p class="ai-note">${isOllama?'Messages stay on your device when using a local Ollama model.':'Your question and any approved context are sent directly to the selected provider.'}</p></div>`;
 }
-function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
-export function safeAiContext(input = {}) {
-  return {
-    context_type: 'aggregate_4c_insight_summary_v1',
-    integrative_result_available: Boolean(input.integrative),
-    compare_groups_result_available: Boolean(input.compare),
-    pathway_result_available: Boolean(input.pathways),
-    pathway_sets_tested: Number.isSafeInteger(input.pathwayCount) && input.pathwayCount >= 0 ? Math.min(input.pathwayCount, 1000000) : null,
-    pathway_evidence_type: ['exploratory','defined_comparison'].includes(input.pathwayEvidence) ? input.pathwayEvidence : 'unverified',
-  };
+export function aiAssistantView() {
+  return `<section class="page-heading"><div><span class="eyebrow">AI Assistant</span><h2>Ask questions about your analysis</h2><p>Use on-device AI without installing a companion application or browser extension. Optional online models are available for advanced users.</p></div><div class="local-card"><strong>Browser-first AI</strong><span>Local by default · Context shared only with approval</span></div></section>
+  <section class="card ai-card"><div class="card-heading"><div><h3>Choose where the model runs</h3><p>On-device is the recommended option.</p></div></div>
+  <div class="ai-mode-tabs" role="group" aria-label="AI model location"><button id="ai-mode-local" class="${state.mode==='local'?'ai-mode-active':''}" type="button" aria-pressed="${state.mode==='local'}">On-device · Private</button><button id="ai-mode-cloud" class="${state.mode==='cloud'?'ai-mode-active':''}" type="button" aria-pressed="${state.mode==='cloud'}">Online or Ollama · Advanced</button></div>
+  ${state.mode==='local' ? localPanel() : cloudPanel()}</section>
+  <section class="card ai-card"><div class="card-heading"><div><h3>2. Ask your question</h3><p>Chat is held only in this open page. The assistant cannot read raw data files or run scientific tools.</p></div><button id="ai-clear-chat" type="button" class="secondary-button">Clear chat</button></div>
+  <div class="ai-example-prompts" aria-label="Example questions">${['Explain my pathway results','What does a PCoA cluster mean?','What should I check next?'].map(p=>`<button type="button" data-ai-prompt="${esc(p)}" class="secondary-button">${esc(p)}</button>`).join('')}</div>
+  <div class="ai-chat" id="ai-chat" role="log" aria-live="polite">${chatHtml()}</div>
+  <label class="ai-context-choice"><input type="checkbox" id="ai-include-context" ${state.includeContext?'checked':''}> Include the approved aggregate analysis summary with my next message</label>
+  <pre class="ai-context-preview" id="ai-context-preview">No analysis summary will be sent.</pre>
+  <label for="ai-question">Your question</label><textarea id="ai-question" maxlength="4000" rows="3" placeholder="What does my pathway network show?">${esc(state.question)}</textarea>
+  <div class="ai-actions"><button id="ai-send" type="button" class="primary-button" ${state.busy || state.loading?'disabled':''}>${state.busy?'Working…':'Send question'}</button><span id="ai-status" class="ai-note" role="status" aria-live="polite">${esc(state.status || 'Choose a model to begin.')}</span></div></section>`;
 }
-export function validateAiQuestion(value) {
-  const question = String(value ?? '').trim();
-  if (!question || question.length > 4000) throw new Error('Enter a question of 1–4,000 characters.');
-  return question;
+function updateProgress(progress) {
+  const raw = progress?.text || (Number.isFinite(progress?.progress) ? `${Math.round(progress.progress*100)}%` : 'Preparing model');
+  state.progress = String(raw).slice(0, 240);
+  const el = typeof document === 'undefined' ? null : document.querySelector('#ai-load-progress'); if(el) el.textContent = state.progress;
 }
-export function aiRequestPayload({message, provider, model='', context=null, history=[]}) {
-  if (!AI_PROVIDERS.includes(provider)) throw new Error('Choose OpenAI, Claude, or Ollama.');
-  if (model && !/^[a-zA-Z0-9._:/+-]{1,100}$/.test(model)) throw new Error('Model ID contains unsupported characters.');
-  return {message:validateAiQuestion(message), provider, model, context, history: history.slice(-6).map(entry=>({role:entry.role==='assistant'?'assistant':'user',content:String(entry.content||'').slice(0,2000)}))};
+async function checkGPU() {
+  const n = globalThis.navigator;
+  if (!browserSupport(n).webgpu) return { ok:false, message:'WebGPU is unavailable in this browser. Try a recent Chrome/Edge or supported Firefox version, or use an optional online model.' };
+  try {
+    const adapter = await n.gpu.requestAdapter({powerPreference:'high-performance'});
+    if(!adapter) return {ok:false,message:'No compatible WebGPU adapter was found. This device cannot run this WebLLM mode.'};
+    return {ok:true,message:'WebGPU adapter detected. Model loading still depends on graphics memory and driver support.'};
+  } catch { return {ok:false,message:'WebGPU access failed. Check browser GPU settings and supported hardware.'}; }
 }
-
-const channel='4c-insight-ai-v2';
-let nextId=0;
-const pending=new Map();
-export function validAiEnvelope(msg){return Boolean(msg && msg.channel===channel && msg.direction==='response' && typeof msg.id==='string' && msg.id.length<=80 && (typeof msg.ok==='boolean'));}
-export function askCompanion(op,payload={},timeout=120000,host=globalThis){
-  if(!['status','chat','login'].includes(op))return Promise.reject(new Error('Unsupported companion action'));
-  if(typeof host.window?.postMessage!=='function')return Promise.reject(new Error('Browser messaging is unavailable'));
-  const id=`a2-${++nextId}-${Math.random().toString(36).slice(2,10)}`;
-  return new Promise((resolve,reject)=>{
-    const timer=host.setTimeout(()=>{pending.delete(id);reject(new Error('AI Companion did not respond. Check the extension setup.'));},timeout);
-    pending.set(id,{resolve,reject,timer});
-    host.window.postMessage({channel,direction:'request',id,op,payload},host.window.location.origin);
-  });
+async function loadLocal() {
+  if (state.loading) return;
+  state.loading = true;state.progress = 'Loading WebLLM runtime…';
+  try {
+    const gpu = await checkGPU();state.gpuChecked=true;state.gpu=gpu;
+    if (!gpu.ok) throw Error(gpu.message);
+    if(!webllm) webllm = await import(WEBLLM_IMPORT);
+    selectionFromCatalog(state.model, webllm.prebuiltAppConfig?.model_list || []);
+    const selected = state.model;
+    updateProgress({text:'Downloading/loading selected model…'});
+    if(state.engine && state.loadedModel !== selected) { await state.engine.unload?.();state.engine=null;state.loadedModel=''; }
+    if(!state.engine) state.engine = await webllm.CreateMLCEngine(selected,{initProgressCallback:updateProgress});
+    else await state.engine.reload(selected);
+    state.loadedModel = selected;state.progress = 'Model ready. You can send a question.';status('On-device model ready.');
+  } catch(e) {status(`Model setup failed: ${String(e?.message||e).slice(0,210)}`);state.progress='Choose another model or try the advanced online option.';}
+  finally {state.loading=false;}
 }
-export function receiveCompanionMessage(event,host=globalThis){
-  if(event?.source!==host.window || event.origin!==host.window.location.origin || !validAiEnvelope(event.data))return false;
-  const task=pending.get(event.data.id);if(!task)return false;
-  pending.delete(event.data.id);host.clearTimeout(task.timer);
-  if(event.data.ok)task.resolve(event.data.result||{});
-  else task.reject(new Error(String(event.data.error||'AI Companion unavailable').slice(0,200)));
-  return true;
+async function submitQuestion(summary) {
+  if (state.busy || state.loading)return;
+  let question;
+  try {question=cleanQuestion(state.question);}catch(e){status(e.message);return;}
+  const previous = state.messages.slice();
+  const context = state.includeContext ? summary : null;
+  state.busy=true;status('Preparing answer…');
+  try {
+    let answer;
+    if(state.mode==='local') {
+      if (!localReady()) throw Error('Download and start an on-device model first.');
+      const reply = await state.engine.chat.completions.create({messages:promptMessages(question,previous,context),stream:false,max_tokens:650});
+      answer = reply?.choices?.[0]?.message?.content;
+    } else {
+      if(state.provider!=='ollama' && !state.consent) throw Error('Review and accept the advanced browser-key warning first.');
+      const model=cleanModelId(state.cloudModel || defaults[state.provider]);
+      answer=await cloudChat({provider:state.provider,model,key:state.key,question,history:previous,context});
+    }
+    if(typeof answer!=='string'||!answer.trim())throw Error('No text response returned.');
+    state.messages=[...previous,{role:'user',content:question},{role:'assistant',content:answer.slice(0,16000)}].slice(-16);
+    state.question='';state.status=state.mode==='local'?'Answered on your device.':'Response received. Review any model claims.';
+  }catch(e){state.status=`Question failed: ${String(e?.message||e).slice(0,210)}`;}
+  finally {state.busy=false;}
 }
-let listenerInstalled=false;
-function listen(){if(listenerInstalled||typeof window==='undefined')return;window.addEventListener('message',receiveCompanionMessage);listenerInstalled=true;}
-let memory={os:'',provider:'openai',model:'',connected:false,installed:false,version:'',status:'Checking on-demand connection…',checkedOnce:false,showContext:false,history:[],busy:false};
-function initialOs(){return detectedOs(typeof navigator!=='undefined'?`${navigator.userAgent||''} ${navigator.platform||''}`:'');}
-export function aiAssistantView(){
-  if(!memory.os)memory.os=initialOs();
-  const setup=osInstallInstructions(memory.os);
-  return `<section class="page-heading"><div><span class="eyebrow">AI Assistant</span><h2>Ask questions about your analysis</h2><p>JCode connects to your chosen model. No server, access token, or manual bridge launch is needed after the one-time companion setup.</p></div><div class="local-card"><strong>On-demand local connection</strong><span>Chat only · User-approved context · No background service</span></div></section>
-  <section class="card ai-card"><div class="card-heading"><div><h3>1. Connect JCode</h3><p>The AI Companion starts when you request it. It does not run as a separate server.</p></div><a href="${AI_CONNECTOR_DOCS}" target="_blank" rel="noopener noreferrer">Set up AI Companion</a></div>
-    <div class="ai-controls"><label>Operating system<select id="ai-os"><option value="linux" ${memory.os==='linux'?'selected':''}>Linux</option><option value="mac" ${memory.os==='mac'?'selected':''}>macOS</option><option value="windows" ${memory.os==='windows'?'selected':''}>Windows</option><option value="unknown" ${memory.os==='unknown'?'selected':''}>Choose OS</option></select></label>
-    <button id="ai-check" type="button" class="primary-button">Check connection</button><span id="ai-status" class="ai-status" role="status" aria-live="polite">${esc(memory.status)}${memory.version?' · '+esc(memory.version):''}</span></div>
-    <p class="ai-note">${esc(setup.command)} ${esc(setup.note)} <a href="${AI_JCODE_DOCS}" target="_blank" rel="noopener noreferrer">Get JCode</a>. The browser must approve the extension and native component. No program is installed without your consent.</p>
-  </section>
-  <section class="card ai-card"><div class="card-heading"><div><h3>2. Choose your model</h3><p>Sign in through JCode. Credentials are not sent to 4C Insight.</p></div></div>
-    <div class="ai-controls"><label>Provider<select id="ai-provider"><option value="openai" ${memory.provider==='openai'?'selected':''}>OpenAI / ChatGPT</option><option value="claude" ${memory.provider==='claude'?'selected':''}>Claude</option><option value="ollama" ${memory.provider==='ollama'?'selected':''}>Ollama</option></select></label><label>Model ID (optional)<input id="ai-model" maxlength="100" autocomplete="off" value="${esc(memory.model)}" placeholder="JCode default model" /></label><button id="ai-login" type="button" class="secondary-button">Open JCode sign-in</button></div>
-    <p id="ai-provider-note" class="ai-note">${esc(providerInstructions(memory.provider).note)}</p>
-  </section>
-  <section class="card ai-card"><div class="card-heading"><div><h3>3. Chat</h3><p>Only your question and any approved aggregate summary are sent to the model. JCode is called with tools disabled.</p></div><button id="ai-clear-chat" type="button" class="secondary-button">Clear chat</button></div>
-    <div id="ai-chat" class="ai-chat" role="log" aria-live="polite">${memory.history.length?memory.history.map(m=>`<div class="ai-message ${m.role==='user'?'ai-user':'ai-assistant'}"><strong>${m.role==='user'?'You':'Assistant'}</strong><p>${esc(m.content)}</p></div>`).join(''):'<p class="ai-note">Ask a question after the connection check succeeds.</p>'}</div>
-    <label class="ai-context-choice"><input id="ai-include-context" type="checkbox" ${memory.showContext?'checked':''}/> Include the aggregate analysis summary shown below with my next message</label>
-    <pre id="ai-context-preview" class="ai-context-preview">No analysis summary will be sent.</pre>
-    <label for="ai-question">Your question</label><textarea id="ai-question" rows="3" maxlength="4000" placeholder="How should I interpret this pathway network?"></textarea>
-    <div class="ai-actions"><button id="ai-send" type="button" class="primary-button" ${memory.busy?'disabled':''}>${memory.busy?'Waiting…':'Send to JCode'}</button><span class="ai-note">Existing JCode user-level hooks may still run. Tool-free chat is not an OS sandbox.</span></div>
-  </section>`;
-}
-export function mountAiAssistant(root,{summary={}}={}){
-  listen();const el=id=>root.querySelector(`#${id}`),context=safeAiContext(summary);
-  const rerender=()=>{root.innerHTML=aiAssistantView();mountAiAssistant(root,{summary});};
-  const status=m=>{memory.status=m;const node=el('ai-status');if(node)node.textContent=`${m}${memory.version?' · '+memory.version:''}`;};
-  el('ai-os')?.addEventListener('change',e=>{memory.os=e.currentTarget.value;rerender();});
-  el('ai-provider')?.addEventListener('change',e=>{memory.provider=e.currentTarget.value;rerender();});
-  el('ai-model')?.addEventListener('input',e=>{memory.model=e.currentTarget.value;});
-  const preview=el('ai-context-preview');const draw=()=>{if(preview)preview.textContent=memory.showContext?JSON.stringify(context,null,2):'No analysis summary will be sent.';};
-  el('ai-include-context')?.addEventListener('change',e=>{memory.showContext=e.currentTarget.checked;draw();});draw();
-  el('ai-clear-chat')?.addEventListener('click',()=>{memory.history=[];rerender();});
-  const check=async()=>{
-    status('Checking on-demand connection…');try{const result=await askCompanion('status',{},8000);memory.installed=Boolean(result.installed);memory.connected=memory.installed;memory.version=String(result.version||'').slice(0,100);
-      status(memory.installed?'JCode is ready. Choose a provider.':'AI Companion is available, but JCode is not installed. Open Get JCode.');}
-    catch(_){memory.connected=false;status('AI Companion not detected. Complete the one-time setup and select Check connection.');}
-  };
-  el('ai-check')?.addEventListener('click',()=>void check());
-  if(!memory.checkedOnce){memory.checkedOnce=true;void check();}
-  el('ai-login')?.addEventListener('click',async()=>{
-    if(!memory.connected){status('Connect JCode first.');return;}
-    if(!window.confirm(`Open JCode sign-in for ${memory.provider}?`))return;
-    status('Opening JCode sign-in…');try{const r=await askCompanion('login',{provider:memory.provider},15000);status(r.message||'JCode sign-in opened.');}
-    catch(e){status(e.message);}
-  });
-  el('ai-send')?.addEventListener('click',async()=>{
-    if(memory.busy)return;if(!memory.connected){status('Check the AI Companion connection first.');return;}
-    let payload;try{payload=aiRequestPayload({message:el('ai-question').value,provider:memory.provider,model:memory.model,context:memory.showContext?context:null,history:memory.history});}
-    catch(e){status(e.message);return;}
-    memory.busy=true;status('JCode is responding…');const prior=[...memory.history];
-    try{const r=await askCompanion('chat',payload,125000);if(typeof r.answer!=='string'||!r.answer.trim())throw Error('JCode returned no response');
-      memory.history=[...prior,{role:'user',content:payload.message},{role:'assistant',content:r.answer.slice(0,12000)}].slice(-16);status('Response received. No project files were changed.');}
-    catch(e){memory.history=prior;status(`Chat failed: ${e.message}`);}finally{memory.busy=false;rerender();}
-  });
+export function mountAiAssistant(root,{summary={}}={}) {
+  const $=id=>root.querySelector(`#${id}`);
+  const redraw=()=>{if (!root.querySelector('#ai-chat')) return;root.innerHTML=aiAssistantView();mountAiAssistant(root,{summary});};
+  const syncPreview=()=>{const e=$('ai-context-preview');if(e)e.textContent=state.includeContext?JSON.stringify(safeAiContext(summary),null,2):'No analysis summary will be sent.';};
+  $('ai-mode-local')?.addEventListener('click',()=>{state.mode='local';state.status='';redraw();});
+  $('ai-mode-cloud')?.addEventListener('click',()=>{state.mode='cloud';state.status='';redraw();});
+  $('ai-local-model')?.addEventListener('change',e=>{state.model=e.target.value;redraw();});
+  $('ai-check-gpu')?.addEventListener('click',async()=>{state.gpu=await checkGPU();state.gpuChecked=true;redraw();});
+  $('ai-load')?.addEventListener('click',async()=>{await loadLocal();redraw();});
+  $('ai-unload')?.addEventListener('click',async()=>{if(state.engine){try{await state.engine.unload?.();}catch{}state.engine=null;state.loadedModel='';state.status='Model unloaded from active memory. The browser may retain cached model files.';redraw();}});
+  $('ai-provider')?.addEventListener('change',e=>{state.provider=e.target.value;state.cloudModel='';state.key='';state.consent=false;state.ollama=[];redraw();});
+  $('ai-cloud-model')?.addEventListener('input',e=>{state.cloudModel=e.target.value;});
+  $('ai-cloud-key')?.addEventListener('input',e=>{state.key=e.target.value;});
+  $('ai-key-consent')?.addEventListener('change',e=>{state.consent=e.target.checked;});
+  $('ai-forget-key')?.addEventListener('click',()=>{state.key='';state.consent=false;redraw();});
+  $('ai-ollama-list')?.addEventListener('click',async()=>{status('Checking local Ollama…');try{state.ollama=await ollamaModels();if(state.ollama.length&&!state.cloudModel)state.cloudModel=state.ollama[0];state.status=state.ollama.length?'Available Ollama models found.':'Ollama returned no installed models.';}catch{state.status='Ollama is not reachable. It must be installed, running, and allow this web origin.';}redraw();});
+  $('ai-clear-chat')?.addEventListener('click',()=>{state.messages=[];state.question='';redraw();});
+  root.querySelectorAll('[data-ai-prompt]').forEach(el=>el.addEventListener('click',()=>{state.question=el.dataset.aiPrompt||'';const input=$('ai-question');if(input){input.value=state.question;input.focus();}}));
+  $('ai-include-context')?.addEventListener('change',e=>{state.includeContext=e.target.checked;syncPreview();});syncPreview();
+  $('ai-question')?.addEventListener('input',e=>{state.question=e.target.value;});
+  $('ai-send')?.addEventListener('click',async()=>{await submitQuestion(summary);redraw();});
 }

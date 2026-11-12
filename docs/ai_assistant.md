@@ -1,56 +1,54 @@
-# 4C Insight AI Assistant — A2 on-demand JCode companion
+# AI Assistant — browser-first, no JCode installation
 
-## Goal
+The AI Assistant is an optional explanation tool. The scientific calculations remain in 4C Insight. An AI response is not a replacement for statistical tests, independent validation, or clinical interpretation.
 
-Users should open **AI Assistant**, select a model, and chat without running a service or copying access tokens.
+## Start here: on-device AI
 
-The main 4C Insight analysis remains browser-only. The optional AI Companion is a **separate native component** because normal websites cannot start JCode or inspect the operating system. It is started by the browser through Native Messaging **only when an approved request occurs**. It has no listening port or permanent service.
+1. Open **AI Assistant**. The default mode is **On-device · Private**.
+2. Select **Check browser compatibility**. WebLLM needs a compatible WebGPU browser and GPU. 4C Insight does not guess GPU memory from total system RAM.
+3. Choose a listed model. The choices have approximate GPU-memory requirements, not guaranteed download sizes.
+4. Select **Download and start model**. Review the model name before approving this download. The browser obtains the WebLLM library and weights from external hosts. This download does not include your cohort data.
+5. When the model reports ready, enter a question. Model inference runs inside the browser. The browser may reuse downloaded models from its cache; clearing site storage can remove them.
+6. The model is unloaded from active memory when you select **Unload from memory**. Cached model files may remain until you clear browser site data.
 
-## Connection and user consent
+If WebGPU is not supported, on-device AI cannot run with the current WebLLM engine. No CPU-only mode is claimed in this release. Try a compatible browser/device or use a separately configured advanced provider. A smaller model does not guarantee compatibility.
 
-1. Install a **signed Firefox extension** and the matching, verified native companion **once**. Firefox may ask for permission. The companion installer must be approved by the operating system. These components are **not silently installed** from the website.
-2. Open 4C Insight → AI Assistant → **Check connection**. The page sends a request to the extension. Firefox starts the native companion for that request and stops it afterward.
-3. If JCode is installed, choose OpenAI, Claude or Ollama. Select **Open JCode sign-in** to start JCode's login in a visible terminal where supported. A local Ollama model must already be available.
-4. Enter a question. Cloud providers receive the question and any aggregate data the user explicitly approved. No source file is shared automatically.
+## What is sent to the model?
 
-The login button supports Linux desktop terminals in A2. macOS and Windows are not packaged or verified. A different desktop terminal may require the user to start `jcode login --provider <provider>` once.
+Questions are sent only after you select **Send question**. Source files, patient identifiers and raw data are never attached automatically. The checkbox **Include the approved aggregate analysis summary** is off by default. When enabled, the app shows exactly which fixed fields will be sent. These fields only say whether analysis outputs are available, the number of tested pathways, and whether pathway evidence is exploratory or from a defined comparison.
 
-## What A2 implements
+Chat history and API keys are kept only in this open page's JavaScript memory. They are not placed in the saved 4C Insight project JSON, browser local/session storage, or the History workspace. Other scripts in the page or browser extensions can still access browser memory; do not treat a browser page as an API-key vault.
 
-- Firefox MV2 development extension in `tools/ai-companion/extension-firefox/`.
-- User-initiated page → content script → extension background → Firefox Native Messaging → per-request Python host.
-- `status`, `login`, and `chat` operations only. No arbitrary command, file, or network endpoint.
-- Allowed providers: `openai`, `claude`, `ollama`.
-- JCode is launched with `--tool-profile none` from a temporary working directory. Provider login uses the installed JCode program; the site does not request model API keys.
-- The chat and context-preview state are in page memory only. Neither is written to the portable state, History, or active session database.
-- Only a fixed, user-approved summary can be supplied; patient IDs, gene identifiers, and raw source paths are not inferred or sent automatically.
+## Optional: OpenAI API and Claude API
 
-## Security limits
+The standard ChatGPT or Claude chat subscription **is not a general-purpose API login for this static third-party website**. API access and billing are separate. Depending on your subscription, you may have separate API credits. Check your provider's current terms and billing.
 
-Native Messaging is permission-controlled, not a substitute for OS sandboxing. Existing JCode global configuration, skills, user-level hooks, and credentials can still influence its behaviour. Do not treat `--tool-profile none` as a security boundary. The native process inherits the user's credentials as required by the selected provider.
+Select **Online or Ollama · Advanced**, select **OpenAI API** or **Claude API**, and enter a model ID and a dedicated API key. The page shows a specific security warning and requires confirmation. **This is an advanced experimental connection**. Your key lives in webpage JavaScript memory until you select **Forget API key**, reload or close the page. Direct browser API keys can be stolen by malicious browser extensions, compromised third-party scripts, or injected code. For sensitive projects, do not put an API key into this page. Use a future trusted service with provider sign-in instead.
 
-The extension accepts requests only from the exact 4C Insight GitHub Pages path (or explicitly limited localhost development paths). The host repeats provider and payload validation. There is no localhost port, token or CORS bridge. If a trusted application page is compromised, these allowlisted operations remain available; users must continue to review any context that they share.
+- OpenAI: the browser sends an authenticated request directly to `https://api.openai.com/v1/chat/completions`. API usage may incur charges.
+- Claude: the browser uses `https://api.anthropic.com/v1/messages` and `anthropic-dangerous-direct-browser-access: true`. Anthropic can block browser calls for some organizations. API usage may incur charges.
+- 4C Insight never stores or manages the user's provider subscription credentials.
 
-Do not automatically download and execute JCode install scripts. An end-user installer should bundle a pinned, verified JCode release per OS/CPU or link to a reviewed, signed upstream installer. Installation requires explicit user consent.
+## Optional: existing Ollama
 
-## Development-only Firefox verification
+If you already installed and started Ollama, the advanced mode can call its local endpoint at `http://127.0.0.1:11434`. Choose **Find running Ollama models**. Ollama may need its `OLLAMA_ORIGINS` setting configured to permit the 4C Insight page. The browser cannot install, start, or configure Ollama. Using local Ollama does not make OpenAI or Claude subscription models available.
 
-The source extension in `tools/ai-companion/extension-firefox/` is **unsigned** and cannot be installed permanently in standard Firefox. To develop, use `about:debugging` → **This Firefox** → **Load Temporary Add-on** → select `manifest.json`. Temporary extensions do not survive browser restart.
+## Privacy and operational notes
 
-The Linux native host can be packaged as a `.deb`. The system manifest belongs at `/usr/lib/mozilla/native-messaging-hosts/org.fourcinsight.jcode.json`, and its `path` must reference an executable file at `/usr/lib/4c-insight-ai/native_host.py`. Verify the package contents and hashes before installing; the development build is not signed.
+- The normal analysis workflows still run in the browser; no required 4C AI server, browser extension, local bridge, JCode, or native helper is used.
+- On-device inference processes questions and optional aggregate context locally. Model software and weights require an initial network download.
+- Online mode transmits questions, recent chat history, and optional user-approved aggregate context to the selected provider, subject to its privacy and retention policy.
+- AI output is not a verified result. In particular, post-fit PCoA correlations and pathway overlaps are descriptive, not disease validation.
+- No raw cohort files or patient-level records are automatically shared with any provider. The user can still type sensitive text into the question field, so avoid doing so in online mode.
 
-In the finished product, publish a Mozilla-signed Firefox extension and verified OS installers. Only then should the AI tab offer a production **Install companion** action linked to those verified releases. Standard Firefox cannot silently approve an unsigned extension.
+## Technical notes for maintainers
 
-The user does **not** need to start `python3 tools/ai-assistant-bridge/bridge.py` or paste a token. The A1 bridge is no longer part of the A2 workflow.
+The app uses a pinned browser import of WebLLM and a runtime-validated list of model IDs. Browser downloads and caching are managed by WebLLM. Model availability and browser GPU support must be verified in Firefox and Chromium before release. The cloud API paths are deliberately fixed, never accept arbitrary proxy URLs and have no stored credential persistence. The optional Ollama adapter does not run an installer.
 
-## Release validation
+### References
 
-- Install and uninstall the signed add-on and native package.
-- Confirm that a status request starts and exits the native host automatically.
-- Check absent JCode, installed JCode, missing provider credentials, and real authenticated chat.
-- Check Linux distribution variants and sandboxed Firefox separately.
-- Repeat tests on Windows and macOS before declaring them supported.
-- Confirm no open localhost listener, token field, or implicit source-data transmission.
-- Confirm that all existing scientific tests and browser-only functionality remain unchanged.
-
-Documentation: [Mozilla Native Messaging](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging) · [Firefox extension signing](https://support.mozilla.org/en-US/kb/add-on-signing-in-firefox) · [JCode](https://jcode.sh/docs)
+- WebLLM: https://webllm.mlc.ai/docs/user/get_started.html
+- WebLLM model API: https://webllm.mlc.ai/docs/user/basic_usage.html
+- OpenAI browser-key warning: https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety
+- Claude direct-browser warning: https://platform.claude.com/docs/en/manage-claude/authentication
+- Ollama API and CORS: https://docs.ollama.com/api/introduction
