@@ -2,98 +2,92 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {aiAssistantView} from '../ai-assistant.js';
-import {LOCAL_MODELS, WEBLLM_IMPORT, browserSupport, safeAiContext, cleanQuestion, cleanModelId, selectionFromCatalog, promptMessages, cloudChat, ollamaModels} from '../ai-runtime.js';
-const src = async file => readFile(new URL(`../${file}`,import.meta.url),'utf8');
-
-test('browser-first UI defaults to on-device with no JCode, extension, port or token',async()=>{
+import {OLLAMA_BASE,RECOMMENDED_MODELS,cleanQuestion,cleanModelId,safeAiContext,promptMessages,probeOllama,installedOllamaModels,pullRecommendedModel,ollamaChat,ollamaRequest} from '../ai-runtime.js';
+const src=async file=>readFile(new URL(`../${file}`,import.meta.url),'utf8');
+function reply(payload,ok=true,status=200){return {ok,status,json:async()=>payload};}
+function streaming(packets,split=11){
+  const data=new TextEncoder().encode(packets.map(item=>JSON.stringify(item)+'\n').join(''));
+  return {ok:true,status:200,body:new ReadableStream({start(controller){for(let i=0;i<data.length;i+=split)controller.enqueue(data.slice(i,i+split));controller.close();}})};
+}
+test('AI is only local Ollama and retains application navigation',async()=>{
   const html=aiAssistantView();
-  assert.match(html,/On-device · Private/);
-  assert.match(html,/Download and start model/);
-  assert.match(html,/Choose where the model runs/);
-  assert.match(html,/approved aggregate analysis summary/);
-  assert.doesNotMatch(html,/JCode|Firefox bridge|native companion|Access token/i);
+  assert.match(html,/Local Ollama AI/);assert.match(html,/Check connection again/);
+  assert.match(html,/Ollama installed but not connecting/);
+  assert.doesNotMatch(html,/OpenAI API|Claude API|OpenRouter|WebGPU|JCode|Paste.*API key/);
   const main=await src('main.js'),index=await src('index.html');
   assert.match(main,/\['ai', 'AI Assistant', 'A'\]/);
-  assert.match(main,/ai: aiAssistantView/);
-  assert.match(main,/mountAiAssistant/);
-  assert.match(main,/'ai', 'history'/);
+  assert.match(main,/ai: aiAssistantView/);assert.match(main,/mountAiAssistant/);
   assert.match(index,/ai-assistant\.css\?v=0\.22\.8/);
 });
-test('local model list is bounded and must match actual runtime catalog',()=>{
-  assert.match(WEBLLM_IMPORT, /web-llm@0\.2\.88/);
-  assert.equal(LOCAL_MODELS.length,4);
-  const first=LOCAL_MODELS[0];
-  const chosen=selectionFromCatalog(first.id,[{model_id:first.id,vram_required_MB:1200}]);
-  assert.equal(chosen.vramRequiredMB,1200);
-  assert.throws(()=>selectionFromCatalog(first.id,[]),/not present/);
-  assert.throws(()=>selectionFromCatalog('unknown',[]),/listed/);
-  assert.ok(LOCAL_MODELS.every(m=>Number.isFinite(m.memoryMB)&&m.memoryMB>0));
+test('all network access is restricted to the loopback Ollama API',async()=>{
+  assert.equal(OLLAMA_BASE,'http://127.0.0.1:11434');
+  await assert.rejects(()=>ollamaRequest('/api/delete',{method:'DELETE'},async()=>{}),/Unsupported/);
+  let endpoint,options;
+  await probeOllama(async(url,opts)=>{endpoint=url;options=opts;return reply({version:'0.13.0'});});
+  assert.equal(endpoint,OLLAMA_BASE+'/api/version');
+  assert.equal(options.credentials,'omit');assert.equal(options.referrerPolicy,'no-referrer');
+  assert.equal(options.cache,'no-store');
+  assert.equal(options.targetAddressSpace,'loopback');
+  const code=(await src('ai-runtime.js'))+(await src('ai-assistant.js'));
+  assert.doesNotMatch(code,/api\.openai\.com|api\.anthropic\.com|openrouter|web-llm|esm\.run|cloudChat|Authorization:\s*`Bearer/i);
 });
-test('browser support does not guess GPU memory or promise WebGPU',()=>{
-  assert.equal(browserSupport({}).webgpu,false);
-  assert.equal(browserSupport({gpu:{requestAdapter:()=>{}}}).webgpu,true);
+test('probe detects running API, but cannot claim an executable is installed',async()=>{
+  assert.equal(await probeOllama(async()=>reply({version:'1.2.3'})),'1.2.3');
+  await assert.rejects(()=>probeOllama(async()=>{throw Error('failed');}),/stopped.*browser may block/);
+  await assert.rejects(()=>probeOllama(async()=>reply({status:'up'})),/Ollama version/);
 });
-test('aggregate context never includes patient IDs, raw file names, or user-injected fields',()=>{
-  const input={integrative:true,compare:false,pathways:true,pathwayCount:1713,pathwayEvidence:'exploratory',patient_id:'PATIENT_X',files:['private.raw'],secrets:'sk-123'};
-  const context=safeAiContext(input),txt=JSON.stringify(context);
-  assert.equal(context.pathway_sets_tested,1713);
-  assert.deepEqual(Object.keys(context),['context_type','integrative_result_available','compare_groups_result_available','pathway_result_available','pathway_sets_tested','pathway_evidence_type']);
-  assert.doesNotMatch(txt,/PATIENT_X|private\.raw|sk-123/);
-  const message=promptMessages('Interpret?',[],input).at(-1).content;
-  assert.match(message,/1713/);
-  assert.doesNotMatch(message,/PATIENT_X|private\.raw|sk-123/);
+test('local model list excludes cloud, remote entries, invalid names and duplicates',async()=>{
+  const models=[{name:'qwen2.5:1.5b',size:2000},{name:'qwen2.5:1.5b'}, {name:'gemma:cloud'}, {name:'org/model:cloud'}, {name:'remote:test',remote_host:'https://example.com'}, {name:'abc;bad'}, {name:'llama3.2:3b',size:3000}];
+  const records=await installedOllamaModels(async(url)=>reply({models}));
+  assert.deepEqual(records.map(m=>m.name),['qwen2.5:1.5b','llama3.2:3b']);
+  assert.equal(records[0].size,2000);
+  assert.throws(()=>cleanModelId('abc:cloud'),/Cloud models/);
+  assert.throws(()=>cleanModelId('abc; rm -rf'),/Invalid model/);
 });
-test('question, history and model ID inputs are bounded',()=>{
-  assert.equal(cleanQuestion(' Test '),'Test');
-  assert.throws(()=>cleanQuestion(' '),/Enter a question/);
+test('only catalog-approved local model can be downloaded explicitly',async()=>{
+  let options;
+  const fetcher=async(url,opts)=>{assert.equal(url,OLLAMA_BASE+'/api/pull');options=opts;return streaming([{status:'downloading',total:200,completed:100},{status:'downloading',total:200,completed:200},{status:'success'}],17);};
+  const events=[];
+  assert.equal(await pullRecommendedModel(RECOMMENDED_MODELS[0].id,{fetcher,onProgress:p=>events.push(p)}),RECOMMENDED_MODELS[0].id);
+  assert.equal(JSON.parse(options.body).stream,true);
+  assert.equal(events[0].progress,50);
+  assert.equal(events.at(-1).status,'success');
+  await assert.rejects(()=>pullRecommendedModel('model:cloud',{fetcher}),/recommended/);
+  await assert.rejects(()=>pullRecommendedModel('arbitrary:latest',{fetcher}),/recommended/);
+});
+test('failed or incomplete model download is never claimed successful',async()=>{
+  await assert.rejects(()=>pullRecommendedModel(RECOMMENDED_MODELS[0].id,{fetcher:async()=>streaming([{status:'downloading'}])}),/without confirmation/);
+  await assert.rejects(()=>pullRecommendedModel(RECOMMENDED_MODELS[0].id,{fetcher:async()=>streaming([{error:'model unavailable'}])}),/download failed/);
+});
+test('chat uses tool-free, local, bounded streaming with no remote fallback',async()=>{
+  let options;
+  const answer=await ollamaChat({model:'qwen2.5:1.5b',question:'Hello',fetcher:async(url,opts)=>{
+    assert.equal(url,OLLAMA_BASE+'/api/chat');options=opts;
+    return streaming([{message:{content:'Local '}},{message:{content:'answer'}},{done:true}],9);
+  }});
+  assert.equal(answer,'Local answer');
+  const body=JSON.parse(options.body);
+  assert.equal(body.stream,true);
+  assert.equal(body.think,false);
+  assert.equal(body.model,'qwen2.5:1.5b');
+  assert.equal(body.tools,undefined);
+  assert.equal(body.messages.at(-1).content,'Hello');
+  assert.equal(options.credentials,'omit');
+});
+test('aggregates never transmit source filenames, patient IDs, or unknown user fields',()=>{
+  const input={integrative:true,compare:true,pathways:true,pathwayCount:1713,pathwayEvidence:'exploratory',patientID:'PATIENT-PRIVATE',sources:['secret.raw'],key:'SECRET'};
+  const ctx=safeAiContext(input);
+  assert.deepEqual(Object.keys(ctx),['context_type','integrative_result_available','compare_groups_result_available','pathway_result_available','pathway_sets_tested','pathway_evidence_type']);
+  const text=promptMessages('Explain?',[],input).at(-1).content;
+  assert.match(text,/1713/);assert.doesNotMatch(text,/PATIENT-PRIVATE|secret\.raw|SECRET/);
+  assert.equal(promptMessages('Hi').at(-1).content,'Hi');
+  assert.throws(()=>cleanQuestion(''),/Enter a question/);
   assert.throws(()=>cleanQuestion('x'.repeat(4001)),/4,000/);
-  assert.throws(()=>cleanModelId('abc;rm -rf'),/valid model ID/);
-  const history=Array.from({length:11},(_,i)=>({role:'user',content:String(i)}));
-  assert.equal(promptMessages('hello',history).length,10);
-  assert.equal(promptMessages('hello').at(-1).content,'hello');
 });
-test('OpenAI direct API call is explicit, ephemeral and uses exact endpoint',async()=>{
-  let request;
-  const mock=async(url,opts)=>{request={url,opts};return {ok:true,json:async()=>({choices:[{message:{content:'Example reply'}}]})}};
-  const answer=await cloudChat({provider:'openai',model:'gpt-5.6-terra',key:'test-only',question:'Hi'},mock);
-  assert.equal(answer,'Example reply');
-  assert.equal(request.url,'https://api.openai.com/v1/chat/completions');
-  assert.equal(request.opts.credentials,'omit');
-  assert.equal(request.opts.cache,'no-store');
-  assert.equal(request.opts.headers.Authorization,'Bearer test-only');
-  assert.equal(JSON.parse(request.opts.body).messages.at(-1).content,'Hi');
-  await assert.rejects(()=>cloudChat({provider:'openai',model:'test',question:'Hi'},mock),/API key/);
-});
-test('Claude browser request uses documented opt-in header and blocks missing key',async()=>{
-  let request;
-  const mock=async(url,opts)=>{request={url,opts};return {ok:true,json:async()=>({content:[{type:'text',text:'Claude says hello'}]})}};
-  assert.equal(await cloudChat({provider:'claude',model:'claude-sonnet-4-5',key:'test-key',question:'Hi'},mock),'Claude says hello');
-  assert.equal(request.url,'https://api.anthropic.com/v1/messages');
-  assert.equal(request.opts.headers['anthropic-dangerous-direct-browser-access'],'true');
-  assert.equal(request.opts.credentials,'omit');
-  assert.ok(JSON.parse(request.opts.body).max_tokens>0);
-  await assert.rejects(()=>cloudChat({provider:'claude',model:'test',question:'Hi'},mock),/API key/);
-});
-test('Ollama is an optional fixed local origin; no user-defined network proxy',async()=>{
-  let endpoint;
-  const mock=async(url,opts)=>{endpoint=url;return {ok:true,json:async()=>url.endsWith('/tags')?{models:[{name:'small:latest'}]}:{message:{content:'local'}}}};
-  assert.deepEqual(await ollamaModels(mock),['small:latest']);
-  assert.equal(endpoint,'http://127.0.0.1:11434/api/tags');
-  assert.equal(await cloudChat({provider:'ollama',model:'small:latest',question:'Hi'},mock),'local');
-  assert.equal(endpoint,'http://127.0.0.1:11434/api/chat');
-});
-test('provider errors do not include raw key strings',async()=>{
-  const key='sk-THIS-IS-SECRET';
-  const mock=async()=>({ok:false,status:401,json:async()=>({error:{code:'invalid_key',message:key}})});
-  await assert.rejects(()=>cloudChat({provider:'openai',model:'test',question:'Hi',key},mock),e=>!e.message.includes(key));
-});
-test('no JCode or persistent chat/credential storage, automatic raw upload or scientific refit',async()=>{
-  const ui=await src('ai-assistant.js'),rt=await src('ai-runtime.js');
-  for(const code of [ui,rt]) {
-    assert.doesNotMatch(code,/localStorage|sessionStorage|indexedDB|document\.cookie|ai-assistant-bridge|ai-companion|jcode login|child_process|exec\(/i);
-    assert.doesNotMatch(code,/readAsArrayBuffer|readAsText|FormData\(/i);
-  }
-  assert.match(ui,/textContent=state\.includeContext\?JSON\.stringify/);
-  assert.match(ui,/await import\(WEBLLM_IMPORT\)/);
-  assert.match(ui,/engine\.chat\.completions\.create/);
+test('chat remains current-page-only, never accesses source files or stores credentials',async()=>{
+  const code=(await src('ai-runtime.js'))+'\n'+(await src('ai-assistant.js'));
+  assert.doesNotMatch(code,/localStorage|sessionStorage|indexedDB|document\.cookie|readAsArrayBuffer|readAsText|FormData\(|child_process|window\.open\(/i);
+  assert.match(code,/safeAiContext\(summary\)/);
+  assert.match(code,/root\.querySelector/);
+  assert.match(code,/installedOllamaModels\(/);
 });

@@ -1,133 +1,74 @@
-/** 4C Insight A3: browser-first AI. No JCode, native host, extension, or localhost bridge. */
-import { WEBLLM_IMPORT, LOCAL_MODELS, MODEL_DOCS, browserSupport, cloudChat, cleanQuestion, cleanModelId, ollamaModels, promptMessages, safeAiContext, selectionFromCatalog } from './ai-runtime.js?v=0.22.8';
-const esc = text => String(text ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-const state = {
-  mode: 'local', model: LOCAL_MODELS[0].id, provider: 'openai', cloudModel: '', key: '', consent: false,
-  includeContext: false, busy: false, loadedModel: '', engine: null, loading: false, progress: '', status: '',
-  messages: [], question: '', gpu: null, gpuChecked: false, ollama: [],
-};
-let webllm = null;
-let loadPromise = null;
-const providerLabel = { openai:'OpenAI API', claude:'Claude API', ollama:'Ollama (already installed)' };
-const defaults = { openai:'gpt-5.6-terra', claude:'claude-sonnet-4-6', ollama:'' };
-function localReady() { return Boolean(state.engine && state.loadedModel === state.model); }
-function status(message) { state.status = message; const el = typeof document === 'undefined' ? null : document.querySelector('#ai-status'); if (el) el.textContent = message; }
-function chatHtml() {
-  return state.messages.length ? state.messages.map(entry => `<div class="ai-message ${entry.role==='user'?'ai-user':'ai-assistant'}"><strong>${entry.role==='user'?'You':'Assistant'}</strong><p>${esc(entry.content)}</p></div>`).join('') : '<p class="ai-note">Ask a question about an analysis. Your original source files are never attached automatically.</p>';
+/** 4C Insight B4: strictly local Ollama, no cloud/browser model engine or companion. */
+import {OLLAMA_INSTALL,RECOMMENDED_MODELS,safeAiContext,cleanQuestion,probeOllama,installedOllamaModels,pullRecommendedModel,ollamaChat} from './ai-runtime.js?v=0.22.8';
+const esc=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const state={connected:false,checking:false,version:'',models:[],selected:'',busy:false,pulling:false,status:'',error:'',progress:'',messages:[],question:'',includeContext:false,started:false,controller:null};
+let currentRoot=null,currentSummary={};
+const fmtBytes=v=>Number.isFinite(v)&&v>0?` · ${(v/1024**3).toFixed(2)} GB on disk`:'';
+function stateStatus(){if(state.checking)return 'Checking Ollama on this computer…';if(state.connected)return `Local Ollama connected${state.version?' · version '+state.version:''}`;return state.error||'Local Ollama not connected.';}
+function chatMarkup(){return state.messages.length?state.messages.map(m=>`<div class="ai-message ${m.role==='user'?'ai-user':'ai-assistant'}"><strong>${m.role==='user'?'You':'Local assistant'}</strong><p>${esc(m.content)}</p></div>`).join(''):'<p class="ai-note">Ask a question about your research. No source files are attached automatically.</p>';}
+function setupMarkup(){
+  const installed=state.models;
+  const tips=!state.connected?`<details class="ai-help"><summary>Ollama installed but not connecting?</summary><p>First, open the Ollama application. On Linux, the normal installer usually starts a service automatically. If it is stopped, use the commands below or ask your system administrator.</p><p>A hosted website may need permission to contact your computer. Ollama must allow only the exact 4C Insight website origin, and your browser must permit access to the local device.</p><pre>systemctl is-active ollama\nsudo systemctl start ollama\nsudo systemctl enable ollama</pre><p>For Linux system services, a system administrator can set <code>OLLAMA_ORIGINS=https://singjc.github.io</code> and <code>OLLAMA_NO_CLOUD=1</code> in an Ollama systemd override, then restart the service. Do not use <code>OLLAMA_HOST=0.0.0.0</code>. This page cannot change these settings itself.</p><p>For Windows and macOS, start Ollama from the normal application menu. Browser origin access may still need configuration.</p><p><a href="https://docs.ollama.com/faq" target="_blank" rel="noopener noreferrer">Official Ollama configuration guide</a></p></details>`:'';
+  return `<section class="card ai-card"><div class="card-heading"><div><h3>Local model connection</h3><p>Ollama runs the model on this computer. No separate AI companion, browser extension, or cloud account is required.</p></div></div>
+  <div class="ai-connection ${state.connected?'ai-online':'ai-offline'}" role="status" aria-live="polite"><span class="ai-dot"></span><div><strong>${esc(stateStatus())}</strong>${state.connected?'<small>Only locally installed models are available.</small>':'<small>The webpage can check a running Ollama service, but cannot check installed programs or start them.</small>'}</div></div>
+  <div class="ai-actions"><button id="ai-reconnect" type="button" class="secondary-button" ${state.checking||state.busy?'disabled':''}>${state.checking?'Checking…':'Check connection again'}</button>${!state.connected?`<a class="secondary-button ai-as-link" href="${OLLAMA_INSTALL}" target="_blank" rel="noopener noreferrer">Get Ollama</a>`:''}</div>
+  ${tips}
+  ${state.connected?`<div class="ai-model-panel"><label for="ai-model">Model on this computer</label>${installed.length?`<select id="ai-model">${installed.map(m=>`<option value="${esc(m.name)}" ${m.name===state.selected?'selected':''}>${esc(m.name)}${esc(fmtBytes(m.size))}</option>`).join('')}</select>`:'<p class="ai-note">Ollama is running, but no local models were found. Choose a recommended model below.</p>'}
+  <div class="ai-actions"><button id="ai-refresh-models" type="button" class="secondary-button" ${state.pulling?'disabled':''}>Refresh models</button></div>
+  <details class="ai-help" ${!installed.length?'open':''}><summary>Download another local model</summary><p>Select a model and approve the download. Model weights come from Ollama's registry. The assistant does not send your cohort data to the registry.</p><label for="ai-recommended">Recommended local model</label><select id="ai-recommended">${RECOMMENDED_MODELS.map(m=>`<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('')}</select><button id="ai-pull" type="button" class="secondary-button" ${state.pulling?'disabled':''}>${state.pulling?'Downloading…':'Download model'}</button><p class="ai-note" id="ai-pull-progress" role="status" aria-live="polite">${esc(state.progress)}</p></details></div>`:''}
+  <p class="ai-note">Privacy: 4C Insight sends chat requests only to <code>127.0.0.1:11434</code>. For strict local-only use, disable Ollama's cloud features and use locally downloaded models. Model downloads require internet access.</p></section>`;
 }
-function localPanel() {
-  const support = state.gpuChecked ? state.gpu : null;
-  return `<div class="ai-setup-panel"><h3>1. Prepare on-device AI</h3><p class="ai-note">The model runs in this browser. No account, extension, or separate application is needed. The first download requires your approval.</p>
-  <div class="ai-model-grid"><label for="ai-local-model">Model<select id="ai-local-model">${LOCAL_MODELS.map(m => `<option value="${esc(m.id)}" ${state.model===m.id?'selected':''}>${esc(m.label)}</option>`).join('')}</select></label>
-  <div class="ai-model-detail">${esc(LOCAL_MODELS.find(m=>m.id===state.model)?.note || '')} Estimated model GPU memory: ~${esc(LOCAL_MODELS.find(m=>m.id===state.model)?.memoryMB)} MB. This is not the download size or a guarantee of compatibility.</div></div>
-  <div class="ai-actions"><button type="button" id="ai-check-gpu" class="secondary-button">Check browser compatibility</button>
-  <button type="button" id="ai-load" class="primary-button" ${state.loading || state.busy ? 'disabled' : ''}>${state.loading?'Preparing…':localReady()?'Model ready — reload':'Download and start model'}</button>
-  <button type="button" id="ai-unload" class="secondary-button" ${state.engine ? '' : 'disabled'}>Unload from memory</button></div>
-  <p class="ai-note" id="ai-gpu-status">${support ? esc(support.message) : 'Compatibility has not been checked. WebGPU is needed for local inference.'}</p>
-  <div id="ai-load-progress" class="ai-note" role="status" aria-live="polite">${esc(state.progress)}</div>
-  <p class="ai-note">Model software and weights are downloaded from external model/CDN hosts. Inference stays on-device. The browser may reuse cached files; clearing site data can remove them.</p></div>`;
+export function aiAssistantView(){return `<section class="page-heading"><div><span class="eyebrow">AI Assistant</span><h2>Ask questions about your analysis</h2><p>Use an Ollama model running on your computer. No external AI provider or account is needed.</p></div><div class="local-card"><strong>Local Ollama AI</strong><span>Local models only · No automatic data sharing</span></div></section>
+${setupMarkup()}
+<section class="card ai-card"><div class="card-heading"><div><h3>Ask your question</h3><p>Your chat stays in this open page. The assistant cannot read raw files, run tools, or change scientific results.</p></div><button id="ai-clear" type="button" class="secondary-button">Clear chat</button></div>
+<div class="ai-example-prompts">${['Explain my pathway results','What does a PCoA cluster mean?','What should I check next?'].map(p=>`<button type="button" data-ai-prompt="${esc(p)}" class="secondary-button">${esc(p)}</button>`).join('')}</div>
+<div class="ai-chat" id="ai-chat" role="log" aria-live="polite">${chatMarkup()}</div>
+<label class="ai-context-choice"><input type="checkbox" id="ai-include-context" ${state.includeContext?'checked':''}> Include the approved aggregate analysis summary with my next question</label>
+<pre id="ai-context-preview" class="ai-context-preview">No analysis summary will be sent.</pre>
+<label for="ai-question">Your question</label><textarea id="ai-question" maxlength="4000" rows="3" placeholder="Ask a question about your analysis…">${esc(state.question)}</textarea>
+<div class="ai-actions"><button id="ai-send" type="button" class="primary-button" ${state.busy||state.pulling||!state.connected||!state.selected?'disabled':''}>${state.busy?'Answering…':'Send question'}</button><button id="ai-stop" type="button" class="secondary-button" ${!state.busy&&!state.pulling?'disabled':''}>Stop</button><span id="ai-status" class="ai-note" role="status" aria-live="polite">${esc(state.status || (!state.connected?'Connect Ollama to begin.':'Ready for a local question.'))}</span></div></section>`;}
+function repaint(){const root=currentRoot;if(root?.isConnected){root.innerHTML=aiAssistantView();bind(root,currentSummary);}}
+function setStatus(text){state.status=text;const element=currentRoot?.querySelector('#ai-status');if(element)element.textContent=text;}
+async function connect(){if(state.checking)return;state.checking=true;state.error='';repaint();try{
+    const version=await probeOllama();const models=await installedOllamaModels();state.connected=true;state.version=version;state.models=models;
+    if(!models.some(m=>m.name===state.selected))state.selected=models[0]?.name||'';
+    state.status=models.length?`${models.length} local model(s) available.`:'Ollama is connected. Download a local model to begin.';
+  }catch(e){state.connected=false;state.models=[];state.selected='';state.error=String(e?.message||e).slice(0,220);state.status='Connection unavailable. See setup help above.';}
+  finally{state.checking=false;repaint();}}
+async function pull(){const sel=currentRoot?.querySelector('#ai-recommended');const model=sel?.value;if(!model||state.pulling)return;
+ state.pulling=true;state.progress='Starting download…';state.controller=new AbortController();repaint();
+ try{await pullRecommendedModel(model,{signal:state.controller.signal,onProgress:packet=>{state.progress=packet.status+(packet.progress===null?'':` · ${packet.progress}%`);const p=currentRoot?.querySelector('#ai-pull-progress');if(p)p.textContent=state.progress;}});
+ state.progress='Model download complete.';const models=await installedOllamaModels();state.models=models;state.selected=models.some(m=>m.name===model)?model:models[0]?.name||'';setStatus('New local model is ready.');
+ }catch(e){setStatus(e.name==='AbortError'?'Model download stopped.':`Download failed: ${String(e?.message||e).slice(0,180)}`);}
+ finally{state.pulling=false;state.controller=null;repaint();}}
+async function send(){if(state.busy||!state.connected||!state.selected)return;
+ let question;try{question=cleanQuestion(state.question);}catch(e){setStatus(e.message);return;}
+ const history=state.messages.slice();const chosen=state.selected;
+ if(!state.models.some(m=>m.name===chosen)){setStatus('Choose a locally installed model.');return;}
+ state.busy=true;state.controller=new AbortController();state.messages=[...history,{role:'user',content:question},{role:'assistant',content:''}];state.question='';repaint();setStatus('Local model is preparing an answer…');
+ try{
+ const answer=await ollamaChat({model:chosen,question,history,context:state.includeContext?currentSummary:null,signal:state.controller.signal,onText:text=>{
+ state.messages[state.messages.length-1].content=text;const chat=currentRoot?.querySelector('#ai-chat');if(chat){const last=chat.querySelector('.ai-message:last-child p');if(last){last.textContent=text;chat.scrollTop=chat.scrollHeight;}}
+ }});
+ state.messages[state.messages.length-1].content=answer;state.status='Answered using a locally installed Ollama model.';
+ }catch(e){state.messages=history;state.question=question;state.status=e.name==='AbortError'?'Answer stopped.':`Local chat failed: ${String(e?.message||e).slice(0,180)}`;}
+ finally{state.busy=false;state.controller=null;state.messages=state.messages.slice(-16);repaint();}}
+function bind(root,summary){
+ const $=id=>root.querySelector('#'+id);
+ const syncPreview=()=>{const out=$('ai-context-preview');if(out)out.textContent=state.includeContext?JSON.stringify(safeAiContext(summary),null,2):'No analysis summary will be sent.';};syncPreview();
+ $('ai-reconnect')?.addEventListener('click',()=>{void connect();});
+ $('ai-refresh-models')?.addEventListener('click',()=>{void connect();});
+ $('ai-model')?.addEventListener('change',e=>{state.selected=e.target.value;repaint();});
+ $('ai-pull')?.addEventListener('click',()=>{void pull();});
+ $('ai-clear')?.addEventListener('click',()=>{state.messages=[];state.question='';repaint();});
+ root.querySelectorAll('[data-ai-prompt]').forEach(button=>button.addEventListener('click',()=>{state.question=button.dataset.aiPrompt||'';const input=$('ai-question');if(input){input.value=state.question;input.focus();}}));
+ $('ai-include-context')?.addEventListener('change',e=>{state.includeContext=e.target.checked;syncPreview();});
+ $('ai-question')?.addEventListener('input',e=>{state.question=e.target.value;});
+ $('ai-send')?.addEventListener('click',()=>{void send();});
+ $('ai-stop')?.addEventListener('click',()=>{state.controller?.abort();});
 }
-function cloudPanel() {
-  const isOllama = state.provider === 'ollama';
-  return `<div class="ai-setup-panel"><h3>1. Connect an optional online or existing local provider</h3>
-  <p class="ai-warning"><strong>Advanced mode:</strong> A ChatGPT or Claude subscription does not automatically provide API access. Direct API keys in browser pages are risky. For sensitive work, use on-device AI or a future trusted sign-in service instead.</p>
-  <div class="ai-model-grid"><label>Provider<select id="ai-provider">${Object.entries(providerLabel).map(([id,label])=>`<option value="${id}" ${state.provider===id?'selected':''}>${esc(label)}</option>`).join('')}</select></label>
-  <label>Model ID<input id="ai-cloud-model" value="${esc(state.cloudModel)}" maxlength="101" placeholder="${esc(defaults[state.provider])}" autocomplete="off"></label></div>
-  ${isOllama ? `<p class="ai-note">Ollama is optional and must already be installed and running. A website cannot install or start it. The local server must allow this site's origin.</p>
-    <button type="button" id="ai-ollama-list" class="secondary-button">Find running Ollama models</button>
-    <div class="ai-note">${state.ollama.length ? `Available: ${state.ollama.map(esc).join(', ')}` : 'No Ollama models detected in this tab.'}</div>` : `<p class="ai-note">You need API access and a dedicated key. <a href="${MODEL_DOCS[state.provider]}" rel="noopener noreferrer" target="_blank">Manage your ${esc(state.provider)} API keys</a>. API usage can incur charges.</p>
-   <label>API key for this tab only<input type="password" id="ai-cloud-key" value="" autocomplete="off" spellcheck="false" placeholder="${state.key?'Key is held in this tab':'Paste a restricted short-lived key'}" /></label>
-   <div class="ai-actions"><button type="button" id="ai-forget-key" class="secondary-button">Forget API key</button><span class="ai-note">This site never saves your key. Browser extensions or injected scripts might still access it.</span></div>
-   <label class="ai-context-choice"><input type="checkbox" id="ai-key-consent" ${state.consent?'checked':''}> I understand the risk of putting an API key into a webpage and accept direct browser requests.</label>`}
-  <p class="ai-note">${isOllama?'Messages stay on your device when using a local Ollama model.':'Your question and any approved context are sent directly to the selected provider.'}</p></div>`;
-}
-export function aiAssistantView() {
-  return `<section class="page-heading"><div><span class="eyebrow">AI Assistant</span><h2>Ask questions about your analysis</h2><p>Use on-device AI without installing a companion application or browser extension. Optional online models are available for advanced users.</p></div><div class="local-card"><strong>Browser-first AI</strong><span>Local by default · Context shared only with approval</span></div></section>
-  <section class="card ai-card"><div class="card-heading"><div><h3>Choose where the model runs</h3><p>On-device is the recommended option.</p></div></div>
-  <div class="ai-mode-tabs" role="group" aria-label="AI model location"><button id="ai-mode-local" class="${state.mode==='local'?'ai-mode-active':''}" type="button" aria-pressed="${state.mode==='local'}">On-device · Private</button><button id="ai-mode-cloud" class="${state.mode==='cloud'?'ai-mode-active':''}" type="button" aria-pressed="${state.mode==='cloud'}">Online or Ollama · Advanced</button></div>
-  ${state.mode==='local' ? localPanel() : cloudPanel()}</section>
-  <section class="card ai-card"><div class="card-heading"><div><h3>2. Ask your question</h3><p>Chat is held only in this open page. The assistant cannot read raw data files or run scientific tools.</p></div><button id="ai-clear-chat" type="button" class="secondary-button">Clear chat</button></div>
-  <div class="ai-example-prompts" aria-label="Example questions">${['Explain my pathway results','What does a PCoA cluster mean?','What should I check next?'].map(p=>`<button type="button" data-ai-prompt="${esc(p)}" class="secondary-button">${esc(p)}</button>`).join('')}</div>
-  <div class="ai-chat" id="ai-chat" role="log" aria-live="polite">${chatHtml()}</div>
-  <label class="ai-context-choice"><input type="checkbox" id="ai-include-context" ${state.includeContext?'checked':''}> Include the approved aggregate analysis summary with my next message</label>
-  <pre class="ai-context-preview" id="ai-context-preview">No analysis summary will be sent.</pre>
-  <label for="ai-question">Your question</label><textarea id="ai-question" maxlength="4000" rows="3" placeholder="What does my pathway network show?">${esc(state.question)}</textarea>
-  <div class="ai-actions"><button id="ai-send" type="button" class="primary-button" ${state.busy || state.loading?'disabled':''}>${state.busy?'Working…':'Send question'}</button><span id="ai-status" class="ai-note" role="status" aria-live="polite">${esc(state.status || 'Choose a model to begin.')}</span></div></section>`;
-}
-function updateProgress(progress) {
-  const raw = progress?.text || (Number.isFinite(progress?.progress) ? `${Math.round(progress.progress*100)}%` : 'Preparing model');
-  state.progress = String(raw).slice(0, 240);
-  const el = typeof document === 'undefined' ? null : document.querySelector('#ai-load-progress'); if(el) el.textContent = state.progress;
-}
-async function checkGPU() {
-  const n = globalThis.navigator;
-  if (!browserSupport(n).webgpu) return { ok:false, message:'WebGPU is unavailable in this browser. Try a recent Chrome/Edge or supported Firefox version, or use an optional online model.' };
-  try {
-    const adapter = await n.gpu.requestAdapter({powerPreference:'high-performance'});
-    if(!adapter) return {ok:false,message:'No compatible WebGPU adapter was found. This device cannot run this WebLLM mode.'};
-    return {ok:true,message:'WebGPU adapter detected. Model loading still depends on graphics memory and driver support.'};
-  } catch { return {ok:false,message:'WebGPU access failed. Check browser GPU settings and supported hardware.'}; }
-}
-async function loadLocal() {
-  if (state.loading) return;
-  state.loading = true;state.progress = 'Loading WebLLM runtime…';
-  try {
-    const gpu = await checkGPU();state.gpuChecked=true;state.gpu=gpu;
-    if (!gpu.ok) throw Error(gpu.message);
-    if(!webllm) webllm = await import(WEBLLM_IMPORT);
-    selectionFromCatalog(state.model, webllm.prebuiltAppConfig?.model_list || []);
-    const selected = state.model;
-    updateProgress({text:'Downloading/loading selected model…'});
-    if(state.engine && state.loadedModel !== selected) { await state.engine.unload?.();state.engine=null;state.loadedModel=''; }
-    if(!state.engine) state.engine = await webllm.CreateMLCEngine(selected,{initProgressCallback:updateProgress});
-    else await state.engine.reload(selected);
-    state.loadedModel = selected;state.progress = 'Model ready. You can send a question.';status('On-device model ready.');
-  } catch(e) {status(`Model setup failed: ${String(e?.message||e).slice(0,210)}`);state.progress='Choose another model or try the advanced online option.';}
-  finally {state.loading=false;}
-}
-async function submitQuestion(summary) {
-  if (state.busy || state.loading)return;
-  let question;
-  try {question=cleanQuestion(state.question);}catch(e){status(e.message);return;}
-  const previous = state.messages.slice();
-  const context = state.includeContext ? summary : null;
-  state.busy=true;status('Preparing answer…');
-  try {
-    let answer;
-    if(state.mode==='local') {
-      if (!localReady()) throw Error('Download and start an on-device model first.');
-      const reply = await state.engine.chat.completions.create({messages:promptMessages(question,previous,context),stream:false,max_tokens:650});
-      answer = reply?.choices?.[0]?.message?.content;
-    } else {
-      if(state.provider!=='ollama' && !state.consent) throw Error('Review and accept the advanced browser-key warning first.');
-      const model=cleanModelId(state.cloudModel || defaults[state.provider]);
-      answer=await cloudChat({provider:state.provider,model,key:state.key,question,history:previous,context});
-    }
-    if(typeof answer!=='string'||!answer.trim())throw Error('No text response returned.');
-    state.messages=[...previous,{role:'user',content:question},{role:'assistant',content:answer.slice(0,16000)}].slice(-16);
-    state.question='';state.status=state.mode==='local'?'Answered on your device.':'Response received. Review any model claims.';
-  }catch(e){state.status=`Question failed: ${String(e?.message||e).slice(0,210)}`;}
-  finally {state.busy=false;}
-}
-export function mountAiAssistant(root,{summary={}}={}) {
-  const $=id=>root.querySelector(`#${id}`);
-  const redraw=()=>{if (!root.querySelector('#ai-chat')) return;root.innerHTML=aiAssistantView();mountAiAssistant(root,{summary});};
-  const syncPreview=()=>{const e=$('ai-context-preview');if(e)e.textContent=state.includeContext?JSON.stringify(safeAiContext(summary),null,2):'No analysis summary will be sent.';};
-  $('ai-mode-local')?.addEventListener('click',()=>{state.mode='local';state.status='';redraw();});
-  $('ai-mode-cloud')?.addEventListener('click',()=>{state.mode='cloud';state.status='';redraw();});
-  $('ai-local-model')?.addEventListener('change',e=>{state.model=e.target.value;redraw();});
-  $('ai-check-gpu')?.addEventListener('click',async()=>{state.gpu=await checkGPU();state.gpuChecked=true;redraw();});
-  $('ai-load')?.addEventListener('click',async()=>{await loadLocal();redraw();});
-  $('ai-unload')?.addEventListener('click',async()=>{if(state.engine){try{await state.engine.unload?.();}catch{}state.engine=null;state.loadedModel='';state.status='Model unloaded from active memory. The browser may retain cached model files.';redraw();}});
-  $('ai-provider')?.addEventListener('change',e=>{state.provider=e.target.value;state.cloudModel='';state.key='';state.consent=false;state.ollama=[];redraw();});
-  $('ai-cloud-model')?.addEventListener('input',e=>{state.cloudModel=e.target.value;});
-  $('ai-cloud-key')?.addEventListener('input',e=>{state.key=e.target.value;});
-  $('ai-key-consent')?.addEventListener('change',e=>{state.consent=e.target.checked;});
-  $('ai-forget-key')?.addEventListener('click',()=>{state.key='';state.consent=false;redraw();});
-  $('ai-ollama-list')?.addEventListener('click',async()=>{status('Checking local Ollama…');try{state.ollama=await ollamaModels();if(state.ollama.length&&!state.cloudModel)state.cloudModel=state.ollama[0];state.status=state.ollama.length?'Available Ollama models found.':'Ollama returned no installed models.';}catch{state.status='Ollama is not reachable. It must be installed, running, and allow this web origin.';}redraw();});
-  $('ai-clear-chat')?.addEventListener('click',()=>{state.messages=[];state.question='';redraw();});
-  root.querySelectorAll('[data-ai-prompt]').forEach(el=>el.addEventListener('click',()=>{state.question=el.dataset.aiPrompt||'';const input=$('ai-question');if(input){input.value=state.question;input.focus();}}));
-  $('ai-include-context')?.addEventListener('change',e=>{state.includeContext=e.target.checked;syncPreview();});syncPreview();
-  $('ai-question')?.addEventListener('input',e=>{state.question=e.target.value;});
-  $('ai-send')?.addEventListener('click',async()=>{await submitQuestion(summary);redraw();});
+export function mountAiAssistant(root,{summary={}}={}){
+ currentRoot=root;currentSummary=summary;bind(root,summary);
+ if(!state.started){state.started=true;void connect();}
+ else if(state.connected){void connect();}
 }
