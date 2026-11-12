@@ -8,7 +8,10 @@
 2. Start the Ollama application normally (Windows/macOS), or ensure the Linux `ollama` systemd service is active. On Linux, the official installation script normally enables and starts the service when systemd is available.
 3. Open 4C Insight → **AI Assistant**. The page automatically checks `http://127.0.0.1:11434/api/version` and lists models from `/api/tags`.
 4. Select an installed **local** model. If the list is empty, expand **Download another local model**, choose one of the recommended models, and approve the download. The download uses the local Ollama `/api/pull` endpoint.
-5. Ask a question. Optionally review and approve the aggregate summary before including it. No source files are automatically sent.
+5. Ask a question. The model response uses readable headings, lists, links, code and emphasis. Raw model HTML is never executed.
+6. To ask about **actual results**, select a data section under **Use your calculated results**, review the exact bounded JSON preview, and approve inclusion with your next question. The suggested-question buttons select the matching evidence and display the preview before sending. The default is no scientific evidence attached.
+7. Available read-only evidence includes the top measured pathways with BH q-values, enrichment scores, identifiers, and a few leading genes; aggregate joint PCoA coverage; and corrected gene test counts and top corrected gene effects. The app does not attach raw files, metadata rows, individual sample IDs, patient IDs, or original filenames. This information is sent only to local Ollama on approval.
+8. If multiple pathways have the same best q-value, the assistant should report the tie. It must not invent a unique most significant pathway. The context does not itself establish independent validation.
 
 ### When the website cannot connect
 
@@ -44,7 +47,7 @@ Environment="OLLAMA_NO_CLOUD=1"
 
 Ollama supports cloud models and web search in recent versions. To keep inference local, disable cloud features in the Ollama server using `OLLAMA_NO_CLOUD=1` or `disable_ollama_cloud: true` in `~/.ollama/server.json`, then restart the service. 4C Insight excludes models tagged `:cloud`, rejects models marked remote by the Ollama API, never sends requests to a remote inference endpoint, and uses no model tools. **The website cannot independently verify server-wide cloud-disable settings.**
 
-The initial download obtains model weights from Ollama's remote registry. This is not an upload of your cohort data. Inference uses the local Ollama API. Chat remains in browser memory for the current page; clearing or reloading the page removes that page's chat. The app can optionally send a small, reviewed aggregate summary but does not read source files for chat.
+The initial download obtains model weights from Ollama's remote registry. This is not an upload of your cohort data. Inference uses the local Ollama API. Chat remains in browser memory for the current page; clearing or reloading the page removes that page's chat. The app can optionally send a bounded, reviewed scientific evidence summary (including explicitly selected gene identifiers), constructed from calculated results already in memory. No raw source files are read for chat.
 
 ### Technical and scientific limits
 

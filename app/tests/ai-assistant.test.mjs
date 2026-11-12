@@ -87,7 +87,8 @@ test('aggregates never transmit source filenames, patient IDs, or unknown user f
 test('chat remains current-page-only, never accesses source files or stores credentials',async()=>{
   const code=(await src('ai-runtime.js'))+'\n'+(await src('ai-assistant.js'));
   assert.doesNotMatch(code,/localStorage|sessionStorage|indexedDB|document\.cookie|readAsArrayBuffer|readAsText|FormData\(|child_process|window\.open\(/i);
-  assert.match(code,/safeAiContext\(summary\)/);
+  assert.match(code,/createAiEvidence\(currentReports/);
+  assert.match(code,/renderAiMarkdown\(text\)/);
   assert.match(code,/root\.querySelector/);
   assert.match(code,/installedOllamaModels\(/);
 });

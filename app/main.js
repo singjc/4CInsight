@@ -5218,6 +5218,11 @@ function render() {
     pathways: Boolean(state.pathwayResult),
     pathwayCount: state.pathwayResult?.results?.length || 0,
     pathwayEvidence: state.pathwayResult?.source === 'exploratory' ? 'exploratory' : 'unverified',
+  },evidence:{
+    pathway: state.pathwayResult,
+    joint: state.i2StructureResult,
+    compare: state.compareResult,
+    selectedPathwayKey: state.pathwaySelectedKey,
   }})
   document.querySelectorAll('[data-open-results]').forEach(button => button.addEventListener('click', () => { state.resultsMode = 'overview'; state.tab = 'results'; render() }))
   if (state.tab === 'history') {
