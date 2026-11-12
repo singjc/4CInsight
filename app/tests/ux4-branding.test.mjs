@@ -9,7 +9,7 @@ const css = await readFile(new URL('styles.css', app), 'utf8')
 test('served app uses the existing 4C Insight SVG logo as its only visible branding', async () => {
   const logo = await readFile(new URL('assets/4c-insight-logo.svg', app), 'utf8')
   assert.match(logo, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)
-  assert.match(html, /<h1 class="brand-heading"><img class="brand-logo" src="\.\/assets\/4c-insight-logo\.svg" alt="4C Insight"/)
+  assert.match(html, /<h1 class="brand-heading"><a class="brand-link" href="https:\/\/4c\.stanford\.edu\/"[^>]*><img class="brand-logo" src="\.\/assets\/4c-insight-logo\.svg" alt="4C Insight"/)
   assert.doesNotMatch(html, /class="brand-mark"|<h1>4C Insight<\/h1>|Local-first multi-omics cohort analysis<\/p>/)
   assert.match(css, /\.brand-logo\s*\{/)
   assert.match(css, /\.brand-logo\s*\{[^}]*object-fit:\s*contain/s)
